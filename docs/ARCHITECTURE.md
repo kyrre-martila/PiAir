@@ -97,3 +97,6 @@ are reported as advertisements, not verified playback support. Config parsing
 errors omit source snippets. Discovery errors identify multicast/interface access
 as a diagnostic path. CLI strings from advertisements are debug-escaped to keep
 terminal control characters out of output.
+
+mdns-sd's optional logging and async features are disabled: synchronous browsing
+needs neither, and third-party trace messages must not expose raw TXT/key fields.

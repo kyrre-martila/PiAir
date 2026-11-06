@@ -9,7 +9,7 @@ repository = "https://github.com/kyrre-martila/PiAir"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-mdns-sd = "=0.13.11"
+mdns-sd = { version = "=0.13.11", default-features = false }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 tracing = "0.1"

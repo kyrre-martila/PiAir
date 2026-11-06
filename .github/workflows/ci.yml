@@ -22,4 +22,7 @@ jobs:
       - run: ${{ matrix.command }}
       - name: Record initial dependency lockfile
         if: matrix.command == 'cargo test'
-        run: cat Cargo.lock
+        run: |
+          cat Cargo.lock
+          cargo metadata --format-version 1 > /tmp/piair-metadata.json
+          python3 -c 'import json; data=json.load(open("/tmp/piair-metadata.json")); print("DEPENDENCY_LICENSES"); print("\n".join(sorted(p["name"]+" "+p["version"]+" "+str(p["license"]) for p in data["packages"]))); print("END_DEPENDENCY_LICENSES")'
