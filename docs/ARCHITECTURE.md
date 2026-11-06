@@ -84,8 +84,9 @@ must be measured rather than assumed.
 Use established crates for standard functions: clap (CLI), serde/toml (config),
 tracing/tracing-subscriber (structured diagnostics), mdns-sd (DNS-SD), anyhow
 (errors). The application forbids unsafe code; dependencies may contain it.
-Dependency licenses and transitive notices must be reviewed against the resolved
-Cargo.lock before release; the original repository LICENSE is preserved. Current
+Dependency metadata screening is recorded in DEPENDENCIES.md against the resolved
+Cargo.lock; review redistribution notices before release. The original repository
+LICENSE is preserved. Current
 direct crates use permissive licenses (MIT/Apache-2.0; mdns-sd Apache-2.0 or MIT).
 No cryptographic or AirPlay sender dependency is needed yet. Future crypto must
 use reviewed standard primitives, not handwritten cryptography.
