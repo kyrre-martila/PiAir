@@ -1,0 +1,22 @@
+name: Rust
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        command:
+          - cargo fmt --check
+          - cargo clippy --all-targets -- -D warnings
+          - cargo test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: ${{ matrix.command }}

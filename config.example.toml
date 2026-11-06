@@ -1,0 +1,7 @@
+# Used only by `piair devices`; bounded to 1..60 seconds, plus up to 1s shutdown.
+discovery_timeout_secs = 5
+
+# Explicit approval only; copy a canonical device ID from `piair devices`.
+# Example: ["device:aabbccddeeff"]. Advertised IDs are not authenticated identities.
+# Empty means deny every future connection. No receiver is selected by discovery.
+receiver_allowlist = []
