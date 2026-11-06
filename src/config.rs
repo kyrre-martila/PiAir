@@ -44,7 +44,9 @@ impl Config {
     pub fn parse(text: &str) -> Result<Self> {
         // Do not echo TOML parser errors: they can include source values.
         let config: Self = toml::from_str(text).map_err(|_| {
-            anyhow::anyhow!("invalid TOML or unknown/wrongly typed setting; compare config.example.toml")
+            anyhow::anyhow!(
+                "invalid TOML or unknown/wrongly typed setting; compare config.example.toml"
+            )
         })?;
         config.validate()?;
         Ok(config)
@@ -111,7 +113,8 @@ pub fn load(cli: Option<PathBuf>) -> Result<Loaded> {
     )?;
     let (config, source) = match fs::read_to_string(&path) {
         Ok(text) => (
-            Config::parse(&text).with_context(|| format!("check configuration {}", path.display()))?,
+            Config::parse(&text)
+                .with_context(|| format!("check configuration {}", path.display()))?,
             "file",
         ),
         Err(error) if error.kind() == ErrorKind::NotFound && !explicit => {
@@ -120,12 +123,19 @@ pub fn load(cli: Option<PathBuf>) -> Result<Loaded> {
         }
         Err(error) => {
             return Err(error).with_context(|| {
-                format!("cannot read {}; check path and read permissions", path.display())
+                format!(
+                    "cannot read {}; check path and read permissions",
+                    path.display()
+                )
             });
         }
     };
     tracing::debug!(source, "configuration validated");
-    Ok(Loaded { config, path, source })
+    Ok(Loaded {
+        config,
+        path,
+        source,
+    })
 }
 
 #[cfg(test)]
@@ -170,10 +180,22 @@ mod tests {
     #[test]
     fn path_precedence_without_environment_mutation() {
         let p = |s: &str| Some(PathBuf::from(s));
-        assert_eq!(resolve(p("cli"), p("env"), None, None).unwrap(), (PathBuf::from("cli"), true));
-        assert_eq!(resolve(None, p("env"), None, None).unwrap(), (PathBuf::from("env"), true));
-        assert_eq!(resolve(None, None, p("/xdg"), p("/home/u")).unwrap().0, PathBuf::from("/xdg/piair/config.toml"));
-        assert_eq!(resolve(None, None, None, p("/home/u")).unwrap().0, PathBuf::from("/home/u/.config/piair/config.toml"));
+        assert_eq!(
+            resolve(p("cli"), p("env"), None, None).unwrap(),
+            (PathBuf::from("cli"), true)
+        );
+        assert_eq!(
+            resolve(None, p("env"), None, None).unwrap(),
+            (PathBuf::from("env"), true)
+        );
+        assert_eq!(
+            resolve(None, None, p("/xdg"), p("/home/u")).unwrap().0,
+            PathBuf::from("/xdg/piair/config.toml")
+        );
+        assert_eq!(
+            resolve(None, None, None, p("/home/u")).unwrap().0,
+            PathBuf::from("/home/u/.config/piair/config.toml")
+        );
         assert!(resolve(None, None, p("relative"), p("/home/u")).is_err());
         assert!(resolve(None, None, None, None).is_err());
     }

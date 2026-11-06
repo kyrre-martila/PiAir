@@ -12,8 +12,8 @@ use std::{
 const AIRPLAY: &str = "_airplay._tcp.local.";
 const RAOP: &str = "_raop._tcp.local.";
 const CAPABILITIES: &[&str] = &[
-    "features", "ft", "model", "am", "srcvers", "osvers", "vv", "cn", "ch", "sr", "ss",
-    "et", "tp", "sf", "flags", "pw",
+    "features", "ft", "model", "am", "srcvers", "osvers", "vv", "cn", "ch", "sr", "ss", "et", "tp",
+    "sf", "flags", "pw",
 ];
 
 #[derive(Clone, Debug)]
@@ -36,7 +36,9 @@ pub struct Receiver {
 
 /// Keep only bounded, printable UTF-8 values for recognized fields. Unknown TXT
 /// (including public keys) is neither retained nor logged. DNS keys ignore case.
-fn parse_txt<'a>(fields: impl IntoIterator<Item = (&'a str, Option<&'a [u8]>)>) -> BTreeMap<String, String> {
+fn parse_txt<'a>(
+    fields: impl IntoIterator<Item = (&'a str, Option<&'a [u8]>)>,
+) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
     for (key, bytes) in fields {
         let key = key.to_ascii_lowercase();
@@ -85,7 +87,9 @@ impl Advertisement {
         if instance.is_empty() || instance.chars().any(char::is_control) {
             return None;
         }
-        let raop_parts = (service_type == RAOP).then(|| instance.split_once('@')).flatten();
+        let raop_parts = (service_type == RAOP)
+            .then(|| instance.split_once('@'))
+            .flatten();
         let instance_id = raop_parts.and_then(|(prefix, _)| device_id(prefix));
         let txt_id = txt.remove("deviceid").and_then(|value| device_id(&value));
         // Conflicting advertised identities are not reliable enough to merge.
@@ -93,7 +97,10 @@ impl Advertisement {
             (Some(a), Some(b)) if a != b => None,
             (a, b) => a.or(b),
         };
-        let name = raop_parts.map(|(_, name)| name).filter(|name| !name.is_empty()).unwrap_or(instance);
+        let name = raop_parts
+            .map(|(_, name)| name)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(instance);
         Some(Self {
             fullname: fullname.to_string(),
             service_type,
@@ -111,7 +118,8 @@ struct Records(BTreeMap<String, Advertisement>);
 
 impl Records {
     fn upsert(&mut self, advertisement: Advertisement) {
-        self.0.insert(advertisement.fullname.to_ascii_lowercase(), advertisement);
+        self.0
+            .insert(advertisement.fullname.to_ascii_lowercase(), advertisement);
     }
 
     fn remove(&mut self, fullname: &str) {
@@ -123,7 +131,10 @@ impl Records {
         for (fullname, advertisement) in self.0 {
             // Fallback ID is service-scoped and cannot be allowlisted. Never merge
             // by display name, hostname, or IP address (which can be shared).
-            let id = advertisement.id.clone().unwrap_or_else(|| format!("service:{fullname}"));
+            let id = advertisement
+                .id
+                .clone()
+                .unwrap_or_else(|| format!("service:{fullname}"));
             let receiver = receivers.entry(id.clone()).or_insert_with(|| Receiver {
                 id,
                 name: advertisement.name.clone(),
@@ -140,7 +151,10 @@ fn collect(daemon: &ServiceDaemon, timeout: Duration) -> Result<Vec<Receiver>> {
     let channels = [daemon.browse(AIRPLAY)?, daemon.browse(RAOP)?];
     let deadline = Instant::now() + timeout;
     let mut records = Records::default();
-    tracing::debug!(timeout_secs = timeout.as_secs(), "passive mDNS discovery started");
+    tracing::debug!(
+        timeout_secs = timeout.as_secs(),
+        "passive mDNS discovery started"
+    );
     while Instant::now() < deadline {
         // Limit each batch so continuous multicast traffic cannot extend timeout.
         for channel in &channels {
@@ -166,24 +180,36 @@ fn collect(daemon: &ServiceDaemon, timeout: Duration) -> Result<Vec<Receiver>> {
                 return Err(error).context("mDNS failed; check multicast support and interfaces");
             }
         }
-        thread::sleep(Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())));
+        thread::sleep(
+            Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
     let receivers = records.receivers();
-    tracing::debug!(receivers = receivers.len(), "passive mDNS discovery finished");
+    tracing::debug!(
+        receivers = receivers.len(),
+        "passive mDNS discovery finished"
+    );
     Ok(receivers)
 }
 
 pub fn discover(timeout_secs: u64) -> Result<Vec<Receiver>> {
-    let daemon = ServiceDaemon::new().context("cannot start mDNS; check UDP 5353 and multicast access")?;
+    let daemon =
+        ServiceDaemon::new().context("cannot start mDNS; check UDP 5353 and multicast access")?;
     let result = collect(&daemon, Duration::from_secs(timeout_secs));
     // Always request shutdown, including after a partially successful browse setup.
     let shutdown = (|| -> Result<()> {
         for service in [AIRPLAY, RAOP] {
             if daemon.stop_browse(service).is_err() {
-                tracing::debug!(service, "could not stop browse separately; shutting down daemon");
+                tracing::debug!(
+                    service,
+                    "could not stop browse separately; shutting down daemon"
+                );
             }
         }
-        daemon.shutdown()?.recv_timeout(Duration::from_secs(1)).context("mDNS shutdown acknowledgment timed out")?;
+        daemon
+            .shutdown()?
+            .recv_timeout(Duration::from_secs(1))
+            .context("mDNS shutdown acknowledgment timed out")?;
         Ok(())
     })();
     match (result, shutdown) {
@@ -198,8 +224,18 @@ mod tests {
     use super::*;
 
     fn ad(instance: &str, service: &str, id: Option<&str>) -> Advertisement {
-        let txt = id.map(|id| ("deviceid".to_string(), id.to_string())).into_iter().collect();
-        Advertisement::new(&format!("{instance}.{service}"), service, 7000, ["192.0.2.1".parse().unwrap()].into(), txt).unwrap()
+        let txt = id
+            .map(|id| ("deviceid".to_string(), id.to_string()))
+            .into_iter()
+            .collect();
+        Advertisement::new(
+            &format!("{instance}.{service}"),
+            service,
+            7000,
+            ["192.0.2.1".parse().unwrap()].into(),
+            txt,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -254,14 +290,37 @@ mod tests {
     #[test]
     fn malformed_advertisements_and_ids() {
         let ips = ["192.0.2.1".parse().unwrap()].into();
-        assert!(Advertisement::new("._airplay._tcp.local.", AIRPLAY, 1, ips, BTreeMap::new()).is_none());
-        assert!(Advertisement::new("Room._http._tcp.local.", "_http._tcp.local.", 80, BTreeSet::new(), BTreeMap::new()).is_none());
-        for id in ["", "bad", "a:b:c:d:e:f", "AA-BB-CC-DD-EE-FF", "000000000000", "ffffffffffff"] {
+        assert!(
+            Advertisement::new("._airplay._tcp.local.", AIRPLAY, 1, ips, BTreeMap::new()).is_none()
+        );
+        assert!(Advertisement::new(
+            "Room._http._tcp.local.",
+            "_http._tcp.local.",
+            80,
+            BTreeSet::new(),
+            BTreeMap::new()
+        )
+        .is_none());
+        for id in [
+            "",
+            "bad",
+            "a:b:c:d:e:f",
+            "AA-BB-CC-DD-EE-FF",
+            "000000000000",
+            "ffffffffffff",
+        ] {
             assert!(device_id(id).is_none());
         }
         assert!(ad("Room", AIRPLAY, Some("bad")).id.is_none());
         let mut advertisement = ad("Room", AIRPLAY, Some("aabbccddeeff"));
         advertisement.port = 0;
-        assert!(Advertisement::new(&advertisement.fullname, AIRPLAY, 0, advertisement.addresses, BTreeMap::new()).is_none());
+        assert!(Advertisement::new(
+            &advertisement.fullname,
+            AIRPLAY,
+            0,
+            advertisement.addresses,
+            BTreeMap::new()
+        )
+        .is_none());
     }
 }

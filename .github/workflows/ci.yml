@@ -15,8 +15,11 @@ jobs:
           - cargo clippy --all-targets -- -D warnings
           - cargo test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - run: ${{ matrix.command }}
+      - name: Record initial dependency lockfile
+        if: matrix.command == 'cargo test'
+        run: cat Cargo.lock

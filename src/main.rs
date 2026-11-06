@@ -14,9 +14,16 @@ fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Status => {
             println!("PiAir {}: local CLI ready", env!("CARGO_PKG_VERSION"));
-            println!("Configuration: {} ({})", loaded.path.display(), loaded.source);
+            println!(
+                "Configuration: {} ({})",
+                loaded.path.display(),
+                loaded.source
+            );
             println!("Validation: valid");
-            println!("Allowlisted receivers: {}", loaded.config.receiver_allowlist.len());
+            println!(
+                "Allowlisted receivers: {}",
+                loaded.config.receiver_allowlist.len()
+            );
             println!("Audio capture and AirPlay playback: not implemented");
             println!("No service or receiver status was queried.");
         }

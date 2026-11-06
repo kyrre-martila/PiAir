@@ -2,7 +2,10 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(version, about = "PiAir: configuration and passive mDNS receiver discovery")]
+#[command(
+    version,
+    about = "PiAir: configuration and passive mDNS receiver discovery"
+)]
 pub struct Cli {
     /// Configuration file (overrides PIAIR_CONFIG and XDG defaults).
     #[arg(long, global = true)]
