@@ -285,8 +285,12 @@ and enrollment persistence, without an instant background revocation watcher.
 ## Collecting safe hardware pairing diagnostics
 
 A reported Apple TV 4K (AppleTV6,2, tvOS 26.6.1) displayed a PIN but
-failed the decrypted M6 field allowlist. The unexpected type is not yet known;
-these diagnostics do not establish a compatibility fix.
+failed the decrypted M6 field allowlist with type 17 (`0x11`).
+[The type-17 evidence ledger](APPLE_TV_M6_TYPE17.md) records the research,
+metadata hypothesis and missing schema evidence. Only successfully decrypted
+pair-setup M6 now tolerates optional opaque type 17, with all required identity
+and signature checks preserved. This is an evidence-informed compatibility
+change requiring real Apple TV validation, not a verified schema or proven fix.
 
 1. If an earlier attempt reached M5/M6 or reported possible partial enrollment,
    stop PIN attempts first. `selected` and `approved` with `paired=false` means
@@ -301,8 +305,10 @@ these diagnostics do not establish a compatibility fix.
    verified, selected, allowlisted receiver, from an interactive terminal. Enter
    the PIN only at the hidden prompt. No debug/trace logging or packet capture is
    needed. Do not automate retries or run playback as a diagnostic.
-3. Copy only the command failure's stage/context chain and unexpected TLV type
-   numbers, plus PiAir commit, receiver model and firmware. For example:
+3. Copy only the command failure's stage/context chain, unexpected TLV type
+   numbers, plus PiAir commit, receiver model and firmware. Type-17 metadata is
+   ignored only inside AEAD-decrypted M6 and its contents and lengths are not
+   logged. For example:
    `pair-setup M6 decrypted payload: unexpected pairing TLV types: [19]`
    is an illustrative diagnostic, not the observed field or permission to accept it.
    Outer TLV failures, decryption, SRP proof and signature verification have

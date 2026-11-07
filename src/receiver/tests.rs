@@ -82,6 +82,15 @@ enum Fault {
     Fields,
     OuterFields,
     M2Fields,
+    Type17(usize),
+    Type17Signature,
+    Type17Tag,
+    Type17Fields,
+    Type17Missing(u8),
+    M2Type17,
+    MalformedType17,
+    OuterType17,
+    Missing(u8),
 }
 fn setup_mock(socket: TcpStream, fault: Fault) {
     setup_mock_profile(socket, fault, Method::PinDisplay, "1234", PI)
@@ -112,8 +121,13 @@ fn setup_mock_profile(
     if method == Method::SetupCode {
         fields.push((FLAGS, &[0, 0, 0, 0]));
     }
-    if matches!(fault, Fault::M2Fields) {
-        fields.push((0, b"synthetic-secret-marker"));
+    if matches!(fault, Fault::M2Fields | Fault::M2Type17) {
+        let kind = if matches!(fault, Fault::M2Type17) {
+            17
+        } else {
+            0
+        };
+        fields.push((kind, b"synthetic-secret-marker"));
         reply(&mut socket, 1 + offset, &fields);
         return;
     }
@@ -202,7 +216,7 @@ fn setup_mock_profile(
     };
     let info = [x.as_ref(), signature_id.as_bytes(), &public].concat();
     let mut signature = signing.sign(&info).to_bytes();
-    if matches!(fault, Fault::Signature) {
+    if matches!(fault, Fault::Signature | Fault::Type17Signature) {
         signature[0] ^= 1;
     }
     let mut fields = vec![
@@ -210,17 +224,39 @@ fn setup_mock_profile(
         (PUBLIC_KEY, public.as_slice()),
         (SIGNATURE, signature.as_slice()),
     ];
-    if matches!(fault, Fault::Fields) {
+    if matches!(fault, Fault::Fields | Fault::Type17Fields) {
         fields.push((0, b"synthetic-secret-marker"));
     }
-    let sub = encode(&fields);
+    // Opaque synthetic bytes, not an asserted Apple metadata schema.
+    let extension_length = match fault {
+        Fault::Type17(length) => length,
+        Fault::Type17Signature
+        | Fault::Type17Tag
+        | Fault::Type17Fields
+        | Fault::Type17Missing(_) => 32,
+        _ => 0,
+    };
+    let extension = vec![0xa5; extension_length];
+    if extension_length > 0 {
+        fields.push((17, &extension));
+    }
+    if let Fault::Missing(kind) | Fault::Type17Missing(kind) = fault {
+        fields.retain(|(field, _)| *field != kind);
+    }
+    let mut sub = encode(&fields);
+    if matches!(fault, Fault::MalformedType17) {
+        sub.extend_from_slice(&[17, 2, 0xa5]); // truncated value
+    }
     let mut encrypted = seal(&encryption, &nonce(b"PS-Msg06"), &sub, &[]).unwrap();
-    if matches!(fault, Fault::Tag) {
+    if matches!(fault, Fault::Tag | Fault::Type17Tag) {
         encrypted[0] ^= 1;
     }
     let mut outer = vec![(STATE, &[6][..]), (ENCRYPTED, encrypted.as_slice())];
     if matches!(fault, Fault::OuterFields) {
         outer.push((19, b"synthetic-secret-marker"));
+    }
+    if matches!(fault, Fault::OuterType17) {
+        outer.push((17, b"synthetic-secret-marker"));
     }
     reply(&mut socket, 3 + offset, &outer);
     // Setup consumes the wire on error: no retry, cleanup, or playback request.
@@ -256,6 +292,54 @@ fn setup_failures_identify_stage_and_preserve_partial_enrollment_warning() {
         (Fault::Tag, "pair-setup M6 decryption", true),
         (Fault::Fields, "pair-setup M6 decrypted payload", true),
         (
+            Fault::Type17Signature,
+            "pair-setup M6 signature verification",
+            true,
+        ),
+        (Fault::Type17Tag, "pair-setup M6 decryption", true),
+        (
+            Fault::Type17Fields,
+            "unexpected pairing TLV types: [0]",
+            true,
+        ),
+        (
+            Fault::Type17Missing(IDENTIFIER),
+            "required pairing field absent",
+            true,
+        ),
+        (
+            Fault::Type17Missing(PUBLIC_KEY),
+            "required pairing field absent",
+            true,
+        ),
+        (
+            Fault::Type17Missing(SIGNATURE),
+            "required pairing field absent",
+            true,
+        ),
+        (Fault::M2Type17, "/pair-setup M2 outer TLV exchange", false),
+        (Fault::MalformedType17, "truncated or empty TLV", true),
+        (
+            Fault::Missing(IDENTIFIER),
+            "required pairing field absent",
+            true,
+        ),
+        (
+            Fault::Missing(PUBLIC_KEY),
+            "required pairing field absent",
+            true,
+        ),
+        (
+            Fault::Missing(SIGNATURE),
+            "required pairing field absent",
+            true,
+        ),
+        (
+            Fault::OuterType17,
+            "/pair-setup M6 outer TLV exchange",
+            true,
+        ),
+        (
             Fault::OuterFields,
             "/pair-setup M6 outer TLV exchange",
             true,
@@ -267,9 +351,15 @@ fn setup_failures_identify_stage_and_preserve_partial_enrollment_warning() {
         } else {
             "1234"
         };
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+        let store = store::Store::new(&config).unwrap();
+        let selected = selection(7000);
+        store.select(&selected).unwrap();
         let error = pairing::setup(wire, ID, Some(PI), || Ok(Zeroizing::new(pin.into())))
-            .err()
-            .expect("setup must fail closed");
+            .and_then(|c| save_verified_enrollment(&config, &selected, &c))
+            .expect_err("setup must fail closed");
         let diagnostic = format!("{error:#}");
         assert!(diagnostic.contains(stage), "missing fixed stage context");
         assert_eq!(diagnostic.contains("enrollment may be partial"), partial);
@@ -279,6 +369,11 @@ fn setup_failures_identify_stage_and_preserve_partial_enrollment_warning() {
         if matches!(fault, Fault::OuterFields) {
             assert!(diagnostic.ends_with("unexpected pairing TLV types: [19]"));
         }
+        assert!(!diagnostic.contains("semantics unverified"));
+        assert!(!diagnostic.contains("length="));
+        if matches!(fault, Fault::OuterType17) {
+            assert!(diagnostic.ends_with("unexpected pairing TLV types: [17]"));
+        }
         // Assertions intentionally never print the diagnostic or fixture values.
         for forbidden in [pin, PI, ID, "CHANGED-ID", "synthetic-secret-marker"] {
             assert!(
@@ -286,9 +381,35 @@ fn setup_failures_identify_stage_and_preserve_partial_enrollment_warning() {
                 "diagnostic exposed fixture data"
             );
         }
+        assert!(store.credential(ID).unwrap().is_none());
         server.join().unwrap();
     }
 }
+#[test]
+fn opaque_type17_enrolls_only_after_valid_signature_including_fragments() {
+    for length in [1, 255, 256, 510] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+        let store = store::Store::new(&config).unwrap();
+        let selected = selection(7000);
+        store.select(&selected).unwrap();
+        let (wire, server) = local_mock(move |s| setup_mock(s, Fault::Type17(length)));
+        let c = pairing::setup(wire, ID, Some(PI), || Ok(Zeroizing::new("1234".into()))).unwrap();
+        assert!(store.credential(ID).unwrap().is_none());
+        assert_eq!(c.receiver_id, ID);
+        assert_eq!(c.pairing_id, PI);
+        assert_eq!(c.receiver_key, credential().receiver_key);
+        c.validate(ID).unwrap();
+        save_verified_enrollment(&config, &selected, &c).unwrap();
+        let saved = store.credential(ID).unwrap().unwrap();
+        assert_eq!(saved.pairing_id, c.pairing_id);
+        assert_eq!(saved.receiver_key, c.receiver_key);
+        assert!(store.selection().unwrap() == Some(selected));
+        server.join().unwrap();
+    }
+}
+
 fn verify_mock(socket: TcpStream, fault: Fault) {
     verify_mock_with_id(socket, fault, PI)
 }
@@ -344,6 +465,9 @@ fn verify_mock_core(
     if matches!(fault, Fault::Fields) {
         fields.push((0, &[0]));
     }
+    if matches!(fault, Fault::Type17(_)) {
+        fields.push((17, b"synthetic-secret-marker"));
+    }
     let sub = encode(&fields);
     let mut encrypted = seal(&encryption, &nonce(b"PV-Msg02"), &sub, &[]).unwrap();
     if matches!(fault, Fault::Tag) {
@@ -360,7 +484,7 @@ fn verify_mock_core(
     );
     if matches!(
         fault,
-        Fault::Identity | Fault::Signature | Fault::Tag | Fault::Fields
+        Fault::Identity | Fault::Signature | Fault::Tag | Fault::Fields | Fault::Type17(_)
     ) {
         return None;
     }
@@ -404,12 +528,18 @@ fn pair_verify_success_and_failure_never_yield_unverified_keys() {
         Fault::Signature,
         Fault::Tag,
         Fault::State,
+        Fault::Type17(1),
     ] {
         let (wire, server) = local_mock(move |s| verify_mock(s, fault));
-        assert_eq!(
-            pairing::verify(wire, &credential()).is_ok(),
-            matches!(fault, Fault::None)
-        );
+        let result = pairing::verify(wire, &credential());
+        assert_eq!(result.is_ok(), matches!(fault, Fault::None));
+        if matches!(fault, Fault::Type17(_)) {
+            let diagnostic = format!("{:#}", result.err().unwrap());
+            assert!(diagnostic.contains("pair-verify M2 decrypted payload"));
+            assert!(diagnostic.ends_with("unexpected pairing TLV types: [17]"));
+            assert!(!diagnostic.contains("length="));
+            assert!(!diagnostic.contains("synthetic-secret-marker"));
+        }
         server.join().unwrap();
     }
 }
