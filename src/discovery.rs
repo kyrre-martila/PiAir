@@ -12,8 +12,25 @@ use std::{
 const AIRPLAY: &str = "_airplay._tcp.local.";
 const RAOP: &str = "_raop._tcp.local.";
 const CAPABILITIES: &[&str] = &[
-    "features", "ft", "model", "am", "srcvers", "osvers", "vv", "cn", "ch", "sr", "ss", "et", "tp",
-    "sf", "flags", "pw",
+    "features",
+    "ft",
+    "model",
+    "am",
+    "srcvers",
+    "osvers",
+    "vv",
+    "cn",
+    "ch",
+    "sr",
+    "ss",
+    "et",
+    "tp",
+    "sf",
+    "flags",
+    "pw",
+    "pi",
+    "protovers",
+    "acl",
 ];
 
 #[derive(Clone, Debug)]
@@ -45,18 +62,70 @@ fn parse_txt<'a>(
         if key != "deviceid" && !CAPABILITIES.contains(&key.as_str()) {
             continue;
         }
-        let Some(value) = bytes.and_then(|bytes| std::str::from_utf8(bytes).ok()) else {
+        let value = bytes
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .filter(|v| !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control));
+        let Some(value) = value else {
+            if ["deviceid", "pi", "features", "ft"].contains(&key.as_str()) {
+                values.insert("deviceid".into(), "invalid".into());
+            }
             continue;
         };
-        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
-            continue;
+        if values.get(&key).is_some_and(|old| old != value) {
+            values.insert("deviceid".into(), "conflicting".into());
+            values.insert(key, "conflicting".into());
+        } else {
+            values.entry(key).or_insert_with(|| value.to_string());
         }
-        values.entry(key).or_insert_with(|| value.to_string());
     }
     values
 }
 
 impl Advertisement {
+    #[cfg(test)]
+    pub(crate) fn test_from_info(info: &ServiceInfo) -> Self {
+        Self::from_info(info).unwrap()
+    }
+
+    pub fn matches_id(&self, id: &str) -> bool {
+        self.id.as_deref() == Some(id)
+    }
+    /// DNS-SD encodes low then optional high 32-bit hex words. No truncation.
+    pub fn features(&self) -> Option<u64> {
+        if let (Some(a), Some(b)) = (
+            self.capabilities.get("features"),
+            self.capabilities.get("ft"),
+        ) {
+            if a != b {
+                return None;
+            }
+        }
+        let value = self
+            .capabilities
+            .get("features")
+            .or_else(|| self.capabilities.get("ft"))?;
+        let mut words = value.split(',');
+        let word = |s: &str| {
+            let s = s
+                .strip_prefix("0x")
+                .or_else(|| s.strip_prefix("0X"))
+                .unwrap_or(s);
+            if s.is_empty() || s.len() > 8 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            u32::from_str_radix(s, 16).ok()
+        };
+        let low = word(words.next()?)? as u64;
+        let high = match words.next() {
+            Some(s) => word(s)?,
+            None => 0,
+        };
+        if words.next().is_some() {
+            return None;
+        }
+        Some(low | (high as u64) << 32)
+    }
+
     fn from_info(info: &ServiceInfo) -> Option<Self> {
         let txt = parse_txt(info.get_properties().iter().map(|p| (p.key(), p.val())));
         Self::new(
@@ -91,9 +160,12 @@ impl Advertisement {
             .then(|| instance.split_once('@'))
             .flatten();
         let instance_id = raop_parts.and_then(|(prefix, _)| device_id(prefix));
-        let txt_id = txt.remove("deviceid").and_then(|value| device_id(&value));
+        let raw_id = txt.remove("deviceid");
+        let malformed_id = raw_id.as_ref().is_some_and(|v| device_id(v).is_none());
+        let txt_id = raw_id.and_then(|value| device_id(&value));
         // Conflicting advertised identities are not reliable enough to merge.
         let id = match (instance_id, txt_id) {
+            _ if malformed_id => None,
             (Some(a), Some(b)) if a != b => None,
             (a, b) => a.or(b),
         };
@@ -322,5 +394,38 @@ mod tests {
             BTreeMap::new()
         )
         .is_none());
+    }
+    #[test]
+    fn feature_words_and_conflicting_txt_fail_closed() {
+        let mut advertisement = ad("Room", AIRPLAY, Some("aabbccddeeff"));
+        for (text, expected) in [
+            ("0x0,0x4000", Some(1u64 << 46)),
+            ("0x1", Some(1)),
+            ("0x100000000", None),
+            ("0x1,0x2,0x3", None),
+            ("0x1,", None),
+            ("bad-value", None),
+        ] {
+            advertisement
+                .capabilities
+                .insert("features".into(), text.into());
+            assert_eq!(advertisement.features(), expected);
+        }
+        let txt = parse_txt([
+            ("deviceid", Some(&b"aabbccddeeff"[..])),
+            ("DEVICEID", Some(&b"112233445566"[..])),
+        ]);
+        let conflict = Advertisement::new(
+            "Room._airplay._tcp.local.",
+            AIRPLAY,
+            7000,
+            ["127.0.0.1".parse().unwrap()].into(),
+            txt,
+        )
+        .unwrap();
+        assert!(conflict.id.is_none());
+        assert!(ad("AABBCCDDEEFF@Room", RAOP, Some("malformed"))
+            .id
+            .is_none());
     }
 }

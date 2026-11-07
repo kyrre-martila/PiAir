@@ -1,11 +1,11 @@
 # PiAir
 
 A lightweight Rust AirPlay 2 transmitter project for Raspberry Pi OS 64-bit
-(Debian ARM64). This milestone implements ALSA capture, stereo RMS monitoring,
-activity detection and assisted noise-floor calibration. **AirPlay playback,
-pairing and receiver connections are not implemented.** Audio commands work
-without a receiver and never perform receiver discovery or network operations.
-Existing Autostream and OwnTone services are never modified.
+(Debian ARM64). Implements ALSA capture, activity monitoring/calibration, passive
+receiver discovery and a limited persistent PIN pairing/authentication foundation.
+**AirPlay audio playback is not implemented. Apple TV/HomePod compatibility is
+unverified.** Audio tools never discover or contact receivers. Existing Autostream
+and OwnTone services are never modified.
 
 ## Build on Raspberry Pi OS ARM64
 
@@ -151,15 +151,43 @@ using `default` does not guarantee simultaneous access.
 
 ## Receiver discovery and approval
 
-`piair devices` retains PR #1's bounded passive multicast DNS snapshot of
-`_airplay._tcp` and `_raop._tcp`; it requires multicast UDP 5353. Advertisements
-are unverified and are merged only by matching canonical device IDs, never names
-or IPs. Unknown/conflicting IDs remain service-scoped and cannot be allowlisted.
-`receiver_allowlist = []` denies every future connection. Copy a verified
-`device:<12 lowercase hex digits>` only when approving a receiver. IDs are not
-cryptographic authentication. Future connections/reconnections must enforce this
-allowlist at the connection boundary. There is no receiver transport in this PR.
-`discovery_timeout_secs` remains 1..60 (default 5), plus bounded daemon shutdown.
+`piair devices` and `piair receivers` perform bounded passive mDNS discovery only.
+Stable IDs merge only by canonical device identity, never display name/IP/hostname.
+Advertisements are untrusted; feature flags indicate advertised capabilities, not
+verified compatibility. Unknown/conflicting IDs cannot be approved.
+
+To approve a physically verified receiver, explicitly add its exact
+`device:<12 lowercase hex digits>` to `receiver_allowlist` in your config.
+The empty list denies every direct receiver connection. Then:
+
+```sh
+piair --config config.toml select device:aabbccddeeff
+piair --config config.toml pair device:aabbccddeeff
+piair --config config.toml authenticate device:aabbccddeeff
+piair --config config.toml unpair device:aabbccddeeff
+```
+
+IDs above are examples. Selection pins identity/endpoints and never connects.
+Pair/authenticate require an interactive terminal and typing the exact ID; pairing
+requests a receiver PIN and reads it without echo. Connections recheck current
+approval and pinned discovery evidence, with no retries, redirects or fallback.
+No Samsung or other unapproved receiver is contacted. Read-only/config/audio
+commands never open a receiver session.
+
+Supported profile: persistent HAP method 0, SRP-6a/SHA-512, verified Ed25519 identity
+exchange, and X25519 pair-verify. Requires advertised HK access-control support
+and a signed identity matching selected `pi`. **Transient-only HomePods, MFi and
+legacy authentication are unsupported**, and no Apple hardware/firmware is verified.
+Mock success is protocol-test evidence only. Authentication immediately closes its
+connection; no audio session or background reconnection exists.
+
+Credentials live separately in `receiver-state/` next to config, with owned 0700
+directory/0600 files on Linux. Filesystem permissions are the primary protection;
+there is **no encryption at rest**. Corrupt/permissive state fails closed.
+`unpair` removes local credentials without contacting the receiver; also remove
+its allowlist entry to revoke contact approval. Remote pairing cleanup may require
+receiver controls. See [protocol research, sequence diagrams, security boundaries,
+recovery and compatibility gaps](docs/PAIRING.md).
 
 ## Development
 
@@ -169,7 +197,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test --locked
 ```
 
-Tests use synthetic PCM and local files; no physical audio or receiver is needed.
+Tests use synthetic PCM, local files, published HAP vectors and loopback mock
+receivers; no physical audio or real receiver is needed.
 GitHub Actions remains **manual-only** via `workflow_dispatch`. See
 [architecture](docs/ARCHITECTURE.md), the normative
 [activity specification](docs/AUDIO_ACTIVITY.md), and
@@ -181,5 +210,5 @@ OS scheduling can delay capture and produce reported discontinuities.
 Original code is Apache-2.0; existing licenses are preserved. No source from
 Autostream, OwnTone or airplay2-rs is imported or translated. No AirPlay sender
 library, web UI, database, Docker dependency or systemd installation is included.
-Future milestones add explicitly approved sessions and actual playback teardown;
-this milestone exposes activity events without opening network connections.
+Future milestones add encrypted control I/O, verified hardware compatibility and
+audio sessions; current activity events never initiate network connections.
