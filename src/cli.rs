@@ -40,7 +40,12 @@ pub enum Command {
     /// Interactively request a receiver PIN and establish persistent credentials.
     Pair { receiver_id: String },
     /// Interactively verify stored credentials; close without an audio session.
-    Authenticate { receiver_id: String },
+    Authenticate {
+        receiver_id: String,
+        /// Explicitly test encrypted RTSP OPTIONS on the same verified socket.
+        #[arg(long)]
+        control_check: bool,
+    },
     /// Remove local credentials without contacting the receiver.
     Unpair { receiver_id: String },
     /// Validate or display effective configuration.

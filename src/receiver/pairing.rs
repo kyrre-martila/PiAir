@@ -152,8 +152,9 @@ fn setup_inner(
     })();
     result.context("enrollment may be partial on the receiver; inspect receiver-side controller records before any explicit retry")
 }
-/// Only M4 success yields session keys. This does not establish an audio session.
-pub fn verify(mut wire: Wire, credential: &Credential) -> Result<ControlKeys> {
+/// Only verified M4 success transfers the same live wire with directional keys.
+/// No socket/secret extraction API is provided; this is not an audio session.
+pub fn verify(mut wire: Wire, credential: &Credential) -> Result<Wire> {
     ensure!(
         wire.receiver_id() == credential.receiver_id,
         "credential is bound to a different authorized receiver"
@@ -162,7 +163,8 @@ pub fn verify(mut wire: Wire, credential: &Credential) -> Result<ControlKeys> {
         wire.method() != super::compatibility::Method::Transient,
         "transient method unsupported; no credential fallback"
     );
-    verify_inner(&mut wire, credential)
+    let keys = verify_inner(&mut wire, credential)?;
+    wire.secure(keys)
 }
 fn verify_inner(wire: &mut Wire, credential: &Credential) -> Result<ControlKeys> {
     credential.validate(&credential.receiver_id)?;

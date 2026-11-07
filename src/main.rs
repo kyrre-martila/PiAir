@@ -29,8 +29,11 @@ fn run_with_discovery(
             receiver_id,
             method,
         } => receiver::select(&loaded, &receiver_id, method)?,
-        Command::Pair { receiver_id } => receiver::pair(&loaded, &receiver_id, false)?,
-        Command::Authenticate { receiver_id } => receiver::pair(&loaded, &receiver_id, true)?,
+        Command::Pair { receiver_id } => receiver::pair(&loaded, &receiver_id, false, false)?,
+        Command::Authenticate {
+            receiver_id,
+            control_check,
+        } => receiver::pair(&loaded, &receiver_id, true, control_check)?,
         Command::Unpair { receiver_id } => receiver::unpair(&loaded, &receiver_id)?,
         Command::Audio { command } => audio::run(command, &loaded)?,
         Command::Status => {

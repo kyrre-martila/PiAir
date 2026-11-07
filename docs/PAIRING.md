@@ -6,6 +6,12 @@ Autostream, airplay2-rs or other projects is copied, translated or incorporated.
 Protocol documentation, public wire observations and numerical test vectors are
 used as evidence. **No real receiver has been contacted or validated by PiAir.**
 
+This document records the PR #3 baseline. PR #4 supersedes its statements that
+verify always drops the socket and that encrypted application I/O is absent:
+[the current session document](AIRPLAY_SESSION.md) describes live verified socket
+handoff, encrypted OPTIONS, revocation checks and the still-disabled media path.
+Default `authenticate` still closes after verification.
+
 ## Evidence ledger
 
 Research reviewed 2026-11-07. These evidence levels must not be conflated.

@@ -2,6 +2,7 @@
 pub(crate) mod compatibility;
 mod crypto;
 mod pairing;
+mod session;
 mod srp;
 mod store;
 #[cfg(test)]
@@ -41,7 +42,7 @@ fn valid_pairing_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b':')
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
     id: String,
@@ -145,7 +146,7 @@ pub fn unpair(loaded: &Loaded, id: &str) -> Result<()> {
     println!("Local credentials removed for {id}. Receiver-side pairing and allowlist unchanged; no connection made.");
     Ok(())
 }
-pub fn pair(loaded: &Loaded, id: &str, authenticate: bool) -> Result<()> {
+pub fn pair(loaded: &Loaded, id: &str, authenticate: bool, control_check: bool) -> Result<()> {
     exact_id(id)?;
     ensure!(loaded.config.allows(id), "receiver is not approved");
     ensure!(
@@ -177,11 +178,25 @@ pub fn pair(loaded: &Loaded, id: &str, authenticate: bool) -> Result<()> {
         );
     }
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
-    let wire = wire::Wire::connect(&loaded.path, id, &selected, &snapshot)?;
     if let Some(c) = existing {
-        let _keys = pairing::verify(wire, &c)?;
+        let mut session = session::Session::new();
+        session.start(
+            || wire::Wire::connect(&loaded.path, id, &selected, &snapshot),
+            &c,
+        )?;
+        if control_check {
+            if let Err(error) = session.check_control() {
+                tracing::debug!(state = ?session.state(), reason = session.failure(), "control diagnostic failed");
+                return Err(error);
+            }
+            println!(
+                "Authenticated encrypted OPTIONS completed; buffered audio remains unsupported."
+            );
+        }
+        session.shutdown();
         println!("Authenticated {id} using pair-verify; connection closed. No audio session.");
     } else {
+        let wire = wire::Wire::connect(&loaded.path, id, &selected, &snapshot)?;
         let credential = pairing::setup(wire, id, selected.advertised_pi.as_deref(), || {
             Ok(Zeroizing::new(rpassword::prompt_password(
                 if selected.method.pin_start() {

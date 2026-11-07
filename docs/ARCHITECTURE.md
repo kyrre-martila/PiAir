@@ -3,7 +3,7 @@
 PiAir is an original Apache-2.0 implementation targeting Raspberry Pi OS 64-bit
 (Debian aarch64), with development on standard Linux. This milestone implements
 configuration, passive DNS-SD discovery, capture-only audio activity tools,
-and a limited explicit receiver pairing/authentication foundation. AirPlay 2 playback does not work
+and an explicit receiver pairing/authentication and encrypted control foundation. AirPlay 2 playback does not work
 yet. No code is copied, translated, or imported from Autostream, OwnTone/OwnTone
 Mini, or airplay2-rs. Those projects may only inform publicly observable behavior
 and protocol understanding. No existing AirPlay sender is a dependency.
@@ -28,7 +28,10 @@ and protocol understanding. No existing AirPlay sender is a dependency.
   approval/selection revalidation before enrollment persistence.
 - `receiver/compatibility.rs`: pure requested-method decision over defensively
   parsed, untrusted capability evidence. Pairing evidence never proves playback.
-- `receiver/wire.rs`: single current-approval TCP boundary and bounded RTSP/HTTP framing.
+- `receiver/wire.rs`: single current-approval TCP boundary, bounded RTSP/HTTP framing,
+  encrypted continuation and per-operation approval/selection checks.
+- `receiver/session.rs`: persistent authenticated control owner, typed lifecycle,
+  terminal failures/idempotent cleanup and disabled buffered-audio gate.
 - `receiver/pairing.rs`: socket-owning persistent HAP setup/verify; displayed-PIN and
   existing-setup-code profiles, with no method fallback.
 - `receiver/srp.rs`, `crypto.rs`, `tlv.rs`: HAP protocol composition and bounded messages.
@@ -38,7 +41,9 @@ and protocol understanding. No existing AirPlay sender is a dependency.
 
 See [PAIRING.md](PAIRING.md) for protocol research, sequence diagrams, exact
 supported profile, identity rules, cryptographic/storage limitations and recovery.
-No audio session implementation is provided. Keep one `piair` executable and eventually
+See [AIRPLAY_SESSION.md](AIRPLAY_SESSION.md) for the implemented encrypted control
+profile and the precise media blockers. No complete audio session implementation
+is provided; READY/STREAMING remain unreachable. Keep one `piair` executable and eventually
 one systemd service. No web UI, database, Bluetooth, Spotify, media library, or
 Docker requirement belongs in this architecture.
 
@@ -81,12 +86,14 @@ MFi/legacy, Home-membership and password paths remain unsupported. Capability
 bit 51 is not misrepresented as a universal MFi requirement: the policy is blocked
 because PiAir cannot safely determine/validate that enrollment policy.
 
-PR #4 may reuse the current identity/authorization boundary, pure capability
-policy, HAP cryptographic exchanges, schema-2 credentials and control framing.
-It must add a live session owner and validate hardware behavior before claiming
-receiver playback. The current handshake APIs close their sockets and drop keys;
-there is no live authenticated channel, transient session, or audio transport.
-Do not open raw sockets or add automatic authentication fallback to bridge these gaps.
+PR #4 retains the identity/authorization boundary, capability policy, HAP
+exchanges and schema-2 credentials. Successful pair-verify now transfers the live
+wire and directional keys to a session owner; encrypted OPTIONS is available only
+through the explicit authenticate diagnostic. Approval and selection are checked
+at handoff and before/after control operations. Audio transport remains disabled:
+SETUP/codec/media protection/clock/feedback evidence is incomplete. Hardware
+behavior must be validated before claiming playback. No raw socket API or
+automatic authentication fallback bridges these gaps.
 
 ## Future audio and network lifecycles
 
