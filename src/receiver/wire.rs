@@ -12,6 +12,8 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+const OWNTONE_USER_AGENT: &str = "AirPlay/999.0.0";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AuthProfile {
     Legacy,
@@ -318,12 +320,9 @@ impl Wire {
             self.reauthorize()?;
             self.auth_phase("encrypted OPTIONS");
             self.restart_deadline();
-            self.seq = self
-                .seq
-                .checked_add(1)
-                .context("request sequence exhausted")?;
-            let request = format!("OPTIONS * RTSP/1.0\r\nCSeq: {}\r\nUser-Agent: PiAir/0.1\r\nContent-Length: 0\r\n\r\n", self.seq);
-            self.write_message(request.as_bytes())?;
+            let mut request = self.authenticated_header("OPTIONS", "*", 0)?;
+            request.extend_from_slice(b"\r\n");
+            self.write_message(&request)?;
             let body = self.response()?;
             ensure!(
                 body.is_empty() && self.pending_start == self.pending_end,
@@ -338,6 +337,28 @@ impl Wire {
             self.close();
         }
         result
+    }
+    // Common authenticated RTSP envelope. Retain the connection identity chosen
+    // before authentication (persisted for OwnTone) through the secure upgrade.
+    fn authenticated_header(
+        &mut self,
+        method: &str,
+        uri: &str,
+        length: usize,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        self.seq = self.seq.checked_add(1).context("CSeq exhausted")?;
+        let agent = if self.auth_profile == AuthProfile::OwnToneTransient {
+            OWNTONE_USER_AGENT
+        } else {
+            "PiAir/0.1"
+        };
+        Ok(Zeroizing::new(format!(
+            "{method} {uri} RTSP/1.0\r\nCSeq: {}\r\n\
+             User-Agent: {agent}\r\nX-Apple-ProtocolVersion: 1\r\n\
+             Content-Length: {length}\r\n\
+             Client-Instance: {:X}\r\nDACP-ID: {:X}\r\nActive-Remote: {}\r\nX-Apple-Client-Name: PiAir\r\n",
+            self.seq, self.client_instance, self.client_instance, self.active_remote
+        ).into_bytes()))
     }
     pub(super) fn request(
         &mut self,
@@ -372,17 +393,7 @@ impl Wire {
                     "invalid RTSP URI"
                 );
                 ensure!(body.len() <= 8192, "RTSP body too large");
-                self.seq = self.seq.checked_add(1).context("CSeq exhausted")?;
-                let mut request = Zeroizing::new(format!(
-                    "{method} {uri} RTSP/1.0\r\nCSeq: {}\r\n\
-                     User-Agent: PiAir/0.1\r\nX-Apple-ProtocolVersion: 1\r\n\
-                     Content-Length: {}\r\n", self.seq, body.len()
-                ).into_bytes());
-                // Sender identifiers are stable for this control connection, not credentials.
-                request.extend_from_slice(format!(
-                    "Client-Instance: {:X}\r\nDACP-ID: {:X}\r\nActive-Remote: {}\r\nX-Apple-Client-Name: PiAir\r\n",
-                    self.client_instance, self.client_instance, self.active_remote
-                ).as_bytes());
+                let mut request = self.authenticated_header(method, uri, body.len())?;
                 for (key, value) in headers {
                     ensure!(
                         key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -792,7 +803,7 @@ fn owntone_header(
     );
     // Pinned OwnTone conffile.c default: HomePod OS 27 validates this agent
     // before /info. Keep it scoped to this explicitly selected experiment.
-    let mut header = format!("{method} {path} RTSP/1.0\r\nCSeq: {seq}\r\nUser-Agent: AirPlay/999.0.0\r\nX-Apple-Client-Name: PiAir\r\nClient-Instance: {client:X}\r\nDACP-ID: {client:X}\r\nActive-Remote: {remote}\r\n");
+    let mut header = format!("{method} {path} RTSP/1.0\r\nCSeq: {seq}\r\nUser-Agent: {OWNTONE_USER_AGENT}\r\nX-Apple-Client-Name: PiAir\r\nClient-Instance: {client:X}\r\nDACP-ID: {client:X}\r\nActive-Remote: {remote}\r\n");
     if method == "POST" {
         header.push_str(&format!("Content-Type: application/octet-stream\r\nX-Apple-HKP: 4\r\nContent-Length: {length}\r\n"));
     }
@@ -1084,6 +1095,25 @@ impl Drop for Worker {
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+
+    #[test]
+    fn options_sequence_exhaustion_closes_without_sending_or_wrapping() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let mut peer = listener.accept().unwrap().0;
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let mut wire = Wire::mock(socket, Duration::from_secs(1), "test");
+        wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
+        wire.seq = u32::MAX;
+        assert!(wire
+            .options()
+            .unwrap_err()
+            .to_string()
+            .contains("CSeq exhausted"));
+        assert_eq!(wire.seq, u32::MAX);
+        assert!(wire.failed && wire.keys.is_none());
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    }
 
     #[test]
     fn setup_write_failure_is_attributed_and_closes_channel() {

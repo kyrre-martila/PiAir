@@ -1226,7 +1226,15 @@ fn extra_mfi_or_method_fields_fail_before_pin_instead_of_negotiating() {
 }
 
 // Production pair-verify, encoders and state owner; only receiver keys are synthetic.
-fn encrypted_request(socket: &mut TcpStream, keys: &mut ControlKeys, seq: u32) {
+fn encrypted_request(socket: &mut TcpStream, keys: &mut ControlKeys, seq: u32) -> (u64, u32) {
+    encrypted_options_request(socket, keys, seq, false)
+}
+fn encrypted_options_request(
+    socket: &mut TcpStream,
+    keys: &mut ControlKeys,
+    seq: u32,
+    owntone: bool,
+) -> (u64, u32) {
     let mut raw = Vec::new();
     while !raw.ends_with(b"\r\n\r\n") {
         let mut length = [0; 2];
@@ -1238,7 +1246,25 @@ fn encrypted_request(socket: &mut TcpStream, keys: &mut ControlKeys, seq: u32) {
         socket.read_exact(&mut frame[2..]).unwrap();
         raw.extend_from_slice(&keys.decrypt(&frame).unwrap());
     }
-    assert_eq!(String::from_utf8(raw).unwrap(), format!("OPTIONS * RTSP/1.0\r\nCSeq: {seq}\r\nUser-Agent: PiAir/0.1\r\nContent-Length: 0\r\n\r\n"));
+    let text = String::from_utf8(raw).unwrap();
+    let value = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .unwrap()
+    };
+    let client = u64::from_str_radix(value("Client-Instance: "), 16).unwrap();
+    let remote = value("Active-Remote: ").parse::<u32>().unwrap();
+    let agent = if owntone {
+        "AirPlay/999.0.0"
+    } else {
+        "PiAir/0.1"
+    };
+    if owntone {
+        // Same identity as the independently checked /info and M1/M3 requests.
+        assert_eq!((client, remote), (0x123456789abcdef0, 123456789));
+    }
+    assert_eq!(text, format!("OPTIONS * RTSP/1.0\r\nCSeq: {seq}\r\nUser-Agent: {agent}\r\nX-Apple-ProtocolVersion: 1\r\nContent-Length: 0\r\nClient-Instance: {client:X}\r\nDACP-ID: {client:X}\r\nActive-Remote: {remote}\r\nX-Apple-Client-Name: PiAir\r\n\r\n"));
+    (client, remote)
 }
 fn encrypted_reply(socket: &mut TcpStream, keys: &mut ControlKeys, response: &[u8]) {
     // Frame boundaries are unrelated to RTSP header boundaries. TCP writes are
@@ -1262,8 +1288,10 @@ fn authenticated_socket_continues_with_independent_counters_and_idempotent_clean
     use session::{Session, State};
     let (wire, server) = local_mock(|s| {
         let (mut socket, mut keys) = verify_mock_continue(s, Fault::None, PI).unwrap();
+        let mut identity = None;
         for seq in [3, 4] {
-            encrypted_request(&mut socket, &mut keys, seq);
+            let current = encrypted_request(&mut socket, &mut keys, seq);
+            assert_eq!(*identity.get_or_insert(current), current);
             encrypted_reply(&mut socket, &mut keys, format!("RTSP/1.0 200 OK\r\nCSeq: {seq}\r\nPublic: OPTIONS, SETUP, RECORD, FLUSH, TEARDOWN\r\n\r\n").as_bytes());
         }
         assert_eof(&mut socket);
@@ -2121,7 +2149,7 @@ fn owntone_same_socket_info_m1_m4_and_encrypted_options() {
             |mut socket, shared| {
                 let mut keys = ControlKeys::new(shared.as_ref());
                 keys.swap_directions_for_test();
-                encrypted_request(&mut socket, &mut keys, 4);
+                encrypted_options_request(&mut socket, &mut keys, 4, true);
                 socket
                     .write_all(
                         &keys
@@ -2427,7 +2455,7 @@ fn owntone_control_check_fragmented_frames_and_directional_counters() {
                 // Each request is one frame, each response is several frames. This
                 // proves counters advance per frame independently of CSeq/direction.
                 for seq in [4, 5] {
-                    encrypted_request(&mut socket, &mut keys, seq);
+                    encrypted_options_request(&mut socket, &mut keys, seq, true);
                     encrypted_reply(&mut socket, &mut keys,
                         format!("RTSP/1.0 200 secret-reason\r\nCSeq: {seq}\r\nPublic: secret-header\r\n\r\n").as_bytes());
                 }
@@ -2469,7 +2497,7 @@ fn owntone_control_check_failures_close_without_retry_or_audio() {
                 |mut socket, shared| {
                     let mut keys = ControlKeys::new(shared.as_ref());
                     keys.swap_directions_for_test();
-                    encrypted_request(&mut socket, &mut keys, 4);
+                    encrypted_options_request(&mut socket, &mut keys, 4, true);
                     let response = match mode {
                         3 => b"RTSP/1.0 200 OK\r\nCSeq: 3\r\n\r\n".as_slice(),
                         4 => b"RTSP/1.0 200 OK\r\nCSeq: 4\r\nCSeq: 4\r\n\r\n",
