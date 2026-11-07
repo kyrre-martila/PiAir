@@ -179,6 +179,50 @@ fn setup_inner(
     })();
     result.context("enrollment may be partial on the receiver; inspect receiver-side controller records before any explicit retry")
 }
+/// Transient SRP authenticates this connection, not a persistent receiver identity.
+/// No enrollment M5/M6, credential object, or separate pair-verify is involved.
+pub fn transient(mut wire: Wire) -> Result<Wire> {
+    ensure!(
+        wire.method() == super::compatibility::Method::Transient,
+        "explicit transient selection required; no fallback"
+    );
+    wire.restart_deadline();
+    let m2 = exchange(
+        &mut wire,
+        "/pair-setup",
+        &[(STATE, &[1]), (0, &[0]), (FLAGS, &[0x10])],
+        2,
+        &[SALT, PUBLIC_KEY, FLAGS],
+    )
+    .context("transient authentication M2")?;
+    ensure!(
+        m2.integer(FLAGS)?.is_none_or(|flags| flags == 0x10),
+        "transient M2: unsupported authentication flags"
+    );
+    let client = srp::Client::transient(m2.get(SALT)?, m2.get(PUBLIC_KEY)?)
+        .context("transient SRP parameters")?;
+    let m4 = exchange(
+        &mut wire,
+        "/pair-setup",
+        &[
+            (STATE, &[3]),
+            (PUBLIC_KEY, &client.public),
+            (PROOF, client.proof.as_ref()),
+        ],
+        4,
+        &[PROOF],
+    )
+    .context("transient authentication M4")?;
+    let shared = client
+        .finish(m4.get(PROOF)?)
+        .context("transient cryptographic receiver proof verification failed")?;
+    wire.secure(
+        ControlKeys::new(shared.as_ref()),
+        ControlKeys::events(shared.as_ref()),
+    )
+    .context("transient encrypted channel establishment failed")
+}
+
 /// Only verified M4 success transfers the same live wire with directional keys.
 /// No socket/secret extraction API is provided; this is not an audio session.
 pub fn verify(mut wire: Wire, credential: &Credential) -> Result<Wire> {

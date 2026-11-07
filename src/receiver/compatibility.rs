@@ -12,7 +12,7 @@ pub enum Method {
     PinDisplay,
     /// Persistent HAP method 0 with a user-supplied existing setup code; no PIN-start.
     SetupCode,
-    /// Recognized but unsupported: AirPlay transient wire profiles remain unresolved.
+    /// Connection-scoped SRP with no persistent identity verification.
     Transient,
 }
 impl Method {
@@ -28,6 +28,8 @@ pub struct Capabilities {
     pub flags: Option<u32>,
     pub password: Option<bool>,
     pub access_control: Option<u64>,
+    #[serde(default)]
+    pub access_control_type: Option<u64>,
     pub protocol_version: Option<String>,
 }
 impl Capabilities {
@@ -51,6 +53,7 @@ impl Capabilities {
             && self.features == selected.features
             && self.password == selected.password
             && self.access_control == selected.access_control
+            && self.access_control_type == selected.access_control_type
             && self.protocol_version == selected.protocol_version
     }
     pub fn parse(service: &Advertisement) -> Result<Self> {
@@ -92,6 +95,10 @@ impl Capabilities {
             flags,
             password,
             access_control,
+            access_control_type: txt
+                .get("act")
+                .map(|v| v.parse::<u64>().context("malformed access-control type"))
+                .transpose()?,
             protocol_version: txt.get("protovers").cloned(),
         })
     }
@@ -110,6 +117,10 @@ impl Capabilities {
                 .is_none_or(|v| ["1.0", "1.1"].contains(&v)),
             "unknown AirPlay protocol version; collect documented firmware evidence before use"
         );
+        ensure!(
+            self.access_control_type.is_none_or(|act| act == 0),
+            "receiver access-control type unsupported; no Home authorization or fallback"
+        );
         // Bit 51 advertises a capability, not mandatory MFi. Pinned OwnTone's
         // persistent HAP path does not require auth-setup/MFi (see source analysis).
         // Explicit method 0 still requires bit 46 and rejects MFi TLVs on wire.
@@ -117,7 +128,12 @@ impl Capabilities {
             if self.features & ((1 << 43) | (1 << 48)) == 0 {
                 bail!("receiver does not advertise system/transient pairing (bits 43/48)");
             }
-            bail!("transient AirPlay pairing is not implemented: HKP/header/probe variants lack a validated wire profile; no persistent identity or credentials may be inferred; no fallback");
+            let flags = self
+                .flags
+                .context("transient authentication requires advertised status flags")?;
+            ensure!(flags & ((1 << 3) | (1 << 9)) == 0,
+                "receiver requires PIN or persistent pairing; transient profile unsupported; no fallback");
+            return Ok(requested);
         }
         ensure!(self.features & (1<<46)!=0,"persistent HAP pairing is not established by these capabilities; bit 38/43/48 alone is insufficient, and legacy/FairPlay paths are unsupported; no fallback");
         Ok(requested)
@@ -147,6 +163,7 @@ mod tests {
             flags: None,
             password: None,
             access_control: None,
+            access_control_type: None,
             protocol_version: None,
         }
     }
@@ -232,5 +249,40 @@ mod tests {
         c.protocol_version = Some("1.1".into());
         c.access_control = Some(2);
         assert!(c.decide(Method::PinDisplay).is_err());
+    }
+}
+
+#[cfg(test)]
+mod transient_tests {
+    use super::*;
+    #[test]
+    fn explicit_transient_requires_capability_and_unprotected_status() {
+        let base = Capabilities {
+            features: 1 << 48,
+            flags: Some(0x98404),
+            password: None,
+            access_control: None,
+            access_control_type: None,
+            protocol_version: Some("1.1".into()),
+        };
+        assert_eq!(base.decide(Method::Transient).unwrap(), Method::Transient);
+        assert!(base.decide(Method::PinDisplay).is_err());
+        for bit in [3, 7, 9] {
+            let mut c = base.clone();
+            c.flags = Some(0x98404 | (1 << bit));
+            assert!(c.decide(Method::Transient).is_err());
+        }
+        for change in 0..6 {
+            let mut c = base.clone();
+            match change {
+                0 => c.features = 1 << 46,
+                1 => c.flags = None,
+                2 => c.password = Some(true),
+                3 => c.access_control = Some(1),
+                4 => c.access_control_type = Some(2),
+                _ => c.protocol_version = Some("unknown".into()),
+            }
+            assert!(c.decide(Method::Transient).is_err());
+        }
     }
 }

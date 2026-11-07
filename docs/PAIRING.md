@@ -1,3 +1,8 @@
+> Transient update: the earlier transient blocker recorded below is superseded by
+> [TRANSIENT_AUTHENTICATION.md](TRANSIENT_AUTHENTICATION.md). PiAir now implements
+> OwnTone's explicit HKP 4 M1–M4 SRP flow, without enrollment or pair-verify.
+> The persistent pairing design in this document remains applicable.
+
 # Receiver pairing, identity and compatibility
 
 PR #3 implements independently written persistent HAP pairing and pair-verify,
@@ -81,15 +86,10 @@ candidates for persistent HAP/verify, but firmware and receiver policy may requi
 other enrollment. Companion-derived credentials in a report do not establish
 AirPlay PIN enrollment. Companion enrollment/import is not implemented here.
 
-HomePod/mini commonly motivate transient pairing, but there is no sufficiently
-validated single AirPlay transient wire profile in PiAir. HAP defines its SRP
-semantics; it does not define AirPlay's HKP/header/probe variants. This is the
-reason transient remains unsupported, **not** a claim that SRP is unimplementable
-or that transient sessions inherently require persistent identity. PiAir does not
-send speculative abandoned verifies, try fixed codes, or cycle variants.
-The comparison specifically distinguishes classic HKP 1 from an observed HKP 4
-profile preceded by abandoned HKP 6/3 verifies. These are wire-mode choices,
-not HAP specification revision numbers.
+HomePod/mini commonly motivate transient pairing. PiAir now implements the
+explicit OwnTone HKP 4 SRP M1–M4 profile without enrollment or separate verify.
+See [transient authentication](TRANSIENT_AUTHENTICATION.md) for source comparison,
+compatibility limits and its lack of persistent receiver identity verification.
 
 The setup-code profile below is a valid HAP enrollment mechanism, not a claim
 that HomePod supplies a usable printed code or permits that enrollment. Home
@@ -108,7 +108,7 @@ All categories below require real hardware validation before compatibility claim
 | HK bit 46, no bit 51, usable displayed PIN; Apple TV candidate | `pin-display` | Implemented: PIN-start + persistent method 0 M1–M6 | Physical PIN-authenticated signed ID/key enrollment | Yes, after verified M6 | Required; no tvOS/model verified |
 | Same HK category with an independently obtained existing HAP code | `setup-code` | Implemented: method 0 M1–M6 without PIN-start | Code-authenticated signed ID/key enrollment | Yes, after verified M6 | Required; usable HomePod code not established |
 | Previously enrolled receiver passing the current capability policy | Same selected persistent profile; `authenticate` | Implemented: pair-verify M1–M4 | Stored receiver ID/key, fresh X25519 and mutual signatures | Reads existing; never replaces on verify | Required; no live session retained |
-| System/transient bits 43/48; HomePod/mini candidate | `transient` | Recognized, rejected before connection | None in PiAir; generic SRP would prove a code, not durable identity | Never from transient | Required; wire-profile blocker above |
+| System/transient bits 43/48 with unprotected status; HomePod/mini candidate | Explicit `transient` | Implemented HKP 4 SRP M1–M4; no separate verify | Connection encryption; no durable identity | No credentials created | Required; hardware unverified |
 | Bit 51, with or without bit 46 | Unified/MFi or policy-specific | Unsupported; no inference that MFi is universally mandatory | No MFi chain/attestation validation | No new enrollment | Required |
 | CoreUtils 38 only, legacy bit 27, unknown combinations, password/Home access restrictions | Unresolved / legacy / FairPlay | Unsupported; no fallback | None | No new enrollment | Required |
 
@@ -137,11 +137,11 @@ Selection persists the requested method, full parsed capability snapshot,
 optional advertised `pi`, stable ID, exact address set and port. The live boundary
 rechecks that policy and snapshot immediately before every connection. A selected
 method cannot change silently. `receivers` displays decisions/rejection reasons
-without probing. `select --method transient` is an explicit unsupported-method
-error, not an automatic fallback option. There is no `auto` method.
+without probing. `select --method transient` explicitly selects connection-scoped
+SRP, never an automatic fallback. There is no `auto` method.
 
 Authentication POSTs use HTTP/1.1, numeric pinned Host, persistent connection,
-CSeq, HKP 3 and octet-stream TLV8. Responses accept the existing bounded HTTP/RTSP
+CSeq, HKP 3 (persistent) or HKP 4 (transient) and octet-stream TLV8. Responses accept the existing bounded HTTP/RTSP
 200 framing, with matching CSeq when supplied (mandatory for RTSP). No HTTP/RTSP
 request retry or header-version negotiation occurs. This corrects the earlier
 RTSP-only request assumption; firmware acceptance still needs controlled tests.
@@ -356,7 +356,7 @@ firmware with sanitized errors only; never publish authentication bodies or keys
 `cargo test --locked` run locally. Tests use loopback mocks and synthetic snapshots,
 never real receivers. Both persistent code sources, actual-ID versus pi handling,
 wrong codes/proofs/tags/signatures, state/downgrade errors, malformed capabilities,
-unsupported transient/MFi paths, current authorization, cleanup, storage/migration
+unsupported transient profiles/MFi paths, current authorization, cleanup, storage/migration
 and read-only dispatch are covered. Apple's HAP R2 §5.5.2 numerical vector checks
 A/K independently of the mock; fixture data is not implementation source.
 GitHub Actions stays manual-only (`workflow_dispatch`). Mock success is not
@@ -371,7 +371,7 @@ addresses and a nonzero port. It parses both feature aliases and both status
 aliases numerically, rejects contradictions/malformed fields, and runs
 `Capabilities::decide` for the explicitly selected method on **every connection**.
 Persistent HAP still requires feature bit 46; password protection, unresolved
-ACLs, unknown protocol versions and transient profiles are rejected. Feature
+ACLs, unknown protocol versions and protected transient profiles are rejected. Feature
 words remain exactly pinned, including unknown bits: additions and removals both
 require review. Audio/ALAC feature downgrades therefore fail before connecting;
 stream-test also requires bits 9/19 and retains authenticated GET /info profile

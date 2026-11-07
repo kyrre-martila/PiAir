@@ -30,6 +30,9 @@ fn credential() -> Credential {
     }
 }
 fn request(socket: &mut TcpStream, expected: &str) -> Vec<u8> {
+    request_method(socket, expected, Method::PinDisplay)
+}
+fn request_method(socket: &mut TcpStream, expected: &str, method: Method) -> Vec<u8> {
     socket
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -41,7 +44,10 @@ fn request(socket: &mut TcpStream, expected: &str) -> Vec<u8> {
     }
     let text = String::from_utf8(header).unwrap();
     assert!(text.starts_with(&format!("POST {expected} HTTP/1.1\r\n")));
-    assert!(text.contains("X-Apple-HKP: 3\r\n"));
+    assert!(text.contains(&format!(
+        "X-Apple-HKP: {}\r\n",
+        if method == Method::Transient { 4 } else { 3 }
+    )));
     assert!(text.contains("Host: 127.0.0.1:"));
     let length = text
         .lines()
@@ -95,12 +101,26 @@ enum Fault {
 fn setup_mock(socket: TcpStream, fault: Fault) {
     setup_mock_profile(socket, fault, Method::PinDisplay, "1234", PI)
 }
-fn setup_mock_profile(
+fn setup_mock_profile(socket: TcpStream, fault: Fault, method: Method, pin: &str, signed_id: &str) {
+    setup_mock_with_transient(socket, fault, method, pin, signed_id, |mut socket, key| {
+        let mut keys = ControlKeys::new(key.as_ref());
+        keys.swap_directions_for_test();
+        encrypted_request(&mut socket, &mut keys, 3);
+        encrypted_reply(
+            &mut socket,
+            &mut keys,
+            b"RTSP/1.0 200 OK\r\nCSeq: 3\r\nContent-Length: 0\r\n\r\n",
+        );
+        assert_eof(&mut socket);
+    });
+}
+fn setup_mock_with_transient(
     mut socket: TcpStream,
     fault: Fault,
     method: Method,
     pin: &str,
     signed_id: &str,
+    transient: impl FnOnce(TcpStream, Zeroizing<[u8; 64]>),
 ) {
     let offset = if method.pin_start() {
         assert!(request(&mut socket, "/pair-pin-start").is_empty());
@@ -109,8 +129,12 @@ fn setup_mock_profile(
     } else {
         0
     };
-    let m1 = Tlv::parse(&request(&mut socket, "/pair-setup")).unwrap();
+    let m1 = Tlv::parse(&request_method(&mut socket, "/pair-setup", method)).unwrap();
     assert_eq!(m1.get(0).unwrap(), [0]);
+    assert_eq!(m1.get(STATE).unwrap(), [1]);
+    if method == Method::Transient {
+        assert_eq!(m1.integer(FLAGS).unwrap(), Some(0x10));
+    }
     let salt = [7; 16];
     let private = [9; 32];
     let verifier =
@@ -132,7 +156,7 @@ fn setup_mock_profile(
         return;
     }
     reply(&mut socket, 1 + offset, &fields);
-    let m3 = Tlv::parse(&request(&mut socket, "/pair-setup")).unwrap();
+    let m3 = Tlv::parse(&request_method(&mut socket, "/pair-setup", method)).unwrap();
     let a = m3.get(PUBLIC_KEY).unwrap();
     let u = BigUint::from_bytes_be(hash(&[a, &b]).as_ref());
     let shared = server.compute_premaster_secret(
@@ -142,7 +166,11 @@ fn setup_mock_profile(
         &BigUint::from_bytes_be(&private),
     );
     let key = hash(&[&shared.to_bytes_be()]);
-    let (m1, m2) = srp::proofs(a, &b, &salt, key.as_ref());
+    let (m1, m2) = if method == Method::Transient {
+        srp::transient_proofs(a, &b, &salt, key.as_ref())
+    } else {
+        srp::proofs(a, &b, &salt, key.as_ref())
+    };
     if matches!(fault, Fault::WrongPin) {
         assert!(!bool::from(m1.as_ref().ct_eq(m3.get(PROOF).unwrap())));
         reply(&mut socket, 2 + offset, &[(STATE, &[4]), (7, &[2])]);
@@ -166,7 +194,11 @@ fn setup_mock_profile(
         2 + offset,
         &[(STATE, &[4]), (PROOF, m2.as_ref())],
     );
-    let m5 = Tlv::parse(&request(&mut socket, "/pair-setup")).unwrap();
+    if method == Method::Transient {
+        transient(socket, key);
+        return;
+    }
+    let m5 = Tlv::parse(&request_method(&mut socket, "/pair-setup", method)).unwrap();
     let encryption = derive(
         key.as_ref(),
         "Pair-Setup-Encrypt-Salt",
@@ -602,6 +634,7 @@ fn selection(port: u16) -> Selection {
             flags: None,
             password: None,
             access_control: None,
+            access_control_type: None,
             protocol_version: None,
         },
     }
@@ -876,7 +909,7 @@ fn persistent_exchange_rejects_transient_split_and_unknown_flags_before_pin() {
     }
 }
 #[test]
-fn unsupported_transient_never_returns_credentials_or_contacts_endpoint() {
+fn transient_requires_status_and_cannot_enter_persistent_enrollment() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
     std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
@@ -1546,4 +1579,204 @@ fn stua_hardware_advertisement_fixture_accepts_both_playback_transitions() {
         };
         assert!(!idle.matches_observation(&different_method));
     }
+}
+
+#[test]
+fn transient_srp_proof_upgrades_same_socket_and_teardown_is_idempotent() {
+    let (wire, server) = local_mock_method(Method::Transient, |s| {
+        setup_mock_profile(s, Fault::None, Method::Transient, "3939", PI)
+    });
+    let mut session = session::Session::new();
+    session.start_selected(|| Ok(wire), None).unwrap();
+    assert_eq!(session.state(), session::State::Negotiating);
+    session.check_control().unwrap();
+    session.stop().unwrap();
+    session.stop().unwrap();
+    assert_eq!(session.state(), session::State::Disconnected);
+    server.join().unwrap();
+}
+
+#[test]
+fn transient_invalid_proof_state_and_rejection_never_upgrade_or_fallback() {
+    for fault in [Fault::Proof, Fault::State, Fault::WrongPin, Fault::M2Fields] {
+        let (wire, server) = local_mock_method(Method::Transient, move |s| {
+            let mut observer = s.try_clone().unwrap();
+            setup_mock_profile(
+                s,
+                fault,
+                Method::Transient,
+                if matches!(fault, Fault::WrongPin) {
+                    "1234"
+                } else {
+                    "3939"
+                },
+                PI,
+            );
+            assert_eof(&mut observer);
+        });
+        let mut session = session::Session::new();
+        assert!(session.start_selected(|| Ok(wire), None).is_err());
+        assert_eq!(session.state(), session::State::Failed);
+        assert!(session.check_control().is_err());
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn transient_malformed_flags_method_state_and_status_fail_closed() {
+    let responses = vec![
+        encode(&[(STATE, &[2]), (FLAGS, &[0])]).to_vec(),
+        encode(&[(STATE, &[2]), (FLAGS, &[0x11])]).to_vec(),
+        encode(&[(STATE, &[2]), (FLAGS, &[0x10, 0, 0, 0, 0])]).to_vec(),
+        encode(&[(STATE, &[2]), (0, &[1])]).to_vec(),
+        encode(&[(STATE, &[4])]).to_vec(),
+        vec![6],
+        vec![6, 2, 2],
+        vec![6, 1, 2, 6, 1, 2],
+    ];
+    for response in responses {
+        let (wire, server) = local_mock_method(Method::Transient, move |mut s| {
+            request_method(&mut s, "/pair-setup", Method::Transient);
+            write!(
+                s,
+                "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: {}\r\n\r\n",
+                response.len()
+            )
+            .unwrap();
+            s.write_all(&response).unwrap();
+            assert_eof(&mut s);
+        });
+        assert!(pairing::transient(wire).is_err());
+        server.join().unwrap();
+    }
+    for status in [403, 470] {
+        let (wire, server) = local_mock_method(Method::Transient, move |mut s| {
+            request_method(&mut s, "/pair-setup", Method::Transient);
+            write!(
+                s,
+                "RTSP/1.0 {status} Rejected\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n"
+            )
+            .unwrap();
+            assert_eof(&mut s);
+        });
+        assert!(
+            format!("{:#}", pairing::transient(wire).err().unwrap()).contains(&status.to_string())
+        );
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn transient_timeout_interruption_and_no_cross_method_credentials() {
+    for interrupted in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let server = thread::spawn(move || {
+            let mut s = listener.accept().unwrap().0;
+            request_method(&mut s, "/pair-setup", Method::Transient);
+            if !interrupted {
+                assert_eof(&mut s);
+            }
+        });
+        let wire = Wire::mock_method(socket, Duration::from_millis(150), ID, Method::Transient);
+        assert!(pairing::transient(wire).is_err());
+        server.join().unwrap();
+    }
+    for method in [Method::PinDisplay, Method::Transient] {
+        let (wire, server) = local_mock_method(method, |mut s| assert_eof(&mut s));
+        if method == Method::Transient {
+            assert!(pairing::verify(wire, &credential()).is_err());
+        } else {
+            assert!(pairing::transient(wire).is_err());
+        }
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn transient_pins_authorization_preserves_credentials_and_uses_fresh_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+    let store = store::Store::new(&config).unwrap();
+    store.save(&credential()).unwrap();
+    let credential_path = dir.path().join("receiver-state/aabbccddeeff.toml");
+    let before = std::fs::read(&credential_path).unwrap();
+    let mut secrets = Vec::new();
+    for _ in 0..2 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut observed = snapshot(port);
+        observed[0].services[0]
+            .capabilities
+            .insert("features".into(), "0x0,0x14000".into());
+        observed[0].services[0]
+            .capabilities
+            .insert("flags".into(), "0x98404".into());
+        let selected = Selection::from_receiver(&observed[0], Method::Transient).unwrap();
+        store.select(&selected).unwrap();
+        std::fs::write(&config, "").unwrap();
+        assert!(Wire::connect(&config, ID, &selected, &observed).is_err());
+        std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+        for key in ["pi", "features", "flags"] {
+            let mut changed = snapshot(port);
+            changed[0].services[0].capabilities = observed[0].services[0].capabilities.clone();
+            changed[0].services[0].capabilities.insert(
+                key.into(),
+                match key {
+                    "pi" => "CHANGED",
+                    "features" => "0x0,0x4000",
+                    _ => "0x9840c",
+                }
+                .into(),
+            );
+            assert!(Wire::connect(&config, ID, &selected, &changed).is_err());
+        }
+        let mut changed = snapshot(port);
+        changed[0].services[0].capabilities = observed[0].services[0].capabilities.clone();
+        changed[0].services[0].port = port + 1;
+        assert!(Wire::connect(&config, ID, &selected, &changed).is_err());
+        assert!(listener.accept().is_err());
+        listener.set_nonblocking(false).unwrap();
+        let server = thread::spawn(move || {
+            let s = listener.accept().unwrap().0;
+            let mut captured = Vec::new();
+            setup_mock_with_transient(
+                s,
+                Fault::None,
+                Method::Transient,
+                "3939",
+                PI,
+                |mut socket, shared| {
+                    captured = shared.to_vec();
+                    let mut keys = ControlKeys::new(shared.as_ref());
+                    keys.swap_directions_for_test();
+                    encrypted_request(&mut socket, &mut keys, 3);
+                    encrypted_reply(
+                        &mut socket,
+                        &mut keys,
+                        b"RTSP/1.0 200 OK\r\nCSeq: 3\r\nContent-Length: 0\r\n\r\n",
+                    );
+                    assert_eof(&mut socket);
+                },
+            );
+            captured
+        });
+        let mut session = session::Session::new();
+        session
+            .start_selected(|| Wire::connect(&config, ID, &selected, &observed), None)
+            .unwrap();
+        session.check_control().unwrap();
+        session.stop().unwrap();
+        secrets.push(Zeroizing::new(server.join().unwrap()));
+        assert_eq!(before, std::fs::read(&credential_path).unwrap());
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("receiver-state"))
+                .unwrap()
+                .count(),
+            2
+        );
+    }
+    assert_ne!(secrets[0].as_slice(), secrets[1].as_slice());
 }

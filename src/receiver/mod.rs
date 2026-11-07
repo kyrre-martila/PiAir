@@ -173,9 +173,18 @@ pub fn pair(loaded: &Loaded, id: &str, authenticate: bool, control_check: bool) 
         .selection()?
         .context("select this approved receiver first")?;
     ensure!(selected.id == id, "receiver is not selected");
-    let existing = store.credential(id)?;
+    let transient = selected.method == Method::Transient;
+    let existing = if transient {
+        None
+    } else {
+        store.credential(id)?
+    };
     ensure!(
-        authenticate == existing.is_some(),
+        !transient || authenticate,
+        "transient selection does not enroll credentials; use authenticate or stream-test"
+    );
+    ensure!(
+        transient || authenticate == existing.is_some(),
         "pair requires no existing credentials; authenticate requires stored credentials"
     );
     print!(
@@ -193,11 +202,11 @@ pub fn pair(loaded: &Loaded, id: &str, authenticate: bool, control_check: bool) 
         );
     }
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
-    if let Some(c) = existing {
+    if authenticate {
         let mut session = session::Session::new();
-        session.start(
+        session.start_selected(
             || wire::Wire::connect(&loaded.path, id, &selected, &snapshot),
-            &c,
+            if transient { None } else { existing.as_ref() },
         )?;
         if control_check {
             if let Err(error) = session.check_control() {
@@ -208,8 +217,14 @@ pub fn pair(loaded: &Loaded, id: &str, authenticate: bool, control_check: bool) 
                 "Authenticated encrypted OPTIONS completed; buffered audio remains unsupported."
             );
         }
-        session.shutdown();
-        println!("Authenticated {id} using pair-verify; connection closed. No audio session.");
+        session
+            .stop()
+            .context("authentication session cleanup failed")?;
+        if transient {
+            println!("Authenticated {id} using transient SRP; no persistent receiver identity verified or credentials saved. Connection closed. No audio session.");
+        } else {
+            println!("Authenticated {id} using pair-verify; connection closed. No audio session.");
+        }
     } else {
         let wire = wire::Wire::connect(&loaded.path, id, &selected, &snapshot)?;
         let credential = pairing::setup(wire, id, selected.advertised_pi.as_deref(), || {
@@ -278,13 +293,18 @@ pub fn stream_test(loaded: &Loaded, id: &str, seconds: u32) -> Result<()> {
             && selected.capabilities.features & (1 << 19) != 0,
         "selected receiver does not advertise audio and ALAC"
     );
-    let credential = store
-        .credential(id)?
-        .context("pair this receiver explicitly first")?;
-    ensure!(
-        credential.advertised_pi == selected.advertised_pi,
-        "credential discovery binding differs from selection"
-    );
+    let credential = if selected.method == Method::Transient {
+        None
+    } else {
+        let credential = store
+            .credential(id)?
+            .context("pair this receiver explicitly first")?;
+        ensure!(
+            credential.advertised_pi == selected.advertised_pi,
+            "credential discovery binding differs from selection"
+        );
+        Some(credential)
+    };
     println!("AirPlay 2 realtime UDP / ALAC 44100 stereo / NTP diagnostic: {seconds}s signal plus 2s latency drain. Receiver volume will be set to -30 dB and may remain there. Hardware playback is unverified.");
     print!("Send test audio to {id}? Type the exact receiver ID: ");
     io::stdout().flush()?;
@@ -295,11 +315,15 @@ pub fn stream_test(loaded: &Loaded, id: &str, seconds: u32) -> Result<()> {
     let mut session = session::Session::new();
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
-    session.start(
+    session.start_selected(
         || wire::Wire::connect(&loaded.path, id, &selected, &snapshot),
-        &credential,
+        credential.as_ref(),
     )?;
-    println!("Authentication: cryptographically verified");
+    if selected.method == Method::Transient {
+        println!("Authentication: transient SRP proof verified; no persistent receiver identity verification");
+    } else {
+        println!("Authentication: persistent receiver identity cryptographically verified");
+    }
     if let Err(error) = session.negotiate_realtime() {
         println!("Negotiation: FAILED; audio packets transmitted: 0; partial setup cleanup attempted; audible playback: unverified");
         return Err(error);

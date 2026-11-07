@@ -31,6 +31,7 @@ const CAPABILITIES: &[&str] = &[
     "pi",
     "protovers",
     "acl",
+    "act",
 ];
 
 #[derive(Clone, Debug)]
@@ -75,6 +76,7 @@ fn parse_txt<'a>(
                 "sf",
                 "pw",
                 "acl",
+                "act",
                 "protovers",
             ]
             .contains(&key.as_str())
@@ -450,6 +452,7 @@ mod tests {
             "flags",
             "sf",
             "acl",
+            "act",
             "protovers",
             "pi",
             "features",

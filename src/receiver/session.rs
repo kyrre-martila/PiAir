@@ -1,4 +1,4 @@
-//! Persistent authenticated control owner. Audio negotiation is deliberately gated.
+//! Authenticated control owner. Audio negotiation is deliberately gated.
 use super::{
     pairing, profile, realtime,
     store::Credential,
@@ -68,10 +68,18 @@ impl Session {
     }
     /// Production caller must supply Wire::connect (the sole authorization boundary).
     /// No retry: a failed instance must be explicitly discarded.
+    #[cfg(test)]
     pub fn start(
         &mut self,
         connect: impl FnOnce() -> Result<Wire>,
         credential: &Credential,
+    ) -> Result<()> {
+        self.start_selected(connect, Some(credential))
+    }
+    pub fn start_selected(
+        &mut self,
+        connect: impl FnOnce() -> Result<Wire>,
+        credential: Option<&Credential>,
     ) -> Result<()> {
         ensure!(
             self.state == State::Disconnected,
@@ -88,7 +96,20 @@ impl Session {
         let result = (|| {
             let wire = connect()?;
             self.state = State::Authenticating;
-            self.control = Some(pairing::verify(wire, credential)?);
+            self.control = Some(
+                if wire.method() == super::compatibility::Method::Transient {
+                    ensure!(
+                        credential.is_none(),
+                        "transient session must not receive persistent credentials"
+                    );
+                    pairing::transient(wire)?
+                } else {
+                    pairing::verify(
+                        wire,
+                        credential.context("persistent credentials required; no fallback")?,
+                    )?
+                },
+            );
             self.state = State::Negotiating;
             Ok(())
         })();
@@ -522,7 +543,9 @@ impl Session {
             if let Some(control) = &mut self.control {
                 control.limit_cleanup();
             }
-            let _ = self.teardown();
+            if self.teardown().is_err() {
+                tracing::warn!("session cleanup failed; local resources will be released");
+            }
             self.release();
             self.state = State::Failed;
         }
