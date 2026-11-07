@@ -58,6 +58,16 @@ pub struct Selection {
     capabilities: Capabilities,
 }
 impl Selection {
+    /// Compare discovery with an approval without changing that approval. Exact
+    /// equality remains intentional for persisted-selection/revocation checks.
+    fn matches_observation(&self, observed: &Self) -> bool {
+        self.id == observed.id
+            && self.advertised_pi == observed.advertised_pi
+            && self.method == observed.method
+            && self.addresses == observed.addresses
+            && self.port == observed.port
+            && observed.capabilities.matches_selection(&self.capabilities)
+    }
     fn from_receiver(r: &Receiver, method: Method) -> Result<Self> {
         exact_id(&r.id)?;
         let services: Vec<_> = r

@@ -49,7 +49,7 @@ impl Wire {
             .context("receiver not discovered")?;
         let observed = Selection::from_receiver(receiver, selected.method)?;
         ensure!(
-            &observed == selected,
+            selected.matches_observation(&observed),
             "receiver identity/capability/endpoint changed; review and select again"
         );
         for r in snapshot.iter().filter(|r| r.id != id) {
