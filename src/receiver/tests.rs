@@ -2408,3 +2408,113 @@ fn owntone_info_uses_airplay_endpoint_and_reference_agent_without_preamble_or_re
     assert!(airplay.accept().is_err());
     assert!(raop.accept().is_err());
 }
+
+#[test]
+fn owntone_control_check_fragmented_frames_and_directional_counters() {
+    let (mut wire, server) = local_mock_method(Method::Transient, |mut socket| {
+        owntone_info(&mut socket, 200, &info_body(0));
+        setup_mock_transport(
+            socket,
+            Fault::None,
+            Method::Transient,
+            "3939",
+            PI,
+            false,
+            true,
+            |mut socket, shared| {
+                let mut keys = ControlKeys::new(shared.as_ref());
+                keys.swap_directions_for_test();
+                // Each request is one frame, each response is several frames. This
+                // proves counters advance per frame independently of CSeq/direction.
+                for seq in [4, 5] {
+                    encrypted_request(&mut socket, &mut keys, seq);
+                    encrypted_reply(&mut socket, &mut keys,
+                        format!("RTSP/1.0 200 secret-reason\r\nCSeq: {seq}\r\nPublic: secret-header\r\n\r\n").as_bytes());
+                }
+                assert_eof(&mut socket);
+            },
+        );
+    });
+    wire.owntone_test_identity();
+    wire.owntone_transient(&owntone_caps()).unwrap();
+    let mut session = session::Session::new();
+    session.start_selected(|| Ok(wire), None).unwrap();
+    let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
+        session.check_control().unwrap();
+        session.check_control().unwrap();
+        session.stop().unwrap();
+    });
+    assert!(output.contains("encrypted OPTIONS"));
+    assert!(output.contains("encrypted control check validated"));
+    assert!(output.contains("200"));
+    assert!(!output.contains("secret-reason"));
+    assert!(!output.contains("secret-header"));
+    assert_eq!(session.state(), session::State::Disconnected);
+    server.join().unwrap();
+}
+
+#[test]
+fn owntone_control_check_failures_close_without_retry_or_audio() {
+    for mode in 0..10 {
+        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
+            owntone_info(&mut socket, 200, &info_body(0));
+            setup_mock_transport(
+                socket,
+                Fault::None,
+                Method::Transient,
+                "3939",
+                PI,
+                false,
+                true,
+                |mut socket, shared| {
+                    let mut keys = ControlKeys::new(shared.as_ref());
+                    keys.swap_directions_for_test();
+                    encrypted_request(&mut socket, &mut keys, 4);
+                    let response = match mode {
+                        3 => b"RTSP/1.0 200 OK\r\nCSeq: 3\r\n\r\n".as_slice(),
+                        4 => b"RTSP/1.0 200 OK\r\nCSeq: 4\r\nCSeq: 4\r\n\r\n",
+                        5 => b"RTSP/1.0 403 secret-reason\r\nCSeq: 4\r\n\r\n",
+                        6 => b"RTSP/1.0 200 OK\r\nCSeq: 4\r\nContent-Length: 1\r\n\r\n",
+                        7 => b"RTSP/1.0 200 OK\r\nCSeq: 4\r\n\r\nextra",
+                        _ => b"RTSP/1.0 200 OK\r\nCSeq: 4\r\n\r\n",
+                    };
+                    if mode == 1 {
+                        // The peer incorrectly starts its transmit counter at one.
+                        keys.encrypt(b"discarded frame").unwrap();
+                    }
+                    let mut frame = keys.encrypt(response).unwrap();
+                    match mode {
+                        0 => *frame.last_mut().unwrap() ^= 1,
+                        2 => {
+                            frame.pop();
+                        }
+                        8 => {
+                            frame.truncate(1);
+                        } // EOF inside length prefix
+                        9 => frame.clear(), // EOF before any response
+                        _ => (),
+                    }
+                    socket.write_all(&frame).unwrap();
+                    if let Err(error) = socket.shutdown(std::net::Shutdown::Write) {
+                        assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+                    }
+                    assert_eof(&mut socket);
+                },
+            );
+        });
+        wire.owntone_test_identity();
+        wire.owntone_transient(&owntone_caps()).unwrap();
+        let mut session = session::Session::new();
+        session.start_selected(|| Ok(wire), None).unwrap();
+        let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
+            assert!(session.check_control().is_err(), "mode={mode}");
+        });
+        assert!(output.contains("encrypted OPTIONS"));
+        assert!(!output.contains("encrypted control check validated"));
+        assert!(!output.contains("secret-reason"));
+        assert_eq!(session.state(), session::State::Failed);
+        assert!(session.check_control().is_err());
+        session.stop().unwrap();
+        server.join().unwrap();
+    }
+}
