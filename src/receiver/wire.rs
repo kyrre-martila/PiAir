@@ -492,6 +492,9 @@ impl Wire {
     pub fn post(&mut self, path: &str, body: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         self.auth_post(path, body, self.pyatv_http)
     }
+    pub(super) fn uses_pyatv_transient_profile(&self) -> bool {
+        self.pyatv_http
+    }
     pub(super) fn pyatv_transient_preamble(&mut self) -> Result<()> {
         ensure!(
             self.method == Method::Transient,

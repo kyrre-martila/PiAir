@@ -177,13 +177,16 @@ fn setup_mock_http(
     } else {
         0
     };
-    let m1 = Tlv::parse(&request_http_profile(
-        &mut socket,
-        "/pair-setup",
-        method,
-        pyatv,
-    ))
-    .unwrap();
+    let m1_bytes = request_http_profile(&mut socket, "/pair-setup", method, pyatv);
+    if method == Method::Transient {
+        let expected = if pyatv {
+            [0x00, 0x01, 0x00, 0x06, 0x01, 0x01, 0x13, 0x01, 0x10]
+        } else {
+            [0x06, 0x01, 0x01, 0x00, 0x01, 0x00, 0x13, 0x01, 0x10]
+        };
+        assert_eq!(m1_bytes, expected);
+    }
+    let m1 = Tlv::parse(&m1_bytes).unwrap();
     assert_eq!(m1.get(0).unwrap(), [0]);
     assert_eq!(m1.get(STATE).unwrap(), [1]);
     if method == Method::Transient {
@@ -1930,41 +1933,36 @@ fn pyatv_preamble_rejects_non_transient_without_request() {
 
 #[test]
 fn pyatv_preamble_success_then_m1_rejection_is_safe_and_final() {
-    let (mut wire, server) = local_mock_method(Method::Transient, |mut socket| {
-        pyatv_preamble_request(&mut socket);
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-            .unwrap();
-        let m1 = Tlv::parse(&request_http_profile(
-            &mut socket,
-            "/pair-setup",
-            Method::Transient,
-            true,
-        ))
-        .unwrap();
-        assert_eq!(m1.get(STATE).unwrap(), [1]);
-        assert_eq!(m1.integer(FLAGS).unwrap(), Some(0x10));
-        socket.write_all(b"HTTP/1.1 403 secret-reason\r\nContent-Length: 12\r\nSet-Cookie: secret-cookie\r\n\r\nsecret-proof").unwrap();
-        assert_eof(&mut socket);
-    });
-    let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
-        let mut session = session::Session::new();
-        assert!(session
-            .start_selected(
-                || {
-                    wire.pyatv_transient_preamble()?;
-                    Ok(wire)
-                },
-                None
-            )
-            .is_err());
-        assert_eq!(session.state(), session::State::Failed);
-    });
-    server.join().unwrap();
-    assert!(output.contains("pyatv transient preamble"));
-    assert!(output.contains("pair-setup M1/M2"));
-    assert!(output.contains("403"));
-    assert!(!output.contains("secret"));
+    for status in [400, 403, 470, 500] {
+        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
+            pyatv_preamble_request(&mut socket);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            let m1 = request_http_profile(&mut socket, "/pair-setup", Method::Transient, true);
+            assert_eq!(m1, [0x00, 0x01, 0x00, 0x06, 0x01, 0x01, 0x13, 0x01, 0x10]);
+            write!(socket, "HTTP/1.1 {status} secret-reason\r\nContent-Length: 12\r\nSet-Cookie: secret-cookie\r\n\r\nsecret-proof").unwrap();
+            assert_eof(&mut socket);
+        });
+        let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
+            let mut session = session::Session::new();
+            assert!(session
+                .start_selected(
+                    || {
+                        wire.pyatv_transient_preamble()?;
+                        Ok(wire)
+                    },
+                    None
+                )
+                .is_err());
+            assert_eq!(session.state(), session::State::Failed);
+        });
+        server.join().unwrap();
+        assert!(output.contains("pyatv transient preamble"));
+        assert!(output.contains("pair-setup M1/M2"));
+        assert!(output.contains(&status.to_string()));
+        assert!(!output.contains("secret"));
+    }
 }
 
 #[test]
