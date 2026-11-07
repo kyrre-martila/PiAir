@@ -285,3 +285,20 @@ fn realtime_diagnostic_requires_approval_interaction_and_bounded_duration() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
     assert!(!dir.path().join("receiver-state").exists());
 }
+
+#[test]
+fn pyatv_preamble_option_is_authenticate_only_and_disabled_by_default() {
+    let help = run(&["authenticate", "--help"]);
+    assert!(help.status.success());
+    assert!(String::from_utf8(help.stdout)
+        .unwrap()
+        .contains("--experimental-pyatv-transient-preamble"));
+    for command in ["pair", "stream-test", "select"] {
+        let output = run(&[
+            command,
+            "device:aabbccddeeff",
+            "--experimental-pyatv-transient-preamble",
+        ]);
+        assert_eq!(output.status.code(), Some(2));
+    }
+}

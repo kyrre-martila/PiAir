@@ -45,6 +45,9 @@ pub enum Command {
         /// Explicitly test encrypted RTSP OPTIONS on the same verified socket.
         #[arg(long)]
         control_check: bool,
+        /// Controlled hardware experiment: send the pinned pyatv HKP 4 preamble.
+        #[arg(long)]
+        experimental_pyatv_transient_preamble: bool,
     },
     /// Explicit short AirPlay 2 realtime ALAC/44100/NTP test; interactive approval.
     StreamTest {
@@ -81,4 +84,34 @@ pub enum AudioCommand {
 pub enum ConfigCommand {
     Check,
     Show,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn preamble_requires_explicit_flag() {
+        for (args, expected) in [
+            (vec!["piair", "authenticate", "device:aabbccddeeff"], false),
+            (
+                vec![
+                    "piair",
+                    "authenticate",
+                    "device:aabbccddeeff",
+                    "--experimental-pyatv-transient-preamble",
+                ],
+                true,
+            ),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Command::Authenticate {
+                experimental_pyatv_transient_preamble,
+                ..
+            } = cli.command
+            else {
+                panic!("authenticate expected")
+            };
+            assert_eq!(experimental_pyatv_transient_preamble, expected);
+        }
+    }
 }

@@ -162,11 +162,17 @@ pub fn unpair(loaded: &Loaded, id: &str) -> Result<()> {
     println!("Local credentials removed for {id}. Receiver-side pairing and allowlist unchanged; no connection made.");
     Ok(())
 }
-pub fn pair(loaded: &Loaded, id: &str, authenticate: bool, control_check: bool) -> Result<()> {
+pub fn pair(
+    loaded: &Loaded,
+    id: &str,
+    authenticate: bool,
+    control_check: bool,
+    pyatv_preamble: bool,
+) -> Result<()> {
     exact_id(id)?;
     ensure!(loaded.config.allows(id), "receiver is not approved");
     ensure!(
-        io::stdin().is_terminal() && io::stdout().is_terminal(),
+        pyatv_preamble || (io::stdin().is_terminal() && io::stdout().is_terminal()),
         "pair/authenticate requires an interactive terminal"
     );
     let store = store::Store::new(&loaded.path)?;
@@ -175,6 +181,11 @@ pub fn pair(loaded: &Loaded, id: &str, authenticate: bool, control_check: bool) 
         .context("select this approved receiver first")?;
     ensure!(selected.id == id, "receiver is not selected");
     let transient = selected.method == Method::Transient;
+    ensure!(!pyatv_preamble || (authenticate && transient), "experimental pyatv preamble requires authenticate with explicit transient selection; no fallback");
+    ensure!(
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+        "pair/authenticate requires an interactive terminal"
+    );
     let existing = if transient {
         None
     } else {
@@ -188,6 +199,9 @@ pub fn pair(loaded: &Loaded, id: &str, authenticate: bool, control_check: bool) 
         transient || authenticate == existing.is_some(),
         "pair requires no existing credentials; authenticate requires stored credentials"
     );
+    if pyatv_preamble {
+        println!("Controlled hardware experiment: pyatv transient preamble; no compatibility or HomePod support claim.");
+    }
     print!(
         "{} {id}? Type the exact receiver ID to continue: ",
         if authenticate { "Authenticate" } else { "Pair" }
@@ -206,7 +220,13 @@ pub fn pair(loaded: &Loaded, id: &str, authenticate: bool, control_check: bool) 
     if authenticate {
         let mut session = session::Session::new();
         session.start_selected(
-            || wire::Wire::connect(&loaded.path, id, &selected, &snapshot),
+            || {
+                let mut wire = wire::Wire::connect(&loaded.path, id, &selected, &snapshot)?;
+                if pyatv_preamble {
+                    wire.pyatv_transient_preamble()?;
+                }
+                Ok(wire)
+            },
             if transient { None } else { existing.as_ref() },
         )?;
         if control_check {

@@ -34,7 +34,7 @@ fn safe_header(name: &str, value: &str) -> Option<(&'static str, String)> {
         {
             "content-type"
         }
-        "user-agent" if value == "PiAir/0.1" => "user-agent",
+        "user-agent" if ["PiAir/0.1", "AirPlay/320.20"].contains(&value) => "user-agent",
         // Host is emitted by our constructor; omit receiver Host and arbitrary strings.
         _ => return None,
     };
