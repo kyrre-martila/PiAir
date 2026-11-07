@@ -143,6 +143,9 @@ impl Wire {
             .set_write_timeout(Some(remaining.min(Duration::from_secs(3))))?;
         Ok(())
     }
+    pub(super) fn limit_cleanup(&mut self) {
+        self.budget = Duration::from_millis(250);
+    }
     fn read_raw(&mut self, bytes: &mut [u8]) -> Result<()> {
         let mut offset = 0;
         while offset < bytes.len() {
@@ -150,7 +153,12 @@ impl Wire {
             let n = self
                 .socket
                 .read(&mut bytes[offset..])
-                .context("receiver read failed/timed out")?;
+                .map_err(|error| match error.kind() {
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                        anyhow::anyhow!("receiver read timeout")
+                    }
+                    _ => anyhow::anyhow!("receiver read failed: kind={:?}", error.kind()),
+                })?;
             ensure!(n > 0, "truncated receiver response");
             offset += n;
         }
@@ -318,8 +326,8 @@ impl Wire {
             }
             request.extend_from_slice(b"\r\n");
             request.extend_from_slice(body);
-            self.write_message(&request)?;
-            let body = self.response()?;
+            self.write_message(&request).context("request write")?;
+            let body = self.response().context("response read/validation")?;
             ensure!(
                 self.pending_start == self.pending_end,
                 "unsolicited control data"
@@ -454,7 +462,7 @@ impl Wire {
         while !raw.ends_with(b"\r\n\r\n") {
             ensure!(raw.len() < 8192, "receiver headers too large");
             let mut b = [0];
-            self.read_exact(&mut b)?;
+            self.read_exact(&mut b).context("response headers")?;
             raw.push(b[0]);
         }
         let text = std::str::from_utf8(&raw).context("invalid response headers")?;
@@ -478,67 +486,70 @@ impl Wire {
             "receiver rejected request with status {} (no FairPlay/MFi/password/redirect fallback)",
             words[1]
         );
-        let mut headers = BTreeMap::new();
-        for line in lines {
-            let (key, value) = line.split_once(':').context("malformed receiver header")?;
+        (|| {
+            let mut headers = BTreeMap::new();
+            for line in lines {
+                let (key, value) = line.split_once(':').context("malformed receiver header")?;
+                ensure!(
+                    !key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+                    "invalid receiver header name"
+                );
+                ensure!(
+                    value.bytes().all(|b| b == b'\t' || (32..=126).contains(&b)),
+                    "invalid receiver header value"
+                );
+                ensure!(
+                    headers
+                        .insert(key.to_ascii_lowercase(), value.trim())
+                        .is_none(),
+                    "duplicate receiver header"
+                );
+            }
             ensure!(
-                !key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
-                "invalid receiver header name"
+                !headers.contains_key("transfer-encoding") && !headers.contains_key("location"),
+                "receiver transfer encoding/redirect unsupported"
             );
+            if let Some(seq) = headers.get("cseq") {
+                ensure!(
+                    !seq.is_empty() && seq.bytes().all(|b| b.is_ascii_digit()),
+                    "invalid receiver CSeq"
+                );
+                ensure!(
+                    seq.parse::<u32>().ok() == Some(self.seq),
+                    "unexpected receiver CSeq"
+                );
+            } else if words[0] == "RTSP/1.0" || self.keys.is_some() {
+                bail!("receiver CSeq absent");
+            }
             ensure!(
-                value.bytes().all(|b| b == b'\t' || (32..=126).contains(&b)),
-                "invalid receiver header value"
+                !headers.get("connection").is_some_and(|v| v
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("close"))),
+                "receiver terminated connection"
             );
+            // RTSP permits an absent Content-Length for an empty response.
+            let raw_length = match headers.get("content-length") {
+                Some(value) => *value,
+                None if self.keys.is_some() && words[0] == "RTSP/1.0" => "0",
+                None => bail!("receiver Content-Length absent"),
+            };
             ensure!(
-                headers
-                    .insert(key.to_ascii_lowercase(), value.trim())
-                    .is_none(),
-                "duplicate receiver header"
+                !raw_length.is_empty() && raw_length.bytes().all(|b| b.is_ascii_digit()),
+                "invalid receiver Content-Length"
             );
-        }
-        ensure!(
-            !headers.contains_key("transfer-encoding") && !headers.contains_key("location"),
-            "receiver transfer encoding/redirect unsupported"
-        );
-        if let Some(seq) = headers.get("cseq") {
-            ensure!(
-                !seq.is_empty() && seq.bytes().all(|b| b.is_ascii_digit()),
-                "invalid receiver CSeq"
-            );
-            ensure!(
-                seq.parse::<u32>().ok() == Some(self.seq),
-                "unexpected receiver CSeq"
-            );
-        } else if words[0] == "RTSP/1.0" || self.keys.is_some() {
-            bail!("receiver CSeq absent");
-        }
-        ensure!(
-            !headers.get("connection").is_some_and(|v| v
-                .split(',')
-                .any(|token| token.trim().eq_ignore_ascii_case("close"))),
-            "receiver terminated connection"
-        );
-        // RTSP permits an absent Content-Length for an empty response.
-        let raw_length = match headers.get("content-length") {
-            Some(value) => *value,
-            None if self.keys.is_some() && words[0] == "RTSP/1.0" => "0",
-            None => bail!("receiver Content-Length absent"),
-        };
-        ensure!(
-            !raw_length.is_empty() && raw_length.bytes().all(|b| b.is_ascii_digit()),
-            "invalid receiver Content-Length"
-        );
-        let length = raw_length
-            .parse::<usize>()
-            .context("invalid response size")?;
-        ensure!(length <= super::tlv::LIMIT, "receiver body too large");
-        let mut body = Zeroizing::new(vec![0; length]);
-        self.read_exact(&mut body)?;
-        self.last_headers = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.to_string()))
-            .collect();
-        Ok(body)
+            let length = raw_length
+                .parse::<usize>()
+                .context("invalid response size")?;
+            ensure!(length <= super::tlv::LIMIT, "receiver body too large");
+            let mut body = Zeroizing::new(vec![0; length]);
+            self.read_exact(&mut body).context("response body")?;
+            self.last_headers = headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.to_string()))
+                .collect();
+            Ok(body)
+        })()
+        .context("RTSP/HTTP status=200 malformed or incomplete response")
     }
 }
 
@@ -662,7 +673,9 @@ impl Worker {
         });
         let state = health.clone();
         let join = thread::spawn(move || {
-            if let Err(error) = work(&state) {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&state)))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("worker panicked")));
+            if let Err(error) = result {
                 if !state.stop.load(Ordering::Relaxed) {
                     *state.failure.lock().unwrap() = Some(format!("{error:#}"));
                 }
@@ -695,6 +708,7 @@ impl Worker {
     }
     fn timing(socket: UdpSocket, lease: Lease, clock: Arc<super::realtime::Clock>) -> Result<Self> {
         socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+        socket.set_write_timeout(Some(Duration::from_millis(100)))?;
         Ok(Self::spawn(None, move |health| {
             let mut b = [0; 33];
             while !health.stop.load(Ordering::Relaxed) {
@@ -817,5 +831,40 @@ impl Drop for Worker {
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+
+    #[test]
+    fn partial_encrypted_event_is_interrupted_by_cleanup() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let socket = listener.accept().unwrap().0;
+        let mut wire = Wire::mock(socket, Duration::from_secs(3), "test");
+        wire.keys = Some(super::super::crypto::ControlKeys::events(&[7; 32]));
+        // Only half of the encrypted frame length: read_exact cannot finish.
+        peer.write_all(&[1]).unwrap();
+        let worker = Worker::events(wire).unwrap();
+        thread::park_timeout(Duration::from_millis(50));
+        let start = Instant::now();
+        drop(worker);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn panicked_worker_reports_failure_and_cleanup_does_not_panic() {
+        let worker = Worker::spawn(None, |_| panic!("test worker panic"));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !worker.join.as_ref().unwrap().is_finished() {
+            assert!(Instant::now() < deadline);
+            thread::park_timeout(Duration::from_millis(1));
+        }
+        assert!(format!("{:#}", worker.check().unwrap_err()).contains("worker panicked"));
+        drop(worker);
     }
 }

@@ -88,6 +88,10 @@ enum Mode {
     BadCodec,
     BadPort,
     NoTiming,
+    NoEvent,
+    BadTiming,
+    SilentTeardown,
+    EventRefused,
     BadEventTag,
     Revoke,
     Disconnect,
@@ -144,8 +148,11 @@ fn receiver(s: TcpStream, mode: Mode, seen: Arc<AtomicU64>) {
         let mut query = [0; 32];
         query[..4].copy_from_slice(&[0x80, 0xd2, 0, 7]);
         query[24..].copy_from_slice(&123_u64.to_be_bytes());
+        if matches!(mode, Mode::BadTiming) {
+            query[1] = 0;
+        }
         while !time_stop.load(Ordering::Relaxed) {
-            if !matches!(mode, Mode::NoTiming) {
+            if !matches!(mode, Mode::NoTiming | Mode::SilentTeardown) {
                 timing.send(&query).unwrap();
                 let mut b = [0; 64];
                 match timing.recv(&mut b) {
@@ -171,6 +178,12 @@ fn receiver(s: TcpStream, mode: Mode, seen: Arc<AtomicU64>) {
             thread::park_timeout(Duration::from_millis(100));
         }
     });
+    let event = if matches!(mode, Mode::EventRefused) {
+        drop(event);
+        None
+    } else {
+        Some(event)
+    };
     send_reply(
         &mut socket,
         &mut keys,
@@ -181,12 +194,29 @@ fn receiver(s: TcpStream, mode: Mode, seen: Arc<AtomicU64>) {
         ])),
         "",
     );
+    if matches!(mode, Mode::EventRefused) {
+        let end = read_message(&mut socket, &mut keys);
+        assert_eq!(end.method, "TEARDOWN");
+        send_reply(&mut socket, &mut keys, &end, None, "");
+        stop.store(true, Ordering::Relaxed);
+        timer.join().unwrap();
+        assert_eof(&mut socket);
+        return;
+    }
+    let event = event.unwrap();
     let event_stop = stop.clone();
     let events = thread::spawn(move || {
         let (mut socket, _) = event.accept().unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
+        if matches!(mode, Mode::NoEvent) {
+            while !event_stop.load(Ordering::Relaxed) {
+                thread::park_timeout(Duration::from_millis(20));
+            }
+            assert_eof(&mut socket);
+            return;
+        }
         let mut keys = ControlKeys::events(&shared);
         keys.swap_directions_for_test();
         let mut body = Vec::new();
@@ -454,7 +484,9 @@ fn receiver(s: TcpStream, mode: Mode, seen: Arc<AtomicU64>) {
             }
             "TEARDOWN" => {
                 assert!(plist(&r).as_dictionary().unwrap().is_empty());
-                send_reply(&mut socket, &mut keys, &r, None, "");
+                if !matches!(mode, Mode::SilentTeardown) {
+                    send_reply(&mut socket, &mut keys, &r, None, "");
+                }
                 break;
             }
             other => panic!("unexpected {other}"),
@@ -504,6 +536,10 @@ fn unsupported_codec_and_partial_setup_errors_fail_and_cleanup() {
         Mode::BadCodec,
         Mode::BadPort,
         Mode::NoTiming,
+        Mode::NoEvent,
+        Mode::BadTiming,
+        Mode::SilentTeardown,
+        Mode::EventRefused,
         Mode::BadEventTag,
         Mode::BadSession,
     ] {
@@ -512,7 +548,36 @@ fn unsupported_codec_and_partial_setup_errors_fail_and_cleanup() {
         let (wire, server) = local_mock(move |s| receiver(s, mode, count));
         let mut session = Session::new();
         session.start(|| Ok(wire), &credential()).unwrap();
-        assert!(session.negotiate_realtime().is_err());
+        let start = std::time::Instant::now();
+        let error = session.negotiate_realtime().unwrap_err();
+        let diagnostic = format!("{error:#}");
+        match mode {
+            Mode::NoTiming | Mode::SilentTeardown => assert!(
+                diagnostic.contains("ntp_ready=false event_ready=true"),
+                "{diagnostic}"
+            ),
+            Mode::EventRefused => assert!(
+                diagnostic.contains("stage=event connection"),
+                "{diagnostic}"
+            ),
+            Mode::NoEvent => assert!(
+                diagnostic.contains("ntp_ready=true event_ready=false"),
+                "{diagnostic}"
+            ),
+            Mode::BadEventTag => assert!(diagnostic.contains("event worker"), "{diagnostic}"),
+            Mode::BadTiming => assert!(diagnostic.contains("NTP worker"), "{diagnostic}"),
+            Mode::BadPort | Mode::BadSession => assert!(
+                diagnostic.contains("stage=stream SETUP") && diagnostic.contains("status=200"),
+                "{diagnostic}"
+            ),
+            Mode::BadCodec => assert!(
+                diagnostic.contains("stage=GET /info") && diagnostic.contains("status=200"),
+                "{diagnostic}"
+            ),
+            _ => unreachable!(),
+        }
+        assert_eq!(session.failure(), Some(diagnostic.as_str()));
+        assert!(start.elapsed() < Duration::from_secs(5));
         assert_eq!(session.state(), State::Failed);
         assert_eq!(session.packets_sent, 0);
         session.stop().unwrap();
@@ -612,4 +677,146 @@ fn cancelled_diagnostic_tears_down_without_sending_audio() {
     session.stop().unwrap();
     server.join().unwrap();
     assert_eq!(seen.load(Ordering::Relaxed), 0);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NegotiationFault {
+    Timeout,
+    Status,
+    Malformed,
+}
+
+#[test]
+fn request_failures_attribute_each_negotiation_stage_and_close_channels() {
+    for (target, stage, method) in [
+        (0, "GET /info", "GET"),
+        (1, "initial SETUP", "SETUP"),
+        (2, "RECORD", "RECORD"),
+        (3, "stream SETUP", "SETUP"),
+        (4, "SET_PARAMETER volume", "SET_PARAMETER"),
+    ] {
+        for fault in [
+            NegotiationFault::Timeout,
+            NegotiationFault::Status,
+            NegotiationFault::Malformed,
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let server = thread::spawn(move || {
+                let (mut socket, mut keys) =
+                    verify_mock_core(listener.accept().unwrap().0, Fault::None, PI, |_| {})
+                        .unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let event = TcpListener::bind("127.0.0.1:0").unwrap();
+                let timing = UdpSocket::bind("127.0.0.1:0").unwrap();
+                let data = UdpSocket::bind("127.0.0.1:0").unwrap();
+                let mut event_socket = None;
+                for index in 0..=target {
+                    let request = read_message(&mut socket, &mut keys);
+                    assert_eq!(
+                        request.method,
+                        ["GET", "SETUP", "RECORD", "SETUP", "SET_PARAMETER"][index]
+                    );
+                    if index == target {
+                        match fault {
+                            NegotiationFault::Timeout => {} // Wait for the client's deadline and EOF.
+                            NegotiationFault::Status | NegotiationFault::Malformed => {
+                                // Deliberately sensitive reason/header/body must never appear in diagnostics.
+                                let response = if matches!(fault, NegotiationFault::Status) {
+                                    "RTSP/1.0 453 SECRET-REASON\r\nAuthorization: SECRET-HEADER\r\nContent-Length: 11\r\n\r\nSECRET-BODY".to_owned()
+                                } else {
+                                    "RTSP/1.0 200 OK\r\nCSeq: wrong-SECRET\r\nContent-Length: 0\r\n\r\n".to_owned()
+                                };
+                                socket
+                                    .write_all(&keys.encrypt(response.as_bytes()).unwrap())
+                                    .unwrap();
+                            }
+                        }
+                        assert_eof(&mut socket);
+                        if let Some(mut event) = event_socket {
+                            assert_eof(&mut event);
+                        }
+                        return;
+                    }
+                    let value = match index {
+                        0 => Some(profile::dict([(
+                            "features",
+                            profile::uint((1 << 9) | (1 << 19)),
+                        )])),
+                        1 => Some(profile::dict([
+                            (
+                                "eventPort",
+                                profile::uint(u64::from(event.local_addr().unwrap().port())),
+                            ),
+                            (
+                                "timingPort",
+                                profile::uint(u64::from(timing.local_addr().unwrap().port())),
+                            ),
+                        ])),
+                        3 => Some(profile::dict([(
+                            "streams",
+                            Value::Array(vec![profile::dict([
+                                ("type", profile::uint(96)),
+                                (
+                                    "dataPort",
+                                    profile::uint(u64::from(data.local_addr().unwrap().port())),
+                                ),
+                                (
+                                    "controlPort",
+                                    profile::uint(u64::from(data.local_addr().unwrap().port())),
+                                ),
+                            ])]),
+                        )])),
+                        _ => None,
+                    };
+                    send_reply(&mut socket, &mut keys, &request, value, "");
+                    if index == 1 {
+                        event_socket = Some(event.accept().unwrap().0);
+                        event_socket
+                            .as_ref()
+                            .unwrap()
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                    }
+                }
+            });
+            let wire = Wire::mock(socket, Duration::from_millis(300), ID);
+            let mut session = Session::new();
+            session.start(|| Ok(wire), &credential()).unwrap();
+            let start = std::time::Instant::now();
+            let error = session.negotiate_realtime().unwrap_err();
+            let diagnostic = format!("{error:#}");
+            assert!(
+                diagnostic.contains(&format!("stage={stage}")),
+                "{diagnostic}"
+            );
+            assert!(
+                diagnostic.contains(&format!("method={method}")),
+                "{diagnostic}"
+            );
+            match fault {
+                NegotiationFault::Timeout => {
+                    assert!(diagnostic.contains("read timeout"), "{diagnostic}")
+                }
+                NegotiationFault::Status => {
+                    assert!(diagnostic.contains("status 453"), "{diagnostic}")
+                }
+                NegotiationFault::Malformed => assert!(
+                    diagnostic.contains("status=200")
+                        && diagnostic.contains("invalid receiver CSeq"),
+                    "{diagnostic}"
+                ),
+            }
+            assert!(!diagnostic.contains("SECRET"), "{diagnostic}");
+            assert_eq!(session.failure(), Some(diagnostic.as_str()));
+            assert_eq!(session.state(), State::Failed);
+            assert_eq!(session.packets_sent, 0);
+            session.stop().unwrap();
+            session.stop().unwrap();
+            assert!(start.elapsed() < Duration::from_secs(2));
+            server.join().unwrap();
+        }
+    }
 }

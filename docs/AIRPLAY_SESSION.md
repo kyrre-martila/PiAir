@@ -226,3 +226,48 @@ ALSA rate to 44100 for this profile, propagate discontinuities, preserve bounded
 pre-roll/backpressure and retain the same authorization owner. It must not simply
 connect the default 48000 Hz detector stream or wire silence events into startup.
 The planned capture integration remains a separate milestone.
+
+## Realtime negotiation failure diagnostics
+
+The reported Apple TV failure after successful HAP pair-verify and encrypted
+OPTIONS does not establish which subsequent request stalled. No hardware was
+contacted for this investigation. Negotiation failures now include a local stage
+label and RTSP method for GET /info, initial SETUP, RECORD, stream SETUP and
+SET_PARAMETER. Separate labels cover media socket setup, NTP worker startup,
+event connection and the final NTP/event synchronization wait. Request errors
+identify writes versus response reads/validation; response reads identify headers
+versus body. Socket WouldBlock (including Linux EAGAIN/os error 11 on a blocking
+socket with a read timeout) and TimedOut are reported as read timeouts, separately
+from other read errors. Validated numeric receiver rejection statuses and status
+200 on subsequent response validation failures are retained. Worker errors name
+the event or NTP worker; synchronization timeouts report only readiness booleans.
+The command's existing error log emits this context at default verbosity.
+
+Diagnostics never include request URIs containing session IDs, PINs, credentials,
+keys, tokens, payloads, raw plists, headers or receiver metadata. Binary plist
+library errors are replaced with a fixed message rather than forwarding decoder
+error content. Stage labels and method names come from local constants.
+
+The request sequence remains GET /info, initial SETUP, authenticated event
+connection with NTP service running, RECORD, stream SETUP, volume SET_PARAMETER,
+then NTP/event readiness. The existing 15-second request budget, capped 3-second
+socket reads/writes, and 3-second synchronization wait remain unchanged. There
+is no evidence here to justify a protocol ordering change or longer timeouts.
+Failure cleanup limits best-effort TEARDOWN to a 250ms request budget, preserves
+the original failure, then closes control/event sockets and joins workers. The
+NTP worker has 100ms read and write timeouts; shutting down the event socket
+interrupts partial frame reads. Cleanup errors do not replace the primary error.
+
+Loopback mock regressions cover timeouts, rejected statuses and malformed
+responses at each RTSP negotiation request; failed event connection; malformed
+stream/session responses; missing NTP or initial event; NTP/event worker failures;
+a receiver ignoring TEARDOWN; partial encrypted event cleanup; and worker panic.
+They check attribution, sensitive-text exclusion, terminal state, zero audio
+packets, channel closure and idempotent stop. Existing allowlist, authorization,
+explicit confirmation, encryption and response validation remain enforced.
+
+Unverified on Apple TV: acceptance of the existing realtime NTP/ALAC profile and
+request sequence, arrival of the initial updateInfo event and NTP queries within
+the existing deadlines, and successful playback. Mock tests validate local
+behavior, not those hardware assumptions. No OwnTone, Autostream or system
+services were changed.

@@ -146,7 +146,7 @@ pub fn parse(bytes: &[u8]) -> Result<Value> {
         "plist offset out of range"
     );
     visit(data, &offsets, ref_size, root, 0, &mut 2048)?;
-    Value::from_reader(Cursor::new(bytes)).context("invalid binary plist")
+    Value::from_reader(Cursor::new(bytes)).map_err(|_| anyhow::anyhow!("invalid binary plist"))
 }
 pub fn dictionary(value: &Value) -> Result<&Dictionary> {
     value.as_dictionary().context("expected plist dictionary")
