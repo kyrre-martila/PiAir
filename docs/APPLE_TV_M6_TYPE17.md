@@ -1,7 +1,10 @@
 # Apple TV pair-setup M6 type 17 investigation
 
-**Result: diagnostics only, not a compatibility fix.** Reviewed 2026-11-07
-from main `fafe3d4` (merged PR #6). Type 17 (`0x11`) remains rejected.
+**Result: narrowly scoped, evidence-informed compatibility change requiring
+real Apple TV hardware validation.** Reviewed 2026-11-07 from main `fafe3d4`
+(merged PR #6). Type 17 (`0x11`) is optional opaque, untrusted metadata only
+inside successfully AEAD-decrypted pair-setup M6. This is not a verified protocol
+schema or a proven hardware fix.
 No receiver was contacted, pairing retried, remote record changed, or playback
 started during this investigation. No successful Apple TV pairing is claimed.
 
@@ -23,7 +26,7 @@ source is copied or incorporated into PiAir.
 
 | Source | What it establishes | What it does not establish |
 | --- | --- | --- |
-| [Apple HAP Non-Commercial R2 (2019-07-26), public mirror](https://forum.iobroker.net/assets/uploads/files/1634848447889-apple-spezifikation-homekit.pdf), §5.6.6, §5.15 table 5-6, §14.1.1 | M6 decrypts into identifier, Ed25519 public key and signature; the signature binds AccessoryX, identifier and public key. TLV types and method values are distinct namespaces. Generic HAP TLV rules say to ignore unrecognized types. | Table 5-6 does not assign `0x11` or define its format/length. The generic ignore rule does not explain Apple TV AirPlay-specific metadata or authentication policy. PiAir deliberately keeps its stricter stage allowlists for this investigation. |
+| [Apple HAP Non-Commercial R2 (2019-07-26), public mirror](https://forum.iobroker.net/assets/uploads/files/1634848447889-apple-spezifikation-homekit.pdf), §5.6.6, §5.15 table 5-6, §14.1.1 | M6 decrypts into identifier, Ed25519 public key and signature; the signature binds AccessoryX, identifier and public key. TLV types and method values are distinct namespaces. Generic HAP TLV rules say to ignore unrecognized types. | Table 5-6 does not assign `0x11` or define its format/length. The generic ignore rule does not explain Apple TV AirPlay-specific metadata or authentication policy. PiAir accepts only type 17 as an additional opaque field in decrypted M6; all other stage allowlists stay strict. |
 | [Apple HomeKitADK, HAPPairing.h](https://github.com/apple/HomeKitADK/blob/fb201f98f5fdc7fef6a455054f08b59cca5d1ec8/HAP/HAPPairing.h), public Apple implementation referring to HAP R14 | Separates method enumeration, pairing TLV enumeration and flags. The published pairing TLV enumeration includes session ID `0x0e` and flags `0x13`, but no `0x11`. | It is not a tvOS 26 AirPlay specification and does not define this extension. Absence is not proof that Apple TV cannot use it. |
 | [pyatv 0.18.0, hap_tlv8.py](https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/auth/hap_tlv8.py) and [hap_srp.py, step3/step4](https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/auth/hap_srp.py) | Names `0x11` **Name** under an explicitly uncertain Apple-internal comment. Optional M5 name data is an OPACK dictionary. Its client reads the three identity fields from M6 and ignores other fields. | M5 usage is not an M6 schema. `step4` leaves M6 signature verification as a TODO, so successful use of that client alone cannot establish PiAir's full verification requirements. |
 | [pyatv AirPlay server_auth.py, _m5_setup](https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/protocols/airplay/server_auth.py) | A **commented-out** M6 example suggests type 17 can contain an OPACK dictionary with name, model, account and address-related data. This suggests richer peer metadata, not necessarily a plain UTF-8 name. | The example is not emitted by the mock. It supplies no normative required keys, lengths, optionality, firmware provenance, or proof of an interoperable M6 extension. Do not collect those privacy-sensitive values. |
@@ -48,55 +51,54 @@ signature verification. Names, accounts or addresses in possible metadata must
 never replace the signed pairing identifier/key or the explicitly approved
 receiver identity. Even signed peer claims would not grant authorization.
 
-Given the missing M6 schema and firmware-specific evidence, this change does not
-accept, ignore, decode, persist or use type 17. It adds no guessed OPACK or UTF-8
-format rule, length limit, or new authentication method. Existing bounded TLV
-framing, duplicate/fragment checks, outer allowlists, required fields, Ed25519
-verification, exact stored pair-verify identity, receiver selection, approval
-checks and fail-closed persistence are unchanged.
+This change follows the generic HAP extension-tolerance rule and observed
+client handling only for the reported decrypted M6 type 17. PiAir treats it as
+optional opaque, untrusted metadata. It does not parse its internal format,
+interpret, persist, log, or use its contents for authentication, identity or
+authorization. The TLV parser still validates framing and reassembles chunks;
+there is no OPACK parser, guessed UTF-8 rule, or invented field-specific length
+rule. Existing nonempty-value policy and the 8 KiB message bound remain intact.
+This does not establish the field's protocol-defined optionality or schema.
 
-## Safe diagnostic and regression coverage
+Acceptance applies only after M6 AEAD succeeds. All three required identity
+fields and the full HAP Ed25519 signature must still verify before any credential
+is returned. Only the signed identifier/key bind enrollment to the approved
+receiver. Other unexpected types, outer M6 type 17, earlier setup stages and
+pair-verify type 17 remain rejected. Approval/selection rechecks and fail-closed
+persistence are unchanged. No retries, remote cleanup or playback are added.
 
-Only for a structurally valid decrypted **pair-setup M6**, rejection now includes
-the presence and reassembled byte length of type 17, followed by the existing
-sorted unexpected-type numbers. The length is measured across valid consecutive
-255-byte TLV chunks. It is diagnostic data, not a trusted identity or format
-validation. Invalid AEAD or malformed TLV framing yields no type-17 length.
-Outer M6 and pair-verify failures retain their existing type-only diagnostics.
-No values, names, PINs, credentials, keys, signatures or raw bodies are logged.
+## Regression coverage
 
-Tests use synthetic loopback receivers only: baseline signed M6 succeeds;
-otherwise valid M6 with opaque type 17 fails (including a fragmented value);
-truncation, empty/duplicate fields and oversized messages fail structurally;
-unrelated unknown types and outer type 17 fail; each missing required identity
-field and invalid signature fails. A type-17 failure cannot reach credential
-persistence, leaves selection intact and closes the socket without another
-request. Pair-verify also continues to reject type 17. There is no test claiming
-an accepted documented extension: no sufficiently defined extension was found.
+Synthetic loopback receivers exercise baseline M6 and valid signed M6 with
+opaque type 17 of lengths 1, 255, 256 and 510 bytes, including consecutive TLV
+fragments. The fixture bytes are intentionally opaque, not a claimed schema.
+Tests verify the returned and persisted identifier/key match the signed identity,
+and that setup itself does not write credentials before explicit persistence.
 
-## Evidence still needed for acceptance
+With type 17 present, invalid signatures, invalid AEAD, each missing required
+field and unrelated unknown types still fail and save no credentials. Malformed
+TLV headers/lengths, empty/duplicate fields and oversized messages fail. Type 17
+in outer M6, setup M2 or pair-verify M2 fails. Failures after M5 preserve the
+partial-enrollment warning and close without another request. No metadata
+contents or lengths are logged by the compatibility handling.
 
-A future change needs a reliable AirPlay M6 definition or independently
-corroborated receiver behavior identifying the type-17 schema, format/length
-rules (if any), optionality and security/policy role for the applicable pairing
-profile. An interoperable client that verifies the M6 signature and deliberately
-handles this field would strengthen that evidence; generic unknown-field
-tolerance alone does not establish semantics. Establish whether the metadata is
-outside the signature transcript or uses an extended transcript on that profile.
+## Evidence and hardware validation still needed
 
-Safe field presence/length can help scope that investigation but cannot prove
-semantics. Do not export raw decrypted payloads to obtain evidence. Any future
-hardware validation requires the possible partial enrollment to be resolved
-first, explicit authorization for an attempt, and the existing physical receiver
-verification and allowlist. Mock tests do not establish hardware compatibility.
+The sources above support bounded extension tolerance while preserving the HAP
+identity transcript; they do not define a verified Apple TV M6 type-17 schema.
+A reliable AirPlay definition or independently corroborated receiver behavior
+would still be needed to interpret this field, assign format/length rules, or
+claim a firmware-specific protocol meaning. Generic field tolerance and mock
+success do not establish real hardware compatibility.
+
+Do not export raw decrypted payloads to obtain evidence. Any future hardware
+validation requires possible partial enrollment to be resolved first, explicit
+authorization for an attempt, and existing physical receiver verification and
+allowlisting. No hardware test was performed for this change.
 
 ## Validation performed
 
 On x86_64 Linux with Rust 1.99.1: `cargo fmt --check`,
 `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`
 (84 unit tests and 11 integration tests), and `git diff --check` pass.
-The initial sandboxed test run had 33 failures at loopback socket creation
-(`Operation not permitted`); rerunning outside that socket restriction passed
-the complete suite. An initial test compilation error from a Debug-requiring
-assertion was corrected using a boolean assertion, preserving the existing
-non-Debug selection type. No hardware or ARM64 validation was performed.
+No hardware or ARM64 validation was performed.

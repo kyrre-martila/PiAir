@@ -31,22 +31,11 @@ fn decrypted_payload(plaintext: &[u8], allowed: &[u8]) -> Result<Tlv> {
     payload.only(allowed)?;
     Ok(payload)
 }
-// Type 0x11 has no established M6 schema in our evidence ledger. Keep it
-// rejected; expose only its reassembled length after AEAD and TLV validation.
-// This context must not be used for outer messages or pair-verify payloads.
+// Apple-specific type 0x11 is optional opaque metadata only in decrypted M6.
+// Do not interpret its contents or use them as identity/authentication evidence.
+// Required fields and the full Ed25519 transcript are verified by setup_inner.
 fn setup_m6_payload(plaintext: &[u8]) -> Result<Tlv> {
-    let payload = Tlv::parse(plaintext)?;
-    if let Err(error) = payload.only(&[IDENTIFIER, PUBLIC_KEY, SIGNATURE]) {
-        return Err(if let Ok(value) = payload.get(0x11) {
-            error.context(format!(
-                "unrecognized decrypted M6 TLV type 17 present; length={} bytes; semantics unverified",
-                value.len()
-            ))
-        } else {
-            error
-        });
-    }
-    Ok(payload)
+    decrypted_payload(plaintext, &[IDENTIFIER, PUBLIC_KEY, SIGNATURE, 0x11])
 }
 /// Consuming, linear exchange: any error drops the socket and all owned secrets.
 /// Credentials are returned only after M6's AEAD AND signed identity verification.
@@ -280,7 +269,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn m6_type17_diagnostic_requires_well_formed_bounded_tlv() {
+    fn m6_opaque_type17_still_requires_well_formed_bounded_tlv() {
         // These are structural TLV failures, not proposed metadata format rules.
         for malformed in [
             vec![17],
@@ -295,8 +284,8 @@ mod tests {
         }
         let encoded = encode(&[(17, b"synthetic-secret-marker"), (18, b"private")]);
         let diagnostic = format!("{:#}", setup_m6_payload(&encoded).err().unwrap());
-        assert!(diagnostic.contains("length=23 bytes"));
-        assert!(diagnostic.ends_with("unexpected pairing TLV types: [17, 18]"));
+        assert!(!diagnostic.contains("length="));
+        assert!(diagnostic.ends_with("unexpected pairing TLV types: [18]"));
         assert!(!diagnostic.contains("synthetic-secret-marker"));
         assert!(!diagnostic.contains("private"));
     }
