@@ -1,0 +1,24 @@
+name: Rust
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        command:
+          - cargo fmt --check
+          - cargo clippy --all-targets -- -D warnings
+          - cargo test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: ${{ matrix.command }}
+      - name: Check committed dependency resolution
+        if: matrix.command == 'cargo test'
+        run: git diff --exit-code -- Cargo.lock
