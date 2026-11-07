@@ -55,8 +55,7 @@ pub fn verify(key: &[u8; 32], msg: &[u8], sig: &[u8]) -> Result<()> {
         .verify_strict(msg, &Signature::from_slice(sig)?)
         .map_err(|_| anyhow::anyhow!("receiver signature invalid"))
 }
-/// Future control transport keys. No caller can mistake these for an audio session.
-#[allow(dead_code)] // Reserved control framing API; no application/streaming requests yet.
+/// Directional keys owned only by the authenticated control transport.
 pub struct ControlKeys {
     write: Zeroizing<[u8; 32]>,
     read: Zeroizing<[u8; 32]>,
@@ -64,7 +63,6 @@ pub struct ControlKeys {
     rx: u64,
     failed: bool,
 }
-#[allow(dead_code)]
 impl ControlKeys {
     #[cfg(test)]
     pub(super) fn swap_directions_for_test(&mut self) {
@@ -129,5 +127,64 @@ impl ControlKeys {
         )?;
         self.rx += 1;
         Ok(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn fixture() -> Vec<Vec<u8>> {
+        include_str!("../../tests/fixtures/hap-control.hex")
+            .lines()
+            .map(|line| {
+                let (pairs, remainder) = line.as_bytes().as_chunks::<2>();
+                assert!(remainder.is_empty());
+                pairs
+                    .iter()
+                    .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                    .collect()
+            })
+            .collect()
+    }
+    #[test]
+    fn independent_hap_control_fixture_both_directions_and_counters() {
+        let fixtures = fixture();
+        let secret: Vec<u8> = (0..32).collect();
+        let mut client = ControlKeys::new(&secret);
+        for (i, plain) in [
+            b"OPTIONS * RTSP/1.0\r\nCSeq: 3\r\n\r\n".as_slice(),
+            b"second block",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(client.encrypt(plain).unwrap().as_slice(), fixtures[i]);
+            assert_eq!(client.decrypt(&fixtures[i + 2]).unwrap().as_slice(), *plain);
+        }
+        // The same authenticated bytes are not valid a second time.
+        assert!(client.decrypt(&fixtures[3]).is_err());
+        assert!(client.write.iter().all(|b| *b == 0));
+        assert!(client.read.iter().all(|b| *b == 0));
+        assert!(client.encrypt(b"cannot reuse").is_err());
+    }
+    #[test]
+    fn nonce_exhaustion_and_bad_length_permanently_invalidate_both_keys() {
+        for receive in [false, true] {
+            let mut keys = ControlKeys::new(b"secret");
+            if receive {
+                keys.rx = u64::MAX;
+                assert!(keys.decrypt(&fixture()[2]).is_err());
+            } else {
+                keys.tx = u64::MAX;
+                assert!(keys.encrypt(b"last block").is_err());
+            }
+            assert!(keys.failed);
+            assert!(keys.encrypt(b"retry").is_err());
+            assert!(keys.decrypt(&fixture()[2]).is_err());
+        }
+        let mut keys = ControlKeys::new(b"secret");
+        assert_eq!(keys.encrypt(&[0; 1024]).unwrap().len(), 1042);
+        assert!(keys.encrypt(b"").is_err());
+        assert!(keys.encrypt(b"retry").is_err());
     }
 }

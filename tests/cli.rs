@@ -231,3 +231,30 @@ fn pairing_profile_is_explicit_and_never_auto_negotiated() {
     );
     assert!(String::from_utf8_lossy(&run(&["select", "--help"]).stdout).contains("setup-code"));
 }
+
+#[test]
+fn control_diagnostic_is_opt_in_and_cannot_bypass_authentication() {
+    assert!(run(&["authenticate", "--help"]).status.success());
+    let output = run(&["authenticate", "device:aabbccddeeff", "--control-check"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not approved"));
+    assert_eq!(run(&["status", "--control-check"]).status.code(), Some(2));
+    assert_eq!(
+        run(&["pair", "device:aabbccddeeff", "--control-check"])
+            .status
+            .code(),
+        Some(2)
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_piair"))
+        .arg("--config")
+        .arg(path)
+        .args(["authenticate", "device:aabbccddeeff", "--control-check"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
+    assert!(!dir.path().join("receiver-state").exists());
+}

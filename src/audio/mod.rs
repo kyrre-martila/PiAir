@@ -1,4 +1,7 @@
 //! Capture and activity intent only. This module has no network dependency.
+// Independently verified codec; no capture/network adapter until a profile is validated.
+#[allow(dead_code)]
+pub(crate) mod alac;
 mod calibration;
 mod capture;
 pub mod detector;

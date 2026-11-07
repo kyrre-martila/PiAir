@@ -250,7 +250,22 @@ fn setup_rejects_wrong_pin_proof_signature_identity_state_and_aead() {
 fn verify_mock(socket: TcpStream, fault: Fault) {
     verify_mock_with_id(socket, fault, PI)
 }
-fn verify_mock_with_id(mut socket: TcpStream, fault: Fault, signed_id: &str) {
+fn verify_mock_with_id(socket: TcpStream, fault: Fault, signed_id: &str) {
+    drop(verify_mock_continue(socket, fault, signed_id));
+}
+fn verify_mock_continue(
+    socket: TcpStream,
+    fault: Fault,
+    signed_id: &str,
+) -> Option<(TcpStream, ControlKeys)> {
+    verify_mock_before_finish(socket, fault, signed_id, || {})
+}
+fn verify_mock_before_finish(
+    mut socket: TcpStream,
+    fault: Fault,
+    signed_id: &str,
+    before_m4: impl FnOnce(),
+) -> Option<(TcpStream, ControlKeys)> {
     let m1 = Tlv::parse(&request(&mut socket, "/pair-verify")).unwrap();
     let controller_public: [u8; 32] = m1.array(PUBLIC_KEY).unwrap();
     let private = StaticSecret::from([33; 32]);
@@ -297,7 +312,7 @@ fn verify_mock_with_id(mut socket: TcpStream, fault: Fault, signed_id: &str) {
         fault,
         Fault::Identity | Fault::Signature | Fault::Tag | Fault::Fields
     ) {
-        return;
+        return None;
     }
     let m3 = Tlv::parse(&request(&mut socket, "/pair-verify")).unwrap();
     let plain = open(
@@ -320,10 +335,15 @@ fn verify_mock_with_id(mut socket: TcpStream, fault: Fault, signed_id: &str) {
         sub.get(SIGNATURE).unwrap(),
     )
     .unwrap();
+    before_m4();
     if matches!(fault, Fault::State) {
         reply(&mut socket, 2, &[(STATE, &[2])]);
+        None
     } else {
         reply(&mut socket, 2, &[(STATE, &[4])]);
+        let mut keys = ControlKeys::new(shared.as_bytes());
+        keys.swap_directions_for_test();
+        Some((socket, keys))
     }
 }
 #[test]
@@ -877,4 +897,282 @@ fn extra_mfi_or_method_fields_fail_before_pin_instead_of_negotiating() {
         .is_err());
         server.join().unwrap();
     }
+}
+
+// Production pair-verify, encoders and state owner; only receiver keys are synthetic.
+fn encrypted_request(socket: &mut TcpStream, keys: &mut ControlKeys, seq: u32) {
+    let mut raw = Vec::new();
+    while !raw.ends_with(b"\r\n\r\n") {
+        let mut length = [0; 2];
+        socket.read_exact(&mut length).unwrap();
+        let size = usize::from(u16::from_le_bytes(length));
+        assert!((1..=1024).contains(&size));
+        let mut frame = vec![0; size + 18];
+        frame[..2].copy_from_slice(&length);
+        socket.read_exact(&mut frame[2..]).unwrap();
+        raw.extend_from_slice(&keys.decrypt(&frame).unwrap());
+    }
+    assert_eq!(String::from_utf8(raw).unwrap(), format!("OPTIONS * RTSP/1.0\r\nCSeq: {seq}\r\nUser-Agent: PiAir/0.1\r\nContent-Length: 0\r\n\r\n"));
+}
+fn encrypted_reply(socket: &mut TcpStream, keys: &mut ControlKeys, response: &[u8]) {
+    // Frame boundaries are unrelated to RTSP header boundaries. TCP writes are
+    // also split inside the length and authentication tag.
+    for chunk in response.chunks(17) {
+        for byte in keys.encrypt(chunk).unwrap().iter() {
+            socket.write_all(&[*byte]).unwrap();
+        }
+    }
+}
+fn assert_eof(socket: &mut TcpStream) {
+    let mut byte = [0];
+    match socket.read(&mut byte) {
+        Ok(0) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => (),
+        other => panic!("expected closed connection: {other:?}"),
+    }
+}
+#[test]
+fn authenticated_socket_continues_with_independent_counters_and_idempotent_cleanup() {
+    use session::{Session, State};
+    let (wire, server) = local_mock(|s| {
+        let (mut socket, mut keys) = verify_mock_continue(s, Fault::None, PI).unwrap();
+        for seq in [3, 4] {
+            encrypted_request(&mut socket, &mut keys, seq);
+            encrypted_reply(&mut socket, &mut keys, format!("RTSP/1.0 200 OK\r\nCSeq: {seq}\r\nPublic: OPTIONS, SETUP, RECORD, FLUSH, TEARDOWN\r\n\r\n").as_bytes());
+        }
+        assert_eof(&mut socket);
+    });
+    let mut session = Session::new();
+    assert_eq!(session.state(), State::Disconnected);
+    session.start(|| Ok(wire), &credential()).unwrap();
+    assert_eq!(session.state(), State::Negotiating);
+    // An active owner cannot connect again, even if asked twice.
+    assert!(session
+        .start(|| panic!("unnecessary reconnect"), &credential())
+        .is_err());
+    for _ in 0..2 {
+        session.check_control().unwrap();
+    }
+    assert_eq!(session.state(), State::Negotiating); // OPTIONS is not SETUP!
+    session.shutdown();
+    session.shutdown();
+    assert_eq!(session.state(), State::Disconnected);
+    assert!(session.failure().is_none());
+    server.join().unwrap();
+}
+#[test]
+fn buffered_audio_gate_never_sends_setup_or_media_and_preserves_failure() {
+    use session::{Session, State};
+    let (wire, server) = local_mock(|s| {
+        let (mut socket, _) = verify_mock_continue(s, Fault::None, PI).unwrap();
+        assert_eof(&mut socket);
+    });
+    let mut session = Session::new();
+    session.start(|| Ok(wire), &credential()).unwrap();
+    assert!(session.start_buffered_audio().is_err());
+    assert_eq!(session.state(), State::Failed);
+    let reason = session.failure().unwrap().to_owned();
+    assert!(reason.contains("FairPlay") && reason.contains("codec"));
+    session.shutdown();
+    session.shutdown();
+    assert!(session.check_control().is_err());
+    assert_eq!(session.failure(), Some(reason.as_str()));
+    assert!(session
+        .start(|| panic!("no reconnect"), &credential())
+        .is_err());
+    server.join().unwrap();
+}
+#[test]
+fn control_rejects_invalid_status_correlation_lengths_plaintext_and_receiver_termination() {
+    for response in [
+        "RTSP/1.0 200 OK\r\nCSeq: 2\r\n\r\n", // replayed CSeq
+        "RTSP/1.0 200 OK\r\n\r\n",
+        "RTSP/1.0 401 Unauthorized\r\nCSeq: 3\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nCSeq: 3\r\nContent-Length: 0\r\n\r\n",
+        "RTSP/1.0 200 OK\r\nCSeq: 3\r\nContent-Length: 999999\r\n\r\n",
+        "RTSP/1.0 200 OK\r\nCSeq: 3\r\nContent-Length: 0\r\ncontent-length: 0\r\n\r\n",
+        "RTSP/1.0 200 OK\r\nCSeq: 3\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "RTSP/1.0 200 OK\r\nCSeq: 3\r\nConnection: close\r\n\r\n",
+        "POST /command RTSP/1.0\r\nCSeq: 3\r\n\r\n", // unsolicited request
+        "RTSP/1.0 200 OK\r\nCSeq: 3\r\nContent-Length: 1\r\n\r\nx",
+    ] {
+        let (wire, server) = local_mock(move |s| {
+            let (mut socket, mut keys) = verify_mock_continue(s, Fault::None, PI).unwrap();
+            encrypted_request(&mut socket, &mut keys, 3);
+            // Single frame allows validating closure without writing after it.
+            socket
+                .write_all(&keys.encrypt(response.as_bytes()).unwrap())
+                .unwrap();
+            assert_eof(&mut socket);
+        });
+        let mut session = session::Session::new();
+        session.start(|| Ok(wire), &credential()).unwrap();
+        assert!(session.check_control().is_err(), "{response}");
+        assert_eq!(session.state(), session::State::Failed);
+        server.join().unwrap();
+    }
+    for mode in 0..5 {
+        let (wire, server) = local_mock(move |s| {
+            let (mut socket, mut keys) = verify_mock_continue(s, Fault::None, PI).unwrap();
+            encrypted_request(&mut socket, &mut keys, 3);
+            let mut frame = keys.encrypt(b"RTSP/1.0 200 OK\r\nCSeq: 3\r\n\r\n").unwrap();
+            match mode {
+                0 => frame[2] ^= 1, // tag no longer valid
+                1 => frame = Zeroizing::new(vec![0, 0]),
+                2 => frame = Zeroizing::new(vec![1, 4]), // 1025
+                3 => frame = Zeroizing::new(b"RTSP/1.0 200 OK\r\n\r\n".to_vec()),
+                4 => {
+                    frame.pop();
+                } // truncated tag
+                _ => unreachable!(),
+            }
+            socket.write_all(&frame).unwrap();
+            // An invalid frame can make the client close before this half-close.
+            // Linux then returns ENOTCONN; this is already the expected closure.
+            if let Err(error) = socket.shutdown(std::net::Shutdown::Write) {
+                assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+            }
+            assert_eof(&mut socket);
+        });
+        let mut session = session::Session::new();
+        session.start(|| Ok(wire), &credential()).unwrap();
+        assert!(session.check_control().is_err());
+        assert!(session.check_control().is_err());
+        server.join().unwrap();
+    }
+}
+#[test]
+fn authorization_revocation_and_selection_change_close_live_control() {
+    for change_selection in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let selected = selection(port);
+        let store = store::Store::new(&config).unwrap();
+        store.select(&selected).unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) =
+                verify_mock_continue(listener.accept().unwrap().0, Fault::None, PI).unwrap();
+            assert_eof(&mut socket); // No OPTIONS after revocation.
+        });
+        let mut session = session::Session::new();
+        session
+            .start(
+                || Wire::connect(&config, ID, &selected, &snapshot(port)),
+                &credential(),
+            )
+            .unwrap();
+        if change_selection {
+            store.select(&selection(port + 1)).unwrap();
+        } else {
+            std::fs::write(&config, "").unwrap();
+        }
+        assert!(session.check_control().is_err());
+        assert_eq!(session.state(), session::State::Failed);
+        server.join().unwrap();
+    }
+}
+#[test]
+fn session_connect_and_authentication_failures_are_terminal() {
+    let mut session = session::Session::new();
+    assert!(session
+        .start(|| anyhow::bail!("offline"), &credential())
+        .is_err());
+    assert_eq!(session.state(), session::State::Failed);
+    for fault in [Fault::Identity, Fault::Signature, Fault::Tag, Fault::State] {
+        let (wire, server) = local_mock(move |s| verify_mock(s, fault));
+        let mut session = session::Session::new();
+        assert!(session.start(|| Ok(wire), &credential()).is_err());
+        assert_eq!(session.state(), session::State::Failed);
+        assert!(session.failure().is_some());
+        session.shutdown();
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn stalled_control_has_an_absolute_deadline_and_closes_without_retry() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let server = thread::spawn(move || {
+        let (mut socket, mut keys) =
+            verify_mock_continue(listener.accept().unwrap().0, Fault::None, PI).unwrap();
+        encrypted_request(&mut socket, &mut keys, 3);
+        // No sleep or response; EOF proves timeout released the live connection.
+        assert_eof(&mut socket);
+    });
+    let wire = Wire::mock(socket, Duration::from_millis(300), ID);
+    let mut session = session::Session::new();
+    session.start(|| Ok(wire), &credential()).unwrap();
+    assert!(session.check_control().is_err());
+    assert_eq!(session.state(), session::State::Failed);
+    assert!(session.failure().unwrap().contains("timed out"));
+    server.join().unwrap();
+}
+
+#[test]
+fn approval_revoked_during_verify_prevents_live_session_handoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let selected = selection(port);
+    store::Store::new(&config)
+        .unwrap()
+        .select(&selected)
+        .unwrap();
+    let changed = config.clone();
+    let server = thread::spawn(move || {
+        let (mut socket, _) =
+            verify_mock_before_finish(listener.accept().unwrap().0, Fault::None, PI, || {
+                std::fs::write(changed, "").unwrap();
+            })
+            .unwrap();
+        assert_eof(&mut socket);
+    });
+    let mut session = session::Session::new();
+    assert!(session
+        .start(
+            || Wire::connect(&config, ID, &selected, &snapshot(port)),
+            &credential()
+        )
+        .is_err());
+    assert_eq!(session.state(), session::State::Failed);
+    assert!(session.failure().unwrap().contains("revoked"));
+    server.join().unwrap();
+}
+#[test]
+fn replayed_encrypted_response_and_plaintext_reentry_close_control() {
+    let (wire, server) = local_mock(|s| {
+        let (mut socket, mut keys) = verify_mock_continue(s, Fault::None, PI).unwrap();
+        encrypted_request(&mut socket, &mut keys, 3);
+        let frame = keys.encrypt(b"RTSP/1.0 200 OK\r\nCSeq: 3\r\n\r\n").unwrap();
+        socket.write_all(&frame).unwrap();
+        encrypted_request(&mut socket, &mut keys, 4);
+        socket.write_all(&frame).unwrap();
+        assert_eof(&mut socket);
+    });
+    let mut session = session::Session::new();
+    session.start(|| Ok(wire), &credential()).unwrap();
+    session.check_control().unwrap();
+    assert!(session.check_control().is_err());
+    assert!(session
+        .failure()
+        .unwrap()
+        .contains("authentication tag invalid"));
+    server.join().unwrap();
+
+    let (wire, server) = local_mock(|s| {
+        let (mut socket, _) = verify_mock_continue(s, Fault::None, PI).unwrap();
+        assert_eof(&mut socket); // No plaintext POST after upgrade.
+    });
+    let mut control = pairing::verify(wire, &credential()).unwrap();
+    assert!(control.post("/pair-verify", &[]).is_err());
+    assert!(control.options().is_err());
+    control.close();
+    control.close();
+    server.join().unwrap();
 }

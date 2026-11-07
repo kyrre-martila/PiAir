@@ -7,18 +7,24 @@ use std::{
     collections::BTreeMap,
     io::{Read, Write},
     net::{Shutdown, SocketAddr, TcpStream},
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 pub struct Wire {
     socket: TcpStream,
     deadline: Instant,
+    budget: Duration,
     seq: u32,
     failed: bool,
     receiver_id: String,
     method: Method,
+    authorization: Option<(PathBuf, Selection)>,
+    keys: Option<super::crypto::ControlKeys>,
+    pending: Zeroizing<[u8; 1024]>,
+    pending_start: usize,
+    pending_end: usize,
 }
 impl Wire {
     pub fn connect(
@@ -74,21 +80,29 @@ impl Wire {
             Duration::from_secs(3),
         )
         .context("approved receiver connection failed (no retry)")?;
-        Ok(Self::new(
+        let mut wire = Self::new(
             socket,
             Duration::from_secs(15),
             id.to_owned(),
             selected.method,
-        ))
+        );
+        wire.authorization = Some((config_path.to_owned(), selected.clone()));
+        Ok(wire)
     }
     fn new(socket: TcpStream, budget: Duration, receiver_id: String, method: Method) -> Self {
         Self {
             socket,
             deadline: Instant::now() + budget,
+            budget,
             seq: 0,
             failed: false,
             receiver_id,
             method,
+            authorization: None,
+            keys: None,
+            pending: Zeroizing::new([0; 1024]),
+            pending_start: 0,
+            pending_end: 0,
         }
     }
     #[cfg(test)]
@@ -111,21 +125,21 @@ impl Wire {
         &self.receiver_id
     }
     pub fn restart_deadline(&mut self) {
-        self.deadline = Instant::now() + Duration::from_secs(15);
+        self.deadline = Instant::now() + self.budget;
     }
     fn timeout(&self) -> Result<()> {
         let remaining = self
             .deadline
             .checked_duration_since(Instant::now())
-            .context("authentication handshake timed out")?;
-        ensure!(!remaining.is_zero(), "authentication handshake timed out");
+            .context("receiver operation timed out")?;
+        ensure!(!remaining.is_zero(), "receiver operation timed out");
         self.socket
             .set_read_timeout(Some(remaining.min(Duration::from_secs(3))))?;
         self.socket
             .set_write_timeout(Some(remaining.min(Duration::from_secs(3))))?;
         Ok(())
     }
-    fn read_exact(&mut self, bytes: &mut [u8]) -> Result<()> {
+    fn read_raw(&mut self, bytes: &mut [u8]) -> Result<()> {
         let mut offset = 0;
         while offset < bytes.len() {
             self.timeout()?;
@@ -138,12 +152,127 @@ impl Wire {
         }
         Ok(())
     }
-    pub fn post(&mut self, path: &str, body: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        ensure!(!self.failed, "receiver transport already failed");
-        let result = self.post_inner(path, body);
+    fn read_exact(&mut self, bytes: &mut [u8]) -> Result<()> {
+        if self.keys.is_none() {
+            return self.read_raw(bytes);
+        }
+        for byte in bytes {
+            if self.pending_start == self.pending_end {
+                let mut length = [0; 2];
+                self.read_raw(&mut length)?;
+                let size = usize::from(u16::from_le_bytes(length));
+                ensure!((1..=1024).contains(&size), "invalid encrypted frame length");
+                let mut frame = Zeroizing::new(vec![0; size + 18]);
+                frame[..2].copy_from_slice(&length);
+                self.read_raw(&mut frame[2..])?;
+                let plain = self
+                    .keys
+                    .as_mut()
+                    .context("control keys absent")?
+                    .decrypt(&frame)?;
+                self.pending[..plain.len()].copy_from_slice(&plain);
+                self.pending_start = 0;
+                self.pending_end = plain.len();
+            }
+            *byte = self.pending[self.pending_start];
+            self.pending[self.pending_start].zeroize();
+            self.pending_start += 1;
+        }
+        Ok(())
+    }
+    fn write_raw(&mut self, bytes: &[u8]) -> Result<()> {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            self.timeout()?;
+            let n = self.socket.write(&bytes[offset..])?;
+            ensure!(n > 0, "receiver write failed");
+            offset += n;
+        }
+        Ok(())
+    }
+    fn write_message(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.keys.is_none() {
+            return self.write_raw(bytes);
+        }
+        for chunk in bytes.chunks(1024) {
+            let frame = self
+                .keys
+                .as_mut()
+                .context("control keys absent")?
+                .encrypt(chunk)?;
+            self.write_raw(&frame)?;
+        }
+        Ok(())
+    }
+    pub(super) fn reauthorize(&self) -> Result<()> {
+        if let Some((path, selected)) = &self.authorization {
+            ensure!(
+                config::load(Some(path.clone()))?
+                    .config
+                    .allows(&self.receiver_id),
+                "receiver approval revoked"
+            );
+            ensure!(
+                super::store::Store::new(path)?.selection()?.as_ref() == Some(selected),
+                "receiver selection changed"
+            );
+        }
+        Ok(())
+    }
+    pub(super) fn secure(mut self, keys: super::crypto::ControlKeys) -> Result<Self> {
+        self.reauthorize()?;
+        ensure!(
+            !self.failed && self.keys.is_none(),
+            "invalid control upgrade"
+        );
+        self.keys = Some(keys);
+        Ok(self)
+    }
+    pub(super) fn close(&mut self) {
+        self.failed = true;
+        self.keys = None;
+        self.pending.zeroize();
+        self.pending_start = 0;
+        self.pending_end = 0;
+        let _ = self.socket.shutdown(Shutdown::Both);
+    }
+    // A deliberately narrow authenticated diagnostic; no arbitrary request API.
+    pub(super) fn options(&mut self) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                !self.failed && self.keys.is_some(),
+                "authenticated control session required"
+            );
+            self.reauthorize()?;
+            self.restart_deadline();
+            self.seq = self
+                .seq
+                .checked_add(1)
+                .context("request sequence exhausted")?;
+            let request = format!("OPTIONS * RTSP/1.0\r\nCSeq: {}\r\nUser-Agent: PiAir/0.1\r\nContent-Length: 0\r\n\r\n", self.seq);
+            self.write_message(request.as_bytes())?;
+            let body = self.response()?;
+            ensure!(
+                body.is_empty() && self.pending_start == self.pending_end,
+                "unexpected OPTIONS payload or unsolicited message"
+            );
+            self.reauthorize()
+        })();
         if result.is_err() {
-            self.failed = true;
-            let _ = self.socket.shutdown(Shutdown::Both);
+            self.close();
+        }
+        result
+    }
+    pub fn post(&mut self, path: &str, body: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        let result = (|| {
+            ensure!(
+                !self.failed && self.keys.is_none(),
+                "plaintext authentication transport unavailable"
+            );
+            self.post_inner(path, body)
+        })();
+        if result.is_err() {
+            self.close();
         }
         result
     }
@@ -158,15 +287,11 @@ impl Wire {
             .checked_add(1)
             .context("request sequence exhausted")?;
         let header=format!("POST {path} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nCSeq: {}\r\nUser-Agent: PiAir/0.1\r\nContent-Type: application/octet-stream\r\nX-Apple-HKP: 3\r\nContent-Length: {}\r\n\r\n",self.socket.peer_addr()?,self.seq,body.len());
-        for bytes in [header.as_bytes(), body] {
-            let mut offset = 0;
-            while offset < bytes.len() {
-                self.timeout()?;
-                let n = self.socket.write(&bytes[offset..])?;
-                ensure!(n > 0, "receiver write failed");
-                offset += n;
-            }
-        }
+        self.write_message(header.as_bytes())?;
+        self.write_message(body)?;
+        self.response()
+    }
+    fn response(&mut self) -> Result<Zeroizing<Vec<u8>>> {
         let mut raw = Vec::new();
         while !raw.ends_with(b"\r\n\r\n") {
             ensure!(raw.len() < 8192, "receiver headers too large");
@@ -183,8 +308,12 @@ impl Wire {
             "invalid receiver response protocol"
         );
         ensure!(
+            self.keys.is_none() || words[0] == "RTSP/1.0",
+            "encrypted control response must use RTSP/1.0"
+        );
+        ensure!(
             words[1] == "200",
-            "receiver rejected authentication request (no redirects/retry/fallback)"
+            "receiver rejected control/authentication request (no redirects/retry/fallback)"
         );
         let mut headers = BTreeMap::new();
         for line in lines {
@@ -192,6 +321,10 @@ impl Wire {
             ensure!(
                 !key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
                 "invalid receiver header name"
+            );
+            ensure!(
+                value.bytes().all(|b| b == b'\t' || (32..=126).contains(&b)),
+                "invalid receiver header value"
             );
             ensure!(
                 headers
@@ -213,12 +346,21 @@ impl Wire {
                 seq.parse::<u32>().ok() == Some(self.seq),
                 "unexpected receiver CSeq"
             );
-        } else if words[0] == "RTSP/1.0" {
+        } else if words[0] == "RTSP/1.0" || self.keys.is_some() {
             bail!("receiver CSeq absent");
         }
-        let raw_length = headers
-            .get("content-length")
-            .context("receiver Content-Length absent")?;
+        ensure!(
+            !headers.get("connection").is_some_and(|v| v
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("close"))),
+            "receiver terminated connection"
+        );
+        // RTSP permits an absent Content-Length for an empty response.
+        let raw_length = match headers.get("content-length") {
+            Some(value) => *value,
+            None if self.keys.is_some() && words[0] == "RTSP/1.0" => "0",
+            None => bail!("receiver Content-Length absent"),
+        };
         ensure!(
             !raw_length.is_empty() && raw_length.bytes().all(|b| b.is_ascii_digit()),
             "invalid receiver Content-Length"
@@ -230,5 +372,11 @@ impl Wire {
         let mut body = Zeroizing::new(vec![0; length]);
         self.read_exact(&mut body)?;
         Ok(body)
+    }
+}
+
+impl Drop for Wire {
+    fn drop(&mut self) {
+        self.close();
     }
 }

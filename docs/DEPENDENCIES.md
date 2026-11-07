@@ -12,8 +12,9 @@ The declared choices permit this Apache-2.0 original application to depend on
 these crates; no AirPlay sender implementation is included. Choose MIT or
 Apache-2.0 where offered. flume uses the legacy `Apache-2.0/MIT` expression for
 its dual licensing. unicode-ident additionally requires Unicode-3.0 notices;
-that condition must not be dropped when selecting MIT/Apache-2.0. No package
+that condition must not be dropped when selecting MIT/Apache-2.0. No runtime package
 reports a missing license or a required copyleft license in this inventory.
+Prompt 4b adds the test-only MPL-2.0 decoder dependencies described below.
 
 New authentication crates are standard primitives/compositions, not AirPlay sender
 implementations: srp/num-bigint (SRP arithmetic), sha2/hkdf, ed25519-dalek,
@@ -185,3 +186,23 @@ screening whenever Cargo.lock changes.
 | zeroize | 1.9.1 | Apache-2.0 OR MIT |
 | zeroize_derive | 1.5.0 | Apache-2.0 OR MIT |
 | zmij | 1.0.23 | MIT |
+
+## Prompt 4b independent decoder (test only)
+
+Locked metadata rechecked with `cargo metadata --format-version 1 --locked --offline`.
+The new runtime encoder and packet components use existing dependencies only.
+Symphonia is an independent audio decoder, not an AirPlay sender. Its MPL-2.0
+files are unmodified; cargo tests link it to independently decode PiAir output.
+It is not linked into `cargo build --release` binaries. MPL is file-scoped; do not
+remove its source-license notices, and satisfy its source-availability obligations
+if distributing test binaries. No third-party implementation source is vendored.
+The committed lockfile adds these packages (and disambiguates existing bitflags
+2.x references); existing locked versions are unchanged.
+
+| Package | Version | Declared license | Role |
+| --- | --- | --- | --- |
+| arrayvec | 0.7.8 | MIT OR Apache-2.0 | Test decoder dependency |
+| bitflags | 1.3.2 | MIT/Apache-2.0 | Test decoder dependency |
+| bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT | Test decoder dependency |
+| symphonia-codec-alac | 0.5.5 | MPL-2.0 | Independent ALAC decoder in tests |
+| symphonia-core | 0.5.5 | MPL-2.0 | Independent decoder framework in tests |

@@ -2,7 +2,8 @@
 
 A lightweight Rust AirPlay 2 transmitter project for Raspberry Pi OS 64-bit
 (Debian ARM64). Implements ALSA capture, activity monitoring/calibration, passive
-receiver discovery and a limited persistent PIN pairing/authentication foundation.
+receiver discovery, persistent PIN pairing/authentication and encrypted control
+session diagnostics.
 **AirPlay audio playback is not implemented. Apple TV/HomePod compatibility is
 unverified.** Audio tools never discover or contact receivers. Existing Autostream
 and OwnTone services are never modified.
@@ -179,7 +180,19 @@ requests a receiver PIN; `--method setup-code` skips PIN-start and requires an
 independently obtained `XXX-XX-XXX` HAP setup code. Both verify the complete SRP
 and signed M5/M6 exchange before saving. The authenticated receiver identifier
 comes from verified M6, independently of optional, untrusted advertised `pi`.
-Pair-verify uses that stored identifier/key and immediately closes its connection.
+Pair-verify uses that stored identifier/key. By default `authenticate` then closes
+its connection. Explicit `authenticate <id> --control-check` retains the same socket
+for an encrypted RTSP OPTIONS exchange before closing. It requires the same
+approval, selection, credentials and interactive exact-ID confirmation. OPTIONS
+success does not establish audio readiness or receiver playback compatibility.
+See [session implementation, research and precise blockers](docs/AIRPLAY_SESSION.md).
+
+Prompt 4b adds a genuine stereo S16/48 kHz ALAC escape-frame encoder, validated
+with an independent decoder, plus bounded sample buffering and receiver-observed
+encrypted packet components. These have no receiver-directed caller. A complete
+Apple TV buffered negotiation/clock profile remains unresolved; no audio-send
+diagnostic, media connection or audible-playback claim is enabled. See the
+[additional research and exact evidence gaps](docs/BUFFERED_RESEARCH.md).
 
 A tested capability decision rejects unsupported combinations before connection,
 including transient/system-only, unresolved MFi, password and Home-access paths.
@@ -204,8 +217,10 @@ recovery and compatibility gaps](docs/PAIRING.md).
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
+cargo build --release --locked
+git diff --check
 ```
 
 Tests use synthetic PCM, local files, published HAP vectors and loopback mock
@@ -221,5 +236,7 @@ OS scheduling can delay capture and produce reported discontinuities.
 Original code is Apache-2.0; existing licenses are preserved. No source from
 Autostream, OwnTone or airplay2-rs is imported or translated. No AirPlay sender
 library, web UI, database, Docker dependency or systemd installation is included.
-Future milestones add encrypted control I/O, verified hardware compatibility and
-audio sessions; current activity events never initiate network connections.
+Encrypted control continuation is implemented and tested locally. Buffered audio
+remains disabled under the verified-components fallback: media negotiation, codec,
+packet encryption, timing and feedback require a validated profile. Current
+activity events never initiate network connections.
