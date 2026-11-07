@@ -57,7 +57,8 @@ fn run_with_discovery(
         Command::StreamTest {
             receiver_id,
             seconds,
-        } => receiver::stream_test(&loaded, &receiver_id, seconds)?,
+            setup_check,
+        } => receiver::stream_test(&loaded, &receiver_id, seconds, setup_check)?,
         Command::Unpair { receiver_id } => receiver::unpair(&loaded, &receiver_id)?,
         Command::Audio { command } => audio::run(command, &loaded)?,
         Command::Status => {

@@ -217,6 +217,14 @@ impl Session {
     }
     /// Explicit concrete profile: HAP, ALAC/44100/16/2, realtime UDP, NTP.
     pub fn negotiate_realtime(&mut self) -> Result<()> {
+        self.negotiate(false)
+    }
+    /// Validate the initial NTP SETUP only, then release the receiver session.
+    pub fn check_initial_setup(&mut self) -> Result<()> {
+        self.negotiate(true)?;
+        self.stop()
+    }
+    fn negotiate(&mut self, initial_only: bool) -> Result<()> {
         let mut stage = "local initialization";
         let mut status = None;
         let result = (|| {
@@ -233,46 +241,48 @@ impl Session {
                 .context("control absent")?
                 .local_ip()?;
             self.uri = format!("rtsp://{local}/{session_id}");
+            tracing::debug!(target: "piair::rtsp", uri = %self.uri, "session RTSP URI selected");
             status = None;
             stage = "GET /info";
             let info = self.call("GET", Some("/info"), &[], &[])?;
             status = Some(200);
-            profile::capabilities(&Self::plist_response(&info)?)?;
+            let info = Self::plist_response(&info)?;
+            profile::capabilities(&info)?;
+            profile::select_ntp(&info)?;
             status = None;
             stage = "media socket binding";
             let mut ports = self.control.as_ref().unwrap().bind_media()?;
             let control_port = ports.control()?;
             let timing_port = ports.timing()?;
             let uuid = uuid::Uuid::new_v4();
-            let b = uuid.as_bytes();
-            let device = format!(
-                "02:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                b[0], b[1], b[2], b[3], b[4]
-            );
-            let body = profile::binary(&mut profile::dict([
-                ("deviceID", Value::String(device)),
-                (
-                    "sessionUUID",
-                    Value::String(uuid.to_string().to_uppercase()),
-                ),
-                ("timingProtocol", Value::String("NTP".into())),
-                ("timingPort", profile::uint(u64::from(timing_port))),
-            ]))?;
+            let device = self.control.as_ref().unwrap().sender_device_id();
+            let body = profile::ntp_offer(&device, uuid, timing_port)?;
             status = None;
             stage = "initial SETUP";
+            tracing::debug!(target: "piair::rtsp", phase = "initial SETUP", timing_profile = "NTP",
+                body_length = body.len(), timing_port,
+                plist_fields = "deviceID:string,sessionUUID:string,timingProtocol:string,timingPort:unsigned-integer",
+                sender_identity = "persistent client identity", "initial SETUP start");
             self.remote_attempted = true;
             let base = self.call("SETUP", None, &body, &[])?;
+            tracing::debug!(target: "piair::rtsp", phase = "initial SETUP", status = 200,
+                "initial SETUP RTSP response validated");
             status = Some(200);
             let base = Self::plist_response(&base)?;
             let d = profile::dictionary(&base)?;
             if let Some(protocol) = d.get("timingProtocol") {
                 ensure!(
                     protocol.as_string() == Some("NTP"),
-                    "receiver requires unsupported PTP/timing profile"
+                    "receiver requires unsupported PTP/timing profile; PiAir implements NTP only; use a sender with full PTP support"
                 );
             }
             let event_port = profile::port(d, "eventPort")?;
             let receiver_timing = profile::port(d, "timingPort")?;
+            tracing::debug!(target: "piair::rtsp", phase = "initial SETUP", status = 200,
+                timing_profile = "NTP", "initial SETUP profile and ports validated");
+            if initial_only {
+                return Ok(());
+            }
             status = None;
             stage = "NTP worker startup";
             self.control.as_ref().unwrap().start_timing(

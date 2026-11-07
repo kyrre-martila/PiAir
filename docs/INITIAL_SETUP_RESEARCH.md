@@ -1,5 +1,8 @@
 # Initial realtime audio SETUP investigation (PR #10)
 
+Historical findings below describe PR #10. See [PR #21 investigation](INITIAL_SETUP_DIAGNOSTICS.md)
+for persistent sender identity, current diagnostics and the initial-SETUP-only hardware check.
+
 ## Evidence and diagnosis
 
 Baseline: `ab5d000`, fresh main after merged PR #9. Hardware observations supplied
