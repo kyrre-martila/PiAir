@@ -55,7 +55,7 @@ Header name **and value** allowlists apply case-insensitively to names:
 | CSeq, Content-Length, X-Apple-HKP | 1–10 decimal digits |
 | Connection | close or keep-alive |
 | Content-Type | application/octet-stream or application/x-apple-binary-plist |
-| User-Agent | exact local PiAir/0.1 |
+| User-Agent | exact PiAir/0.1, AirPlay/320.20 or AirPlay/999.0.0 |
 
 Numeric Host is emitted separately from the local socket endpoint, never a
 receiver-provided Host value. Unknown names/values are omitted entirely, including
@@ -93,7 +93,7 @@ there is no new hardware success evidence.
 | Transient sequence | two POST /pair-setup | POST /pair-pin-start then two POST /pair-setup | two POST /pair-setup |
 | Transient HKP | 4 | 4, including preamble | 4 |
 | Authentication request protocol | evrtsp emits RTSP | HTTP/1.1 default | HTTP/1.1 |
-| User-Agent | configured airplay_shared user_agent | AirPlay/320.20 | PiAir/0.1 |
+| User-Agent | configured airplay_shared user_agent; pinned default AirPlay/999.0.0 | AirPlay/320.20 | PiAir/0.1 (legacy); AirPlay/999.0.0 (OwnTone experiment) |
 | Client identity headers during authentication | CSeq, X-Apple-Client-Name, Client-Instance, DACP-ID, Active-Remote | none in transient header map | CSeq only |
 | Connection/Host | evrtsp transport | keep-alive; no Host in formatter/header map | keep-alive, numeric Host |
 | Content-Type | octet-stream for setup; PIN-start sequence has no type | octet-stream, including empty preamble | octet-stream, including empty PIN-start |
@@ -140,3 +140,12 @@ Tests use synthetic loopback receivers, including 403 with secret/unexpected
 headers, timeout, EOF, safe diagnostic capture, INFO suppression and the existing
 persistent/transient authentication regression suite. No OwnTone or Autostream
 files or services are changed.
+
+The table above describes the original legacy framing comparison. The explicit
+OwnTone experiment and its initial GET /info are documented separately in
+[OWNTONE_TRANSIENT.md](OWNTONE_TRANSIENT.md). PR #18 identified the pinned
+OwnTone User-Agent default as a supported explanation for the new GET /info 403;
+see [the full investigation and retest instructions](HOMEPOD_INFO_403.md). Debug
+requests now mark `headers_filtered=true`; omitted headers may still be on the
+wire. After authorization checks, an endpoint event records the selected AirPlay
+service and numeric peer before the single TCP connection attempt.

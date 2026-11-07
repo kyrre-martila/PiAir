@@ -34,7 +34,9 @@ fn safe_header(name: &str, value: &str) -> Option<(&'static str, String)> {
         {
             "content-type"
         }
-        "user-agent" if ["PiAir/0.1", "AirPlay/320.20"].contains(&value) => "user-agent",
+        "user-agent" if ["PiAir/0.1", "AirPlay/320.20", "AirPlay/999.0.0"].contains(&value) => {
+            "user-agent"
+        }
         // Host is emitted by our constructor; omit receiver Host and arbitrary strings.
         _ => return None,
     };
@@ -58,11 +60,16 @@ fn reason(status: &str, supplied: &str) -> &'static str {
         _ => "unrecognized (omitted)",
     }
 }
+/// Called only after approval, identity and endpoint validation, before one TCP connect.
+pub(super) fn endpoint(ip: std::net::IpAddr, port: u16) {
+    tracing::debug!(target: "piair::auth", service = "_airplay._tcp.local.",
+        peer = %std::net::SocketAddr::new(ip, port), "authentication endpoint selected");
+}
 pub(super) fn request(header: &str, body_length: usize, phase: &str) {
     let line = header.lines().next().unwrap_or_default();
     // Only called after the endpoint allowlist in Wire::post_inner.
     tracing::debug!(target: "piair::auth", phase, request = line, body_length,
-        headers = ?headers(header), "authentication request");
+        headers = ?headers(header), headers_filtered = true, "authentication request");
 }
 pub(super) fn response(text: &str, phase: &str) {
     let mut words = text.lines().next().unwrap_or_default().splitn(3, ' ');
@@ -124,6 +131,26 @@ pub(super) mod tests {
     }
 
     use super::*;
+    #[test]
+    fn endpoint_and_owntone_agent_diagnostics_are_safe_and_opt_in() {
+        let emit = || {
+            endpoint("127.0.0.1".parse().unwrap(), 7000);
+            request("GET /info RTSP/1.0\r\nUser-Agent: AirPlay/999.0.0\r\nClient-Instance: secret-identifier\r\nAuthorization: secret-token\r\n\r\n", 0, "OwnTone transient /info");
+        };
+        assert!(capture(tracing::Level::INFO, emit).is_empty());
+        let output = capture(tracing::Level::DEBUG, emit);
+        for field in [
+            "_airplay._tcp.local.",
+            "127.0.0.1:7000",
+            "AirPlay/999.0.0",
+            "headers_filtered",
+        ] {
+            assert!(output.contains(field), "missing {field}: {output}");
+        }
+        assert!(!output.contains("secret"));
+        assert!(safe_header("User-Agent", "AirPlay/999.0.0 secret").is_none());
+    }
+
     #[test]
     fn headers_are_explicitly_allowlisted_with_safe_values() {
         let text = "HTTP/1.1 403 Forbidden\r\nCSeq: 1\r\nContent-Length: 0\r\nConnection: close\r\nSet-Cookie: secret\r\nAuthorization: secret\r\nCookie: secret\r\nX-Token: secret\r\nX-Unknown: secret\r\nServer: secret\r\nContent-Type: secret\r\nX-Apple-HKP: secret\r\n\r\n";

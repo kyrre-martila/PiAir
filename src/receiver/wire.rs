@@ -102,6 +102,7 @@ impl Wire {
                 }
             }
         }
+        super::diagnostics::endpoint(*ip, selected.port);
         let connect_started = Instant::now();
         let socket = TcpStream::connect_timeout(
             &SocketAddr::new(*ip, selected.port),
@@ -781,7 +782,9 @@ fn owntone_header(
             || (method == "POST" && path == "/pair-setup" && length <= super::tlv::LIMIT),
         "unsupported OwnTone authentication request"
     );
-    let mut header = format!("{method} {path} RTSP/1.0\r\nCSeq: {seq}\r\nUser-Agent: PiAir/0.1\r\nX-Apple-Client-Name: PiAir\r\nClient-Instance: {client:X}\r\nDACP-ID: {client:X}\r\nActive-Remote: {remote}\r\n");
+    // Pinned OwnTone conffile.c default: HomePod OS 27 validates this agent
+    // before /info. Keep it scoped to this explicitly selected experiment.
+    let mut header = format!("{method} {path} RTSP/1.0\r\nCSeq: {seq}\r\nUser-Agent: AirPlay/999.0.0\r\nX-Apple-Client-Name: PiAir\r\nClient-Instance: {client:X}\r\nDACP-ID: {client:X}\r\nActive-Remote: {remote}\r\n");
     if method == "POST" {
         header.push_str(&format!("Content-Type: application/octet-stream\r\nX-Apple-HKP: 4\r\nContent-Length: {length}\r\n"));
     }
@@ -1232,7 +1235,7 @@ pub(super) fn owntone_test_header(method: &str, path: &str, seq: u32, length: us
     } else {
         String::new()
     };
-    format!("{method} {path} RTSP/1.0\r\nCSeq: {seq}\r\nUser-Agent: PiAir/0.1\r\nX-Apple-Client-Name: PiAir\r\nClient-Instance: 123456789ABCDEF0\r\nDACP-ID: 123456789ABCDEF0\r\nActive-Remote: 123456789\r\n{suffix}\r\n")
+    format!("{method} {path} RTSP/1.0\r\nCSeq: {seq}\r\nUser-Agent: AirPlay/999.0.0\r\nX-Apple-Client-Name: PiAir\r\nClient-Instance: 123456789ABCDEF0\r\nDACP-ID: 123456789ABCDEF0\r\nActive-Remote: 123456789\r\n{suffix}\r\n")
 }
 #[cfg(test)]
 impl Wire {

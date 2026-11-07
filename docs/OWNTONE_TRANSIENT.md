@@ -36,7 +36,7 @@ Line numbers refer to that revision, not a moving branch.
 | Read policy before pairing | `src/outputs/airplay.c:3273–3359`, `response_handler_info_generic`; sequence table at 3634 onward | GET `/info` on the authorized socket; require bounded binary plist dictionary and unsigned `statusFlags` |
 | Policy precedence: one-time pairing bit 9, PIN bit 3, password bit 7, otherwise transient | `airplay.c:181–195`, 3310–3359 | Compare these bits with pinned mDNS policy and reject all three requirements; never select another method |
 | No PIN-start on the unprotected transient path | `airplay.c:3356–3359`, sequence table 3671, 3697–3698 | Direct `/info` → transient M1; no pyatv preamble |
-| Header insertion and CSeq starting at 1 | `airplay.c:886–935`, 1602, 3787–3824 | Same ordering, PiAir User-Agent/name and independent persisted random public sender IDs |
+| Header insertion and CSeq starting at 1 | `airplay.c:886–935`, 1602, 3787–3824 | Same ordering and reference AirPlay User-Agent; PiAir name and independent persisted random public sender IDs |
 | HKP 4 on transient setup, content type octet-stream | `airplay.c:2821–2892`, 3697–3698 | Both M1 and M3 |
 | RTSP version, body length, header serialization | `src/evrtsp/rtsp.c:327–371` | RTSP/1.0; length appended after application headers for nonempty body; GET has no body, length, Host or HKP header |
 | State/Method/Flags insertion order | `src/pair_ap/pair_homekit.c:1230–1274`; `src/pair_ap/pair-tlv.c:37–58`, 116–160 | M1 bytes below; existing Rust TLV encoder preserves order and fragments values at 255 bytes |
@@ -71,7 +71,7 @@ stable across experiment invocations; SRP private material remains fresh.
 ```text
 GET /info RTSP/1.0\r\n
 CSeq: 1\r\n
-User-Agent: PiAir/0.1\r\n
+User-Agent: AirPlay/999.0.0\r\n
 X-Apple-Client-Name: PiAir\r\n
 Client-Instance: <client>\r\n
 DACP-ID: <client>\r\n
@@ -84,7 +84,7 @@ For M1 and M3, respectively `<seq>` is 2 and 3:
 ```text
 POST /pair-setup RTSP/1.0\r\n
 CSeq: <seq>\r\n
-User-Agent: PiAir/0.1\r\n
+User-Agent: AirPlay/999.0.0\r\n
 X-Apple-Client-Name: PiAir\r\n
 Client-Instance: <client>\r\n
 DACP-ID: <client>\r\n
@@ -130,7 +130,7 @@ hardware evidence and repository experiment history, not newly reproduced here.
 | PR #13 pyatv PIN-start + PiAir M1 framing | PIN-start 200, M1 403 |
 | PR #14 complete pyatv HTTP framing | PIN-start 200, M1 400 |
 | PR #15 pyatv M1 Method/State/Flags ordering | Current supplied evidence still reports M1 400 after PIN-start 200; no verified transient authentication |
-| This OwnTone RTSP profile | No hardware run; HomePod compatibility unknown |
+| OwnTone RTSP profile after PR #17 | Supplied first hardware test reaches HomePod; initial GET /info returns RTSP/1.0 403 Forbidden; no pairing exchange reached |
 
 The prompt does not provide an isolated PR #15 trace, so attribution of the
 latest 400 to ordering specifically remains uncertain. No accepted preamble or
@@ -158,3 +158,5 @@ malformed messages, timeout or invalid proof, ends the attempt without fallback.
 Report phase/status and model/firmware only; never publish secrets or raw pairing
 payloads. Different authentication requires separate explicit user approval.
 OwnTone/Autostream services, settings, databases and credentials are untouched.
+
+See [the PR #18 investigation](HOMEPOD_INFO_403.md) for the verified User-Agent mismatch, complete discovery/connection trace, limitations and retest procedure.
