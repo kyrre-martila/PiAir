@@ -185,6 +185,29 @@ pub fn capabilities(value: &Value) -> Result<()> {
     }
     Ok(())
 }
+/// Bit 41 advertises PTP support, not an NTP prohibition. OwnTone 29.3
+/// permits NTP when PTP is disabled/unavailable. Never fabricate PTP clocks.
+pub fn select_ntp(info: &Value) -> Result<()> {
+    let d = dictionary(info)?;
+    let features = integer(d, "features")?;
+    tracing::debug!(target: "piair::rtsp", timing_profile = "NTP", features,
+        ptp_advertised = features & (1u64 << 41) != 0,
+        ntp_advertisement = "not established by feature bit 41",
+        "timing profile selected; PTP is unsupported");
+    Ok(())
+}
+pub fn ntp_offer(device: &str, uuid: uuid::Uuid, port: u16) -> Result<Zeroizing<Vec<u8>>> {
+    ensure!(port != 0, "zero local timing port");
+    binary(&mut dict([
+        ("deviceID", Value::String(device.into())),
+        (
+            "sessionUUID",
+            Value::String(uuid.to_string().to_uppercase()),
+        ),
+        ("timingProtocol", Value::String("NTP".into())),
+        ("timingPort", uint(u64::from(port))),
+    ]))
+}
 pub fn stream_offer(key: &[u8; 32], control_port: u16, session: u32) -> Result<Zeroizing<Vec<u8>>> {
     binary(&mut dict([(
         "streams",
@@ -288,6 +311,19 @@ pub fn transient_info(bytes: &[u8], selected: &super::compatibility::Capabilitie
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ntp_offer_matches_independent_fixture_and_keeps_uuid_v4() {
+        let uuid = uuid::Uuid::parse_str("00112233-4455-4677-8899-AABBCCDDEEFF").unwrap();
+        let offer = ntp_offer("02:01:02:03:04:05", uuid, 7010).unwrap();
+        assert_eq!(
+            parse(&offer).unwrap(),
+            parse(include_bytes!("../../tests/fixtures/initial-setup.plist")).unwrap()
+        );
+        assert!(ntp_offer("02:01:02:03:04:05", uuid, 0).is_err());
+        for f in [0, 1u64 << 41] {
+            assert!(select_ntp(&dict([("features", uint(f))])).is_ok());
+        }
+    }
     #[test]
     fn offer_matches_independently_serialized_protocol_fixture() {
         let key: [u8; 32] = (0..32).collect::<Vec<_>>().try_into().unwrap();

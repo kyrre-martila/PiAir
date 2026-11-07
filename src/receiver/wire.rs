@@ -26,6 +26,8 @@ pub struct Wire {
     deadline: Instant,
     budget: Duration,
     seq: u32,
+    response_bytes: usize,
+    response_frames: usize,
     auth_profile: AuthProfile,
     auth_started: Instant,
     auth_phase: &'static str,
@@ -121,6 +123,8 @@ impl Wire {
             id.to_owned(),
             selected.method,
         );
+        (wire.client_instance, wire.active_remote) =
+            super::store::Store::new(config_path)?.client_identity()?;
         wire.authorization = Some((config_path.to_owned(), selected.clone()));
         Ok(wire)
     }
@@ -130,6 +134,8 @@ impl Wire {
             deadline: Instant::now() + budget,
             budget,
             seq: 0,
+            response_bytes: 0,
+            response_frames: 0,
             auth_profile: AuthProfile::Legacy,
             auth_started: Instant::now(),
             auth_phase: "connect",
@@ -211,6 +217,7 @@ impl Wire {
             }
             ensure!(n > 0, "truncated receiver response");
             offset += n;
+            self.response_bytes += n;
         }
         Ok(())
     }
@@ -232,6 +239,7 @@ impl Wire {
                     .as_mut()
                     .context("control keys absent")?
                     .decrypt(&frame)?;
+                self.response_frames += 1;
                 self.pending[..plain.len()].copy_from_slice(&plain);
                 self.pending_start = 0;
                 self.pending_end = plain.len();
@@ -367,6 +375,18 @@ impl Wire {
         headers: &[(&str, String)],
         body: &[u8],
     ) -> Result<Reply> {
+        let started = Instant::now();
+        self.response_bytes = 0;
+        self.response_frames = 0;
+        self.auth_phase = match method {
+            "GET" => "encrypted GET",
+            "SETUP" => "encrypted SETUP",
+            "RECORD" => "encrypted RECORD",
+            "TEARDOWN" => "encrypted TEARDOWN",
+            "FLUSH" => "encrypted FLUSH",
+            "SET_PARAMETER" => "encrypted SET_PARAMETER",
+            _ => "encrypted POST",
+        };
         let result = (|| {
             ensure!(
                 !self.failed && self.keys.is_some(),
@@ -408,6 +428,14 @@ impl Wire {
                 Ok(request)
             })()
             .context("request construction")?;
+            tracing::debug!(target: "piair::rtsp", phase = self.auth_phase, method,
+                cseq = self.seq, body_length = body.len(),
+                headers = "CSeq,User-Agent,X-Apple-ProtocolVersion,Content-Length,Client-Instance,DACP-ID,Active-Remote,X-Apple-Client-Name",
+                extra_header_names = ?headers.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+                operation_budget_ms = self.budget.as_millis() as u64,
+                socket_wait_cap_ms = 3000u64,
+                uri_kind = if uri.starts_with("rtsp://") { "session" } else { "endpoint" },
+                "authenticated request start");
             self.write_message(&request)
                 .context("encrypted request write")?;
             let body = self.response().context("response read/validation")?;
@@ -421,10 +449,28 @@ impl Wire {
                 headers: self.last_headers.clone(),
             })
         })();
+        tracing::debug!(target: "piair::rtsp", phase = self.auth_phase, method,
+            cseq = self.seq, elapsed_ms = started.elapsed().as_millis() as u64,
+            response_bytes = self.response_bytes, authenticated_frames = self.response_frames,
+            success = result.is_ok(), "authenticated request completed");
+        let result = result.with_context(|| format!(
+            "encrypted RTSP method={method} phase={} elapsed_ms={} response_bytes={} authenticated_frames={}",
+            self.auth_phase, started.elapsed().as_millis(), self.response_bytes, self.response_frames));
         if result.is_err() {
             self.close();
         }
         result
+    }
+    pub(super) fn sender_device_id(&self) -> String {
+        // OwnTone serializes its stable u64 sender ID as eight colon-separated
+        // octets. Keep all 64 bits of PiAir's persisted identity, without folding
+        // it into a MAC or borrowing the receiver's pairing identifier.
+        self.client_instance
+            .to_be_bytes()
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(":")
     }
     pub(super) fn local_ip(&self) -> Result<IpAddr> {
         Ok(self.socket.local_addr()?.ip())
@@ -1095,6 +1141,70 @@ impl Drop for Worker {
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+
+    #[test]
+    fn sender_identity_retains_all_persistent_bits_across_connections() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = super::super::store::Store::new(&temp.path().join("config.toml")).unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut wire = Wire::mock(socket, Duration::from_secs(1), "test");
+            (wire.client_instance, wire.active_remote) = store.client_identity().unwrap();
+            let id = wire.sender_device_id();
+            assert_eq!(
+                id.replace(':', ""),
+                format!("{:016X}", wire.client_instance)
+            );
+            ids.push(id);
+        }
+        assert_eq!(ids[0], ids[1]);
+    }
+
+    #[test]
+    fn setup_response_progress_distinguishes_silence_partial_frames_and_closure() {
+        for mode in 0..4 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut peer = listener.accept().unwrap().0;
+            let mut wire = Wire::mock(socket, Duration::from_millis(80), "test");
+            wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
+            wire.auth_phase = "pair-verify M3/M4";
+            if mode == 1 {
+                peer.write_all(&[1]).unwrap();
+            } else if mode == 2 {
+                let mut keys = super::super::crypto::ControlKeys::new(&[7; 32]);
+                keys.swap_directions_for_test();
+                peer.write_all(&keys.encrypt(b"RTSP/1.0 200").unwrap())
+                    .unwrap();
+            } else if mode == 3 {
+                peer.shutdown(Shutdown::Write).unwrap();
+            }
+            let mut result = None;
+            let log = super::super::diagnostics::tests::capture(tracing::Level::DEBUG, || {
+                result = Some(wire.request("SETUP", "rtsp://127.0.0.1/1", &[], &[]));
+            });
+            let error = result.unwrap().err().unwrap();
+            assert!(log.contains("authenticated request completed"));
+            assert!(log.contains("response_bytes") && log.contains("authenticated_frames"));
+            assert!(!log.contains("pair-verify"));
+            let text = format!("{error:#}");
+            assert!(
+                text.contains("method=SETUP phase=encrypted SETUP"),
+                "{text}"
+            );
+            assert!(!text.contains("pair-verify"));
+            assert_eq!(wire.response_frames, usize::from(mode == 2));
+            assert_eq!(wire.response_bytes > 0, mode == 1 || mode == 2);
+            assert!(text.contains(if mode == 3 {
+                "truncated receiver response"
+            } else {
+                "timeout"
+            }));
+            assert!(wire.failed && wire.keys.is_none());
+        }
+    }
 
     #[test]
     fn options_sequence_exhaustion_closes_without_sending_or_wrapping() {

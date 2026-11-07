@@ -1916,8 +1916,12 @@ fn transient_pins_authorization_preserves_credentials_and_uses_fresh_secrets() {
             std::fs::read_dir(dir.path().join("receiver-state"))
                 .unwrap()
                 .count(),
-            2
+            3 // credential, selection, and the shared persistent sender identity
         );
+        assert!(dir
+            .path()
+            .join("receiver-state/client-identity.toml")
+            .is_file());
     }
     assert_ne!(secrets[0].as_slice(), secrets[1].as_slice());
 }

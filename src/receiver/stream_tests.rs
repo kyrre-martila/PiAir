@@ -913,3 +913,62 @@ fn transient_session_negotiates_encrypted_audio_and_acknowledges_teardown() {
     assert!(sent > 350);
     assert_eq!(seen.load(Ordering::Relaxed), sent);
 }
+
+#[test]
+fn initial_setup_check_validates_then_tears_down_without_record_or_audio() {
+    let (wire, server) = local_mock(|s| {
+        let (mut socket, mut keys) = verify_mock_core(s, Fault::None, PI, |_| {}).unwrap();
+        let info = read_message(&mut socket, &mut keys);
+        assert_eq!((info.method.as_str(), info.uri.as_str()), ("GET", "/info"));
+        send_reply(
+            &mut socket,
+            &mut keys,
+            &info,
+            Some(profile::dict([(
+                "features",
+                profile::uint((1 << 9) | (1 << 19) | (1 << 41)),
+            )])),
+            "",
+        );
+        let setup = read_message(&mut socket, &mut keys);
+        assert_eq!(setup.method, "SETUP");
+        assert!(setup.uri.starts_with("rtsp://127.0.0.1/"));
+        assert_eq!(
+            setup.headers["cseq"].parse::<u32>().unwrap(),
+            info.headers["cseq"].parse::<u32>().unwrap() + 1
+        );
+        let value = plist(&setup);
+        let d = value.as_dictionary().unwrap();
+        assert_eq!(
+            d["deviceID"].as_string().unwrap().replace(':', ""),
+            format!(
+                "{:016X}",
+                u64::from_str_radix(&setup.headers["client-instance"], 16).unwrap()
+            )
+        );
+        let uuid = uuid::Uuid::parse_str(d["sessionUUID"].as_string().unwrap()).unwrap();
+        assert_eq!(uuid.get_version_num(), 4);
+        send_reply(
+            &mut socket,
+            &mut keys,
+            &setup,
+            Some(profile::dict([
+                ("timingProtocol", Value::String("NTP".into())),
+                ("eventPort", profile::uint(7001)),
+                ("timingPort", profile::uint(7002)),
+            ])),
+            "",
+        );
+        let teardown = read_message(&mut socket, &mut keys);
+        assert_eq!(teardown.method, "TEARDOWN");
+        assert_eq!(teardown.uri, setup.uri);
+        send_reply(&mut socket, &mut keys, &teardown, None, "");
+        assert_eof(&mut socket);
+    });
+    let mut session = Session::new();
+    session.start(|| Ok(wire), &credential()).unwrap();
+    session.check_initial_setup().unwrap();
+    assert_eq!(session.state(), State::Disconnected);
+    assert_eq!(session.packets_sent, 0);
+    server.join().unwrap();
+}

@@ -305,7 +305,7 @@ fn save_verified_enrollment(
 }
 
 /// Deliberate diagnostic only. No application startup/activity path calls this.
-pub fn stream_test(loaded: &Loaded, id: &str, seconds: u32) -> Result<()> {
+pub fn stream_test(loaded: &Loaded, id: &str, seconds: u32, setup_check: bool) -> Result<()> {
     exact_id(id)?;
     ensure!(loaded.config.allows(id), "receiver is not approved");
     ensure!(
@@ -338,8 +338,12 @@ pub fn stream_test(loaded: &Loaded, id: &str, seconds: u32) -> Result<()> {
         );
         Some(credential)
     };
-    println!("AirPlay 2 realtime UDP / ALAC 44100 stereo / NTP diagnostic: {seconds}s signal plus 2s latency drain. Receiver volume will be set to -30 dB and may remain there. Hardware playback is unverified.");
-    print!("Send test audio to {id}? Type the exact receiver ID: ");
+    if setup_check {
+        println!("Initial NTP SETUP check: validate response and tear down; no RECORD or audio transmission.");
+    } else {
+        println!("AirPlay 2 realtime UDP / ALAC 44100 stereo / NTP diagnostic: {seconds}s signal plus 2s latency drain. Receiver volume will be set to -30 dB and may remain there. Hardware playback is unverified.");
+    }
+    print!("Confirm receiver operation for {id}. Type the exact receiver ID: ");
     io::stdout().flush()?;
     let mut confirmation = String::new();
     io::stdin().read_line(&mut confirmation)?;
@@ -356,6 +360,11 @@ pub fn stream_test(loaded: &Loaded, id: &str, seconds: u32) -> Result<()> {
         println!("Authentication: transient SRP proof verified; no persistent receiver identity verification");
     } else {
         println!("Authentication: persistent receiver identity cryptographically verified");
+    }
+    if setup_check {
+        session.check_initial_setup()?;
+        println!("Initial SETUP: validated NTP response and ports; TEARDOWN acknowledged; audio packets transmitted: 0.");
+        return Ok(());
     }
     if let Err(error) = session.negotiate_realtime() {
         println!("Negotiation: FAILED; audio packets transmitted: 0; partial setup cleanup attempted; audible playback: unverified");
