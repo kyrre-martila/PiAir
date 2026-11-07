@@ -24,6 +24,7 @@ impl Method {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {
+    #[serde(with = "super::hex_u64")]
     pub features: u64,
     pub flags: Option<u32>,
     pub password: Option<bool>,

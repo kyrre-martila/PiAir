@@ -751,6 +751,22 @@ impl Wire {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn full_width_client_identifiers_keep_uppercase_wire_format() {
+    for (client, expected) in [
+        (1, "1"),
+        (0xabcdef, "ABCDEF"),
+        ((i64::MAX as u64) + 1, "8000000000000000"),
+        (u64::MAX, "FFFFFFFFFFFFFFFF"),
+    ] {
+        let header = owntone_header("GET", "/info", 1, client, u32::MAX, 0).unwrap();
+        assert!(header.contains(&format!("\r\nClient-Instance: {expected}\r\n")));
+        assert!(header.contains(&format!("\r\nDACP-ID: {expected}\r\n")));
+        assert!(header.contains("\r\nActive-Remote: 4294967295\r\n"));
+    }
+}
+
 /// Protocol serialization is independent of the reference implementation.
 fn owntone_header(
     method: &str,
