@@ -2,6 +2,7 @@
 pub(crate) mod compatibility;
 mod crypto;
 mod diagnostics;
+mod hex_u64;
 // Sans-I/O components only; blocked by the documented unresolved transport profile.
 #[allow(dead_code)]
 mod media;

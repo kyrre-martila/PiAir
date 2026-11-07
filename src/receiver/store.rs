@@ -21,6 +21,7 @@ pub struct Credential {
     pub seed: [u8; 32],
     pub receiver_key: [u8; 32],
 }
+
 impl Credential {
     pub fn validate(&self, id: &str) -> Result<()> {
         super::exact_id(id)?;
@@ -47,6 +48,15 @@ impl Credential {
 pub struct Store {
     root: PathBuf,
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Identity {
+    #[serde(with = "super::hex_u64")]
+    client: u64,
+    remote: u32,
+}
+
 impl Store {
     pub fn new(config_path: &Path) -> Result<Self> {
         let parent = config_path
@@ -126,12 +136,9 @@ impl Store {
         Ok(())
     }
     pub fn client_identity(&self) -> Result<(u64, u32)> {
-        #[derive(Serialize, Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Identity {
-            client: u64,
-            remote: u32,
-        }
+        self.client_identity_with(|| (rand::random::<u64>().max(1), rand::random::<u32>().max(1)))
+    }
+    fn client_identity_with(&self, generate: impl FnOnce() -> (u64, u32)) -> Result<(u64, u32)> {
         let path = self.root.join("client-identity.toml");
         if let Some(text) = self.read(&path)? {
             let identity: Identity =
@@ -142,10 +149,9 @@ impl Store {
             );
             return Ok((identity.client, identity.remote));
         }
-        let identity = Identity {
-            client: rand::random::<u64>().max(1),
-            remote: rand::random::<u32>().max(1),
-        };
+        let (client, remote) = generate();
+        ensure!(client != 0 && remote != 0, "zero client identity");
+        let identity = Identity { client, remote };
         self.write(&path, &toml::to_string(&identity)?, false)?;
         Ok((identity.client, identity.remote))
     }
@@ -191,5 +197,119 @@ impl Store {
             File::open(&self.root)?.sync_all()?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn full_width_identity_creation_and_restart() {
+        for client in [1, i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join("config.toml");
+            let store = Store::new(&config).unwrap();
+            let expected = (client, u32::MAX);
+            assert_eq!(store.client_identity_with(|| expected).unwrap(), expected);
+            let path = store.root.join("client-identity.toml");
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(text.contains(&format!("client = \"{client:016X}\"")));
+            assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+            assert_eq!(fs::metadata(&store.root).unwrap().mode() & 0o777, 0o700);
+            drop(store);
+            assert_eq!(
+                Store::new(&config)
+                    .unwrap()
+                    .client_identity_with(|| panic!("must reuse persisted identity"))
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn legacy_numeric_identity_is_reused_without_rewriting() {
+        for (client, expected) in [
+            ("1", 1),
+            ("9223372036854775807", i64::MAX as u64),
+            ("0x1234_ABCD", 0x1234_ABCD),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::new(&dir.path().join("config.toml")).unwrap();
+            let path = store.root.join("client-identity.toml");
+            let text = format!("client = {client}\nremote = 4294967295\n");
+            store.write(&path, &text, false).unwrap();
+            assert_eq!(
+                store
+                    .client_identity_with(|| panic!("must reuse legacy identity"))
+                    .unwrap(),
+                (expected, u32::MAX)
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn invalid_identity_is_never_replaced() {
+        for text in [
+            "client = -1\nremote = 1",
+            "client = 9223372036854775808\nremote = 1",
+            "client = 18446744073709551615\nremote = 1",
+            "client = 0\nremote = 1",
+            "client = \"0000000000000000\"\nremote = 1",
+            "client = \"FFFFFFFFFFFFFFFF\"\nremote = 0",
+            "client = \"FFFFFFFFFFFFFFFF\"\nremote = -1",
+            "client = \"FFFFFFFFFFFFFFFF\"\nremote = 4294967296",
+            "client = \"ffffffffffffffff\"\nremote = 1",
+            "client = \"FFFFFFFFFFFFFFF\"\nremote = 1",
+            "client = \"0FFFFFFFFFFFFFFFF\"\nremote = 1",
+            "client = \"0xFFFFFFFFFFFFFFFF\"\nremote = 1",
+            "client = \"FFFFFFFFFFFFFFFG\"\nremote = 1",
+            "client = \" FFFFFFFFFFFFFFF\"\nremote = 1",
+            "client = \"+FFFFFFFFFFFFFFF\"\nremote = 1",
+            "client = \"FFFF_FFFFFFFFFFF\"\nremote = 1",
+            "client = 1.0\nremote = 1",
+            "client = true\nremote = 1",
+            "client = []\nremote = 1",
+            "remote = 1",
+            "client = 1",
+            "client = 1\nclient = 2\nremote = 1",
+            "client = 1\nremote = 1\nunknown = 1",
+            "not TOML",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::new(&dir.path().join("config.toml")).unwrap();
+            let path = store.root.join("client-identity.toml");
+            store.write(&path, text, false).unwrap();
+            assert!(
+                store
+                    .client_identity_with(|| panic!("must not regenerate corrupt identity"))
+                    .is_err(),
+                "{text}"
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn identity_keeps_protected_reads_and_no_clobber_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(&dir.path().join("config.toml")).unwrap();
+        let path = store.root.join("client-identity.toml");
+        let original = "client = 123\nremote = 456\n";
+        store.write(&path, original, false).unwrap();
+        assert!(store.write(&path, "replacement", false).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(store.client_identity().is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        fs::remove_file(&path).unwrap();
+        let target = dir.path().join("target");
+        fs::write(&target, original).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(store.client_identity().is_err());
+        assert_eq!(fs::read_to_string(target).unwrap(), original);
     }
 }
