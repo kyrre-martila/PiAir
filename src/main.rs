@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod audio;
 mod cli;
 mod config;
 mod discovery;
@@ -12,6 +13,7 @@ use cli::{Cli, Command, ConfigCommand};
 fn run(cli: Cli) -> Result<()> {
     let loaded = config::load(cli.config)?;
     match cli.command {
+        Command::Audio { command } => audio::run(command, &loaded)?,
         Command::Status => {
             println!("PiAir {}: local CLI ready", env!("CARGO_PKG_VERSION"));
             println!(
@@ -24,7 +26,8 @@ fn run(cli: Cli) -> Result<()> {
                 "Allowlisted receivers: {}",
                 loaded.config.receiver_allowlist.len()
             );
-            println!("Audio capture and AirPlay playback: not implemented");
+            println!("Audio capture: available via audio monitor; not opened by status");
+            println!("AirPlay playback: not implemented");
             println!("No service or receiver status was queried.");
         }
         Command::Config { command } => match command {

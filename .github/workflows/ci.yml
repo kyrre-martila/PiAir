@@ -18,6 +18,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install ALSA build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - run: ${{ matrix.command }}
       - name: Check committed dependency resolution
         if: matrix.command == 'cargo test'
