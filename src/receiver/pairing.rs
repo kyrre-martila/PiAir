@@ -18,6 +18,14 @@ fn exchange(
     state: u8,
     allowed: &[u8],
 ) -> Result<Tlv> {
+    wire.auth_phase(match (path, state) {
+        ("/pair-setup", 2) => "pair-setup M1/M2",
+        ("/pair-setup", 4) => "pair-setup M3/M4",
+        ("/pair-setup", 6) => "pair-setup M5/M6",
+        ("/pair-verify", 2) => "pair-verify M1/M2",
+        ("/pair-verify", 4) => "pair-verify M3/M4",
+        _ => "authentication exchange",
+    });
     (|| -> Result<Tlv> {
         let message = Tlv::parse(&wire.post(path, &encode(fields))?)?;
         message.response(state, allowed)?;
@@ -62,6 +70,7 @@ fn setup_inner(
         "transient method unsupported; no fallback"
     );
     if wire.method().pin_start() {
+        wire.auth_phase("PIN-start");
         let response = wire
             .post("/pair-pin-start", &[])
             .context("pair-setup PIN-start exchange")?;

@@ -255,3 +255,6 @@ library, web UI, database, Docker dependency or systemd installation is included
 Encrypted control and the explicit realtime audio sender are implemented and
 mock-tested. Buffered TCP/PTP profiles remain unsupported. Current activity events
 never initiate network connections; ALSA/silence/pre-roll integration is deferred.
+
+For opt-in safe authentication logs and the HomePod 403 investigation, see
+[AirPlay authentication diagnostics](docs/AUTHENTICATION_DIAGNOSTICS.md).
