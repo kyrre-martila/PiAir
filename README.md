@@ -187,6 +187,13 @@ approval, selection, credentials and interactive exact-ID confirmation. OPTIONS
 success does not establish audio readiness or receiver playback compatibility.
 See [session implementation, research and precise blockers](docs/AIRPLAY_SESSION.md).
 
+Prompt 4b adds a genuine stereo S16/48 kHz ALAC escape-frame encoder, validated
+with an independent decoder, plus bounded sample buffering and receiver-observed
+encrypted packet components. These have no receiver-directed caller. A complete
+Apple TV buffered negotiation/clock profile remains unresolved; no audio-send
+diagnostic, media connection or audible-playback claim is enabled. See the
+[additional research and exact evidence gaps](docs/BUFFERED_RESEARCH.md).
+
 A tested capability decision rejects unsupported combinations before connection,
 including transient/system-only, unresolved MFi, password and Home-access paths.
 No method is inferred from model/name and no fallback occurs. **Transient remains

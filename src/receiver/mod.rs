@@ -1,6 +1,9 @@
 //! Explicit receiver operations. Discovery/audio never depend on this module.
 pub(crate) mod compatibility;
 mod crypto;
+// Sans-I/O components only; blocked by the documented unresolved transport profile.
+#[allow(dead_code)]
+mod media;
 mod pairing;
 mod session;
 mod srp;

@@ -19,6 +19,8 @@ and protocol understanding. No existing AirPlay sender is a dependency.
 - `audio/mod.rs`: validated capture/detector settings and capture-only dispatch.
 - `audio/capture.rs`: ALSA hints, signed S16/S32 interleaved negotiation,
   normalization, nonblocking reads, monitor and bounded same-device recovery.
+- `audio/alac.rs`: original bounded stereo 48 kHz/S16 ALAC escape encoder and
+  normalized sample conversion, validated using a test-only independent decoder.
 - `audio/detector.rs`: pure stereo RMS windows, sample-clock FSM, intent events,
   validated timestamp continuity and bounded ordered pre-roll.
 - `audio/calibration.rs`: bounded noise statistics/rejection, explicit prompts,
@@ -30,6 +32,8 @@ and protocol understanding. No existing AirPlay sender is a dependency.
   parsed, untrusted capability evidence. Pairing evidence never proves playback.
 - `receiver/wire.rs`: single current-approval TCP boundary, bounded RTSP/HTTP framing,
   encrypted continuation and per-operation approval/selection checks.
+- `receiver/media.rs`: no-I/O receiver-observed encrypted packet components,
+  sample timeline and bounded queue; no negotiated profile or receiver caller.
 - `receiver/session.rs`: persistent authenticated control owner, typed lifecycle,
   terminal failures/idempotent cleanup and disabled buffered-audio gate.
 - `receiver/pairing.rs`: socket-owning persistent HAP setup/verify; displayed-PIN and
@@ -97,7 +101,11 @@ automatic authentication fallback bridges these gaps.
 
 ## Future audio and network lifecycles
 
-Current data flow (no network consumer):
+Current data flow (no network consumer). The standalone ALAC/media components
+are compiled but not connected to this graph; [BUFFERED_RESEARCH.md](BUFFERED_RESEARCH.md)
+explains the unresolved Apple TV profile. Components never authorize sockets,
+SETUP or READY/STREAMING state transitions:
+
 
 ```text
 ALSA capture -> PCM normalization -> RMS/activity detector -> intent events

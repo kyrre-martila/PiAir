@@ -1027,7 +1027,11 @@ fn control_rejects_invalid_status_correlation_lengths_plaintext_and_receiver_ter
                 _ => unreachable!(),
             }
             socket.write_all(&frame).unwrap();
-            socket.shutdown(std::net::Shutdown::Write).unwrap();
+            // An invalid frame can make the client close before this half-close.
+            // Linux then returns ENOTCONN; this is already the expected closure.
+            if let Err(error) = socket.shutdown(std::net::Shutdown::Write) {
+                assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+            }
             assert_eof(&mut socket);
         });
         let mut session = session::Session::new();

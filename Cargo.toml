@@ -32,3 +32,8 @@ zeroize = { version = "1", features = ["derive"] }
 rpassword = "7"
 tempfile = "3"
 rustix = { version = "1", features = ["process"] }
+
+[dev-dependencies]
+# Independent codec decoder only; not an AirPlay sender or runtime dependency.
+symphonia-codec-alac = "0.5.5"
+symphonia-core = "0.5.5"

@@ -4,6 +4,9 @@
 
 PR #4 uses the requested **verified-components fallback**. It implements a live
 persistent HAP authenticated control owner and real encrypted RTSP OPTIONS I/O.
+Prompt 4b adds independently validated
+ALAC encoding and receiver-observed packet-protection components without
+enabling a network audio profile.
 **It does not implement a complete buffered audio transport profile.** No audio
 is transmitted, even to the mock receiver. No Apple TV or HomePod model/firmware
 has been validated. READY and STREAMING are deliberately unreachable.
@@ -11,7 +14,8 @@ has been validated. READY and STREAMING are deliberately unreachable.
 The base is fresh main at `62f28d879789ee0c7ee5e7cd66d5801a0f93f02e`, the merge
 commit of PR #3 (GitHub reported merged at 2026-11-07T09:20:43Z). PRs #1–#3 are
 in its history. All additions are original; no sender implementation code is
-copied, translated or incorporated. No new runtime crate is needed.
+copied, translated or incorporated. No new runtime crate is needed; Symphonia
+is a test-only independent ALAC decoder (see DEPENDENCIES.md).
 
 ## Evidence and transport profile research
 
@@ -35,6 +39,18 @@ versions of its RTSP/RTP/encryption pages were available. Treat those observatio
 as incomplete research evidence. No receiver capture was made. Sender-project
 search excerpts were not treated as independent conformance evidence or used as
 implementation code.
+
+## Prompt 4b profile decision
+
+[BUFFERED_RESEARCH.md](BUFFERED_RESEARCH.md) records the new evidence and scope
+before component implementation. An independent receiver parser resolves a
+specific buffered layout: 24-bit sequence (no normal RTP PT byte), timestamp,
+format word, ciphertext/tag/nonce and a two-byte TCP length counting itself.
+This is **not** a complete modern Apple TV profile. ALAC codec validity is now
+verified; its acceptance, format-word semantics, key exchange and PTP/anchor
+requirements remain unestablished. No SETUP/RECORD/FLUSH/TEARDOWN sequence or
+receiver-directed streaming diagnostic is enabled. The existing encrypted
+control owner and authorization boundary are preserved.
 
 ## Authentication-to-session transition
 
@@ -101,7 +117,7 @@ shutdown). Approval/selection are rechecked before and after each diagnostic;
 there is no instant revocation watcher during an in-flight bounded operation.
 Secret-copy/allocator and same-user-process limitations in PAIRING.md still apply.
 
-## Audio format, packets and media encryption: disabled
+## Audio components; network streaming disabled
 
 The required input contract is stereo 48,000 Hz signed 16-bit PCM, ordered left /
 right sample frames. This is an input requirement, **not** an asserted AirPlay
@@ -109,20 +125,43 @@ wire codec. Existing capture normalizes native interleaved S16/S32 to indexed
 `detector::Frame` values and can negotiate rates other than 48 kHz. No adapter
 currently forwards those values to this session.
 
-No wire codec is selected, no PCM is labelled ALAC/AAC, no media key is generated
-or sent, and there is no RTP packetizer, audio queue, media encryption encoder or
-media socket. General RTP's 16-bit sequence and 32-bit timestamp do not establish
-buffered stream extensions or TCP framing. Consequently packet progression,
-wraparound and encrypted media reception are not claimed or tested in this PR.
+No wire codec is negotiated. `audio::alac` independently implements stereo
+48 kHz / S16 ALAC escape frames, decoder configuration and checked normalized
+sample conversion. It does not merely relabel PCM: the output has CPE/escape/
+partial-count/END syntax and is decoded bit-exactly by Symphonia in tests.
+There is no predictive/entropy compression. Blocks contain 1..4096 sample frames;
+maximum encoded size is bounded by 16,392 bytes.
+
+`receiver::media` supplies components with no sockets, key export/exchange or
+session negotiation: a bounded ordered S16 queue, absolute sample-duration
+arithmetic and an observed-layout packetizer using fresh OS-random independent
+media keys. Its sequence field is 24 bits, timestamp is 32 bits, and nonce is an
+independent 64-bit LE counter. Sequence/timestamp wrap cannot reset the nonce.
+AEAD uses timestamp/format-word bytes as AAD and appends the tag then eight-byte
+nonce; TCP framing adds a big-endian length counting itself. Validation or nonce
+exhaustion poisons the packetizer. No HAP secret is accepted as its key input.
+
+This packet model matches the pinned receiver parser in BUFFERED_RESEARCH.md;
+its field/reserved-bit meanings and wrap convention are not verified Apple TV
+behavior. The supplied opaque format word is not a negotiated codec identifier.
+Components have no caller on a receiver-directed path, are compiled under a
+narrow dead-code allowance and are exercised by deterministic component tests.
+No media is sent to a receiver or socket, no media key is exchanged, and no
+successful audio session can be inferred from these tests.
 
 ## Timing, feedback and recovery: disabled
 
 The control deadline uses `Instant`, not sleeps. It is not a playback clock.
 There is no NTP/PTP responder, rate-anchor exchange, receiver latency negotiation,
-clock drift estimator, playout scheduler or feedback worker. Existing detector
-sample indices are local capture time only. Legacy NTP sync packets and UDP
+clock drift estimator, playout scheduler or feedback worker. The new sample
+timeline derives elapsed time from total 48 kHz sample count
+without accumulating per-packet rounding; it is not clock drift correction.
+Existing detector sample indices are local capture time only. Legacy NTP sync packets and UDP
 retransmission queries must not be assumed to apply to type 103 TCP transport.
-There is no speculative retransmission buffer, keepalive loop or reconnect loop.
+The audio queue bounds capacity to at most 48,000 stereo frames (one second);
+it refuses full writes atomically, without eviction or index advancement. Its
+capacity is a local safety bound, not negotiated receiver latency. There is no
+retransmission buffer, keepalive loop or reconnect loop.
 Receiver-initiated requests on the control socket fail as unsupported protocol;
 no event channel has been negotiated. Idle event-channel termination is untested.
 
@@ -136,10 +175,11 @@ no event channel has been negotiated. Idle event-channel termination is untested
    mapping. Implement the actual codec and framing it needs. ALAC support must
    follow its specification; changing an identifier around raw PCM is invalid.
 3. Confirm buffered packet framing, exact media AEAD AAD and tag/nonce placement,
-   nonce endianness/width and long-session uniqueness with independent fixtures.
-   The reviewed Internals RTP diagram places nonce before tag; other public
-   descriptions use tag before nonce. Its realtime diagram cannot resolve the
-   buffered layout. A 16-bit sequence alone cannot be a safe long-session nonce.
+   nonce endianness/width and long-session uniqueness against independent Apple
+   TV observations. A pinned independent receiver now confirms tag-before-nonce
+   and 24-bit buffered sequence, superseding the older realtime diagram for our
+   component tests. It does not establish Apple TV acceptance/reserved-bit rules.
+   A wrapping sequence alone cannot be a safe long-session nonce.
    Validate `shk` acceptance/key protection separately from HAP. Required FairPlay
    or MFi exchange must remain an explicit unsupported error, never a bypass.
 4. Validate the receiver's PTP/NTP dialect and rate-anchor requirements, map a
@@ -154,6 +194,18 @@ These are gaps in PiAir's evidence and implementation, not a claim that the
 protocol is impossible or that no other project implements it. Current approval
 policy still excludes unresolved bit-51, transient, password/Home-membership,
 legacy and FairPlay profiles. HomePod transient pairing remains out of scope.
+
+## Component validation added in Prompt 4b
+
+Tests pass real encoded packets through authenticated media decryption and an
+independent Symphonia ALAC decoder, preserving the deterministic stereo signal.
+They check partial/full codec blocks, signed extremes, conversion rejection,
+queue backpressure/gaps/limits, sample-duration rounding, observed sequence and
+sample-timestamp wrap, independent nonce progression/exhaustion, key invalidation,
+fresh keys and tamper rejection. A Python cryptography 50.0.0 fixture validates
+packet bytes independently of RustCrypto composition. The fixture is synthetic,
+not a hardware capture; this is component validation, not a full session mock.
+No Python, FFmpeg or external executable is required by cargo tests.
 
 ## Tests and PR #5 integration contract
 

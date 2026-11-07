@@ -73,7 +73,7 @@ impl Session {
                 self.state == State::Negotiating,
                 "authenticated negotiation required"
             );
-            bail!("buffered audio unsupported: media key exchange, codec mapping, TCP framing and receiver clock/feedback profile are unverified; FairPlay is not implemented")
+            bail!("buffered audio unsupported: type 103 codec offer, media key exchange, reserved header bits and Apple TV PTP/rate-anchor/feedback profile are unverified; standalone ALAC/packet components do not establish negotiation; FairPlay is not implemented")
         })();
         self.finish(result)
     }
