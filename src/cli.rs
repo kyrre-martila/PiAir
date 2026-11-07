@@ -46,6 +46,12 @@ pub enum Command {
         #[arg(long)]
         control_check: bool,
     },
+    /// Explicit short AirPlay 2 realtime ALAC/44100/NTP test; interactive approval.
+    StreamTest {
+        receiver_id: String,
+        #[arg(long, default_value_t=1, value_parser=clap::value_parser!(u32).range(1..=3))]
+        seconds: u32,
+    },
     /// Remove local credentials without contacting the receiver.
     Unpair { receiver_id: String },
     /// Validate or display effective configuration.

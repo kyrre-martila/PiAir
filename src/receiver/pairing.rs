@@ -163,10 +163,10 @@ pub fn verify(mut wire: Wire, credential: &Credential) -> Result<Wire> {
         wire.method() != super::compatibility::Method::Transient,
         "transient method unsupported; no credential fallback"
     );
-    let keys = verify_inner(&mut wire, credential)?;
-    wire.secure(keys)
+    let (keys, events) = verify_inner(&mut wire, credential)?;
+    wire.secure(keys, events)
 }
-fn verify_inner(wire: &mut Wire, credential: &Credential) -> Result<ControlKeys> {
+fn verify_inner(wire: &mut Wire, credential: &Credential) -> Result<(ControlKeys, ControlKeys)> {
     credential.validate(&credential.receiver_id)?;
     wire.restart_deadline();
     let mut seed = Zeroizing::new([0; 32]);
@@ -223,5 +223,8 @@ fn verify_inner(wire: &mut Wire, credential: &Credential) -> Result<ControlKeys>
         &[],
     )
     .context("pair-verify did not complete")?;
-    Ok(ControlKeys::new(shared.as_bytes()))
+    Ok((
+        ControlKeys::new(shared.as_bytes()),
+        ControlKeys::events(shared.as_bytes()),
+    ))
 }

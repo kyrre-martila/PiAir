@@ -7,6 +7,7 @@ description = "Headless PiAir ALSA capture, audio activity and passive receiver 
 repository = "https://github.com/kyrre-martila/PiAir"
 
 [dependencies]
+plist = { version = "1", default-features = false }
 alsa = "0.9"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

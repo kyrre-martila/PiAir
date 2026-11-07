@@ -5,6 +5,8 @@ mod crypto;
 #[allow(dead_code)]
 mod media;
 mod pairing;
+mod profile;
+mod realtime;
 mod session;
 mod srp;
 mod store;
@@ -242,4 +244,66 @@ fn save_verified_enrollment(
         store.save(credential)
     })();
     result.context("local enrollment persistence did not complete; inspect local credentials and receiver-side controller records before an explicit retry")
+}
+
+/// Deliberate diagnostic only. No application startup/activity path calls this.
+pub fn stream_test(loaded: &Loaded, id: &str, seconds: u32) -> Result<()> {
+    exact_id(id)?;
+    ensure!(loaded.config.allows(id), "receiver is not approved");
+    ensure!(
+        (1..=3).contains(&seconds),
+        "test duration must be 1..3 seconds"
+    );
+    ensure!(
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+        "stream-test requires an interactive terminal and explicit confirmation"
+    );
+    let store = store::Store::new(&loaded.path)?;
+    let selected = store
+        .selection()?
+        .context("select this approved receiver first")?;
+    ensure!(selected.id == id, "receiver is not selected");
+    ensure!(
+        selected.capabilities.features & (1 << 9) != 0
+            && selected.capabilities.features & (1 << 19) != 0,
+        "selected receiver does not advertise audio and ALAC"
+    );
+    let credential = store
+        .credential(id)?
+        .context("pair this receiver explicitly first")?;
+    ensure!(
+        credential.advertised_pi == selected.advertised_pi,
+        "credential discovery binding differs from selection"
+    );
+    println!("AirPlay 2 realtime UDP / ALAC 44100 stereo / NTP diagnostic: {seconds}s signal plus 2s latency drain. Receiver volume will be set to -30 dB and may remain there. Hardware playback is unverified.");
+    print!("Send test audio to {id}? Type the exact receiver ID: ");
+    io::stdout().flush()?;
+    let mut confirmation = String::new();
+    io::stdin().read_line(&mut confirmation)?;
+    ensure!(confirmation.trim() == id, "receiver operation cancelled");
+    let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    let mut session = session::Session::new();
+    let cancel = session.cancel.clone();
+    ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
+    session.start(
+        || wire::Wire::connect(&loaded.path, id, &selected, &snapshot),
+        &credential,
+    )?;
+    println!("Authentication: cryptographically verified");
+    if let Err(error) = session.negotiate_realtime() {
+        println!("Negotiation: FAILED; audio packets transmitted: 0; partial setup cleanup attempted; audible playback: unverified");
+        return Err(error);
+    }
+    println!("Negotiation: READY (SETUP, event channel, RECORD, stream SETUP and NTP exchange succeeded)");
+    if let Err(error) = session.transmit_test(seconds) {
+        println!("Transmission: FAILED after {} packets; cleanup attempted; audible playback: unverified",session.packets_sent);
+        return Err(error);
+    }
+    println!(
+        "Transmission: {} audio packets, {} retransmissions, {} timing replies",
+        session.packets_sent, session.resends, session.timing_exchanges
+    );
+    session.stop()?;
+    println!("Teardown: FLUSH and TEARDOWN acknowledged; resources closed. Audible playback: unverified (requires physical confirmation).");
+    Ok(())
 }

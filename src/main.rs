@@ -34,6 +34,10 @@ fn run_with_discovery(
             receiver_id,
             control_check,
         } => receiver::pair(&loaded, &receiver_id, true, control_check)?,
+        Command::StreamTest {
+            receiver_id,
+            seconds,
+        } => receiver::stream_test(&loaded, &receiver_id, seconds)?,
         Command::Unpair { receiver_id } => receiver::unpair(&loaded, &receiver_id)?,
         Command::Audio { command } => audio::run(command, &loaded)?,
         Command::Status => {
@@ -49,7 +53,7 @@ fn run_with_discovery(
                 loaded.config.receiver_allowlist.len()
             );
             println!("Audio capture: available via audio monitor; not opened by status");
-            println!("AirPlay playback: not implemented");
+            println!("AirPlay playback: explicit stream-test available; hardware unverified; no active session");
             println!("No service or receiver status was queried.");
         }
         Command::Config { command } => match command {

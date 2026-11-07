@@ -78,6 +78,15 @@ impl ControlKeys {
             failed: false,
         }
     }
+    pub(super) fn events(shared: &[u8]) -> Self {
+        Self {
+            write: derive(shared, "Events-Salt", "Events-Read-Encryption-Key"),
+            read: derive(shared, "Events-Salt", "Events-Write-Encryption-Key"),
+            tx: 0,
+            rx: 0,
+            failed: false,
+        }
+    }
     fn invalidate(&mut self) {
         self.failed = true;
         self.read.zeroize();
@@ -166,6 +175,21 @@ mod tests {
         assert!(client.write.iter().all(|b| *b == 0));
         assert!(client.read.iter().all(|b| *b == 0));
         assert!(client.encrypt(b"cannot reuse").is_err());
+    }
+    #[test]
+    fn independently_derived_event_keys_have_the_reversed_channel_directions() {
+        let shared: Vec<u8> = (0..32).collect();
+        let mut keys = ControlKeys::events(&shared);
+        assert_eq!(
+            keys.encrypt(b"event fixture").unwrap().as_slice(),
+            include_bytes!("../../tests/fixtures/event-tx.bin")
+        );
+        assert_eq!(
+            keys.decrypt(include_bytes!("../../tests/fixtures/event-rx.bin"))
+                .unwrap()
+                .as_slice(),
+            b"event fixture"
+        );
     }
     #[test]
     fn nonce_exhaustion_and_bad_length_permanently_invalidate_both_keys() {

@@ -10,7 +10,12 @@ This document records the PR #3 baseline. PR #4 supersedes its statements that
 verify always drops the socket and that encrypted application I/O is absent:
 [the current session document](AIRPLAY_SESSION.md) describes live verified socket
 handoff, encrypted OPTIONS, revocation checks and the still-disabled media path.
-Default `authenticate` still closes after verification.
+Default `authenticate` still closes after verification. Prompt 4c also adds an
+explicit realtime stream-test and refines bit-51 policy: with explicit persistent
+HAP bit 46 it is no longer blanket-blocked, based on the pinned sender analysis.
+The older matrix/decision discussion below is historical; current supported and
+rejected profiles are in AIRPLAY_SESSION.md. Signed identity and approval checks
+remain unchanged.
 
 ## Evidence ledger
 
