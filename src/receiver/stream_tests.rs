@@ -86,6 +86,7 @@ fn plist(r: &Request) -> Value {
 enum Mode {
     Good,
     BadCodec,
+    UnsupportedTiming,
     BadPort,
     NoTiming,
     NoEvent,
@@ -125,11 +126,59 @@ fn receiver(s: TcpStream, mode: Mode, seen: Arc<AtomicU64>) {
     let base = read_message(&mut socket, &mut keys);
     assert_eq!(base.method, "SETUP");
     assert!(base.uri.starts_with("rtsp://127.0.0.1/"));
+    for key in [
+        "client-instance",
+        "dacp-id",
+        "active-remote",
+        "x-apple-client-name",
+    ] {
+        assert_eq!(base.headers[key], info.headers[key]);
+    }
+    assert_eq!(base.headers["client-instance"], base.headers["dacp-id"]);
+    assert!(u64::from_str_radix(&base.headers["dacp-id"], 16).is_ok());
+    assert!(base.headers["active-remote"].parse::<u32>().is_ok());
+    assert_eq!(base.headers["x-apple-client-name"], "PiAir");
+    assert_eq!(base.headers["x-apple-protocolversion"], "1");
+    assert_eq!(
+        base.headers["content-type"],
+        "application/x-apple-binary-plist"
+    );
     let base_value = plist(&base);
     let base_d = base_value.as_dictionary().unwrap();
+    assert_eq!(base_d.len(), 4);
     assert_eq!(base_d["timingProtocol"].as_string(), Some("NTP"));
     assert!(uuid::Uuid::parse_str(base_d["sessionUUID"].as_string().unwrap()).is_ok());
     let destination = base_d["timingPort"].as_unsigned_integer().unwrap() as u16;
+    // Compare the production offer with Python plistlib's independent fixture,
+    // substituting only runtime-generated identity and bound port values.
+    let mut expected = Value::from_reader(std::io::Cursor::new(include_bytes!(
+        "../../tests/fixtures/initial-setup.plist"
+    )))
+    .unwrap();
+    for key in ["deviceID", "sessionUUID", "timingPort"] {
+        expected
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(key.into(), base_d[key].clone());
+    }
+    assert_eq!(base_value, expected);
+    if matches!(mode, Mode::UnsupportedTiming) {
+        send_reply(
+            &mut socket,
+            &mut keys,
+            &base,
+            Some(profile::dict([(
+                "timingProtocol",
+                Value::String("PTP".into()),
+            )])),
+            "",
+        );
+        let end = read_message(&mut socket, &mut keys);
+        assert_eq!(end.method, "TEARDOWN");
+        send_reply(&mut socket, &mut keys, &end, None, "");
+        assert_eof(&mut socket);
+        return;
+    }
     let event = TcpListener::bind("127.0.0.1:0").unwrap();
     let event_port = event.local_addr().unwrap().port();
     let timing = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -534,6 +583,7 @@ fn full_authenticated_realtime_session_encodes_encrypts_synchronizes_and_tears_d
 fn unsupported_codec_and_partial_setup_errors_fail_and_cleanup() {
     for mode in [
         Mode::BadCodec,
+        Mode::UnsupportedTiming,
         Mode::BadPort,
         Mode::NoTiming,
         Mode::NoEvent,
@@ -552,6 +602,9 @@ fn unsupported_codec_and_partial_setup_errors_fail_and_cleanup() {
         let error = session.negotiate_realtime().unwrap_err();
         let diagnostic = format!("{error:#}");
         match mode {
+            Mode::UnsupportedTiming => {
+                assert!(diagnostic.contains("unsupported PTP/timing profile"))
+            }
             Mode::NoTiming | Mode::SilentTeardown => assert!(
                 diagnostic.contains("ntp_ready=false event_ready=true"),
                 "{diagnostic}"

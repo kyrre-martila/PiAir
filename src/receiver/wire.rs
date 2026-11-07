@@ -17,6 +17,8 @@ pub struct Wire {
     deadline: Instant,
     budget: Duration,
     seq: u32,
+    client_instance: u64,
+    active_remote: u32,
     failed: bool,
     receiver_id: String,
     method: Method,
@@ -97,6 +99,8 @@ impl Wire {
             deadline: Instant::now() + budget,
             budget,
             seq: 0,
+            client_instance: rand::random(),
+            active_remote: rand::random(),
             failed: false,
             receiver_id,
             method,
@@ -295,38 +299,52 @@ impl Wire {
             );
             self.reauthorize()?;
             self.restart_deadline();
-            ensure!(
-                [
-                    "GET",
-                    "POST",
-                    "SETUP",
-                    "RECORD",
-                    "FLUSH",
-                    "TEARDOWN",
-                    "SET_PARAMETER"
-                ]
-                .contains(&method),
-                "unsupported RTSP method"
-            );
-            ensure!(
-                !uri.is_empty() && uri.len() < 256 && uri.bytes().all(|b| b > 32 && b < 127),
-                "invalid RTSP URI"
-            );
-            ensure!(body.len() <= 8192, "RTSP body too large");
-            self.seq = self.seq.checked_add(1).context("CSeq exhausted")?;
-            let mut request=Zeroizing::new(format!("{method} {uri} RTSP/1.0\r\nCSeq: {}\r\nUser-Agent: PiAir/0.1\r\nX-Apple-ProtocolVersion: 1\r\nContent-Length: {}\r\n",self.seq,body.len()).into_bytes());
-            for (key, value) in headers {
+            let request = (|| -> Result<Zeroizing<Vec<u8>>> {
                 ensure!(
-                    key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                        && !key.is_empty()
-                        && value.bytes().all(|b| (32..=126).contains(&b)),
-                    "invalid request header"
+                    [
+                        "GET",
+                        "POST",
+                        "SETUP",
+                        "RECORD",
+                        "FLUSH",
+                        "TEARDOWN",
+                        "SET_PARAMETER"
+                    ]
+                    .contains(&method),
+                    "unsupported RTSP method"
                 );
-                request.extend_from_slice(format!("{key}: {value}\r\n").as_bytes());
-            }
-            request.extend_from_slice(b"\r\n");
-            request.extend_from_slice(body);
-            self.write_message(&request).context("request write")?;
+                ensure!(
+                    !uri.is_empty() && uri.len() < 256 && uri.bytes().all(|b| b > 32 && b < 127),
+                    "invalid RTSP URI"
+                );
+                ensure!(body.len() <= 8192, "RTSP body too large");
+                self.seq = self.seq.checked_add(1).context("CSeq exhausted")?;
+                let mut request = Zeroizing::new(format!(
+                    "{method} {uri} RTSP/1.0\r\nCSeq: {}\r\n\
+                     User-Agent: PiAir/0.1\r\nX-Apple-ProtocolVersion: 1\r\n\
+                     Content-Length: {}\r\n", self.seq, body.len()
+                ).into_bytes());
+                // Sender identifiers are stable for this control connection, not credentials.
+                request.extend_from_slice(format!(
+                    "Client-Instance: {:X}\r\nDACP-ID: {:X}\r\nActive-Remote: {}\r\nX-Apple-Client-Name: PiAir\r\n",
+                    self.client_instance, self.client_instance, self.active_remote
+                ).as_bytes());
+                for (key, value) in headers {
+                    ensure!(
+                        key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                            && !key.is_empty()
+                            && value.bytes().all(|b| (32..=126).contains(&b)),
+                        "invalid request header"
+                    );
+                    request.extend_from_slice(format!("{key}: {value}\r\n").as_bytes());
+                }
+                request.extend_from_slice(b"\r\n");
+                request.extend_from_slice(body);
+                Ok(request)
+            })()
+            .context("request construction")?;
+            self.write_message(&request)
+                .context("encrypted request write")?;
             let body = self.response().context("response read/validation")?;
             ensure!(
                 self.pending_start == self.pending_end,
@@ -837,6 +855,70 @@ impl Drop for Worker {
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+
+    #[test]
+    fn setup_write_failure_is_attributed_and_closes_channel() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let mut peer = listener.accept().unwrap().0;
+        let mut wire = Wire::mock(socket, Duration::from_secs(1), "test");
+        wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
+        wire.socket.shutdown(Shutdown::Write).unwrap();
+        let error = wire
+            .request("SETUP", "rtsp://127.0.0.1/1", &[], &[])
+            .err()
+            .unwrap();
+        assert!(format!("{error:#}").contains("encrypted request write"));
+        assert!(wire.failed && wire.keys.is_none());
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn initial_setup_matches_independent_encrypted_sender_fixture() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let mut peer = listener.accept().unwrap().0;
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let shared: Vec<u8> = (0..32).collect();
+        let mut wire = Wire::mock(socket, Duration::from_secs(2), "test");
+        wire.keys = Some(super::super::crypto::ControlKeys::new(&shared));
+        wire.client_instance = 0x123456789abcdef0;
+        wire.active_remote = 123456789;
+        let server = thread::spawn(move || {
+            let expected = include_bytes!("../../tests/fixtures/initial-setup.frame");
+            let mut actual = vec![0; expected.len()];
+            peer.read_exact(&mut actual).unwrap();
+            assert_eq!(actual, expected);
+            let mut keys = super::super::crypto::ControlKeys::new(&shared);
+            keys.swap_directions_for_test();
+            peer.write_all(
+                &keys
+                    .encrypt(b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap(),
+            )
+            .unwrap();
+        });
+        wire.request(
+            "SETUP",
+            "rtsp://127.0.0.1/305419896",
+            &[("Content-Type", "application/x-apple-binary-plist".into())],
+            include_bytes!("../../tests/fixtures/initial-setup.plist"),
+        )
+        .unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn malformed_setup_is_attributed_to_construction_and_sends_nothing() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let mut peer = listener.accept().unwrap().0;
+        let mut wire = Wire::mock(socket, Duration::from_secs(1), "test");
+        wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
+        let error = wire.request("SETUP", "bad uri", &[], &[]).err().unwrap();
+        assert!(format!("{error:#}").contains("request construction"));
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    }
 
     #[test]
     fn partial_encrypted_event_is_interrupted_by_cleanup() {

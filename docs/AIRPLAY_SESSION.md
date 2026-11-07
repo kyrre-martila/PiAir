@@ -271,3 +271,14 @@ request sequence, arrival of the initial updateInfo event and NTP queries within
 the existing deadlines, and successful playback. Mock tests validate local
 behavior, not those hardware assumptions. No OwnTone, Autostream or system
 services were changed.
+
+### Initial SETUP sender headers (PR #10)
+
+Authenticated session requests now include matching hex Client-Instance/DACP-ID,
+a decimal u32 Active-Remote and X-Apple-Client-Name: PiAir, following the inspected
+audio senders. IDs are random per control connection and stable across requests.
+The NTP plist, IPv4 session URI, protocol version, encryption and ordering remain
+unchanged. Request errors distinguish construction from encrypted writes.
+[Initial SETUP research](INITIAL_SETUP_RESEARCH.md) contains immutable upstream
+source links, independent fixture details, compatibility limits and safe operator
+verification instructions. AppleTV6,2/tvOS 26.6.1 acceptance remains unverified.
