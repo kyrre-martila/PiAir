@@ -1,4 +1,4 @@
-# Explicit pyatv transient HTTP framing experiment
+# Explicit pyatv transient HTTP framing and M1 ordering experiment
 
 This is a controlled hardware experiment, not a compatibility fix. No hardware
 success is established here; HomePod support is unverified. The normal transient
@@ -47,8 +47,7 @@ The wire uses CRLF and an empty body. Host, CSeq and Content-Length are absent;
 there is no PIN or TLV payload. This request does not consume PiAir's CSeq counter.
 After a 200 response, M1 and M3 use the same pyatv profile, with
 `Content-Length: <body byte count>` immediately after the request line and before
-User-Agent. Host and CSeq remain absent. The length covers PiAir's unchanged TLV
-bytes. PiAir retains its internal sequence accounting for subsequent control
+User-Agent. Host and CSeq remain absent. The length covers the encoded TLV bytes. PiAir retains its internal sequence accounting for subsequent control
 requests, but sends no CSeq in experimental HTTP requests. SRP validation and
 required receiver proof verification remain unchanged. The same
 currently authorized numeric receiver connection is used throughout. Unlike the
@@ -70,21 +69,29 @@ phase and timing are emitted; response bodies, TLVs, proofs, keys, credentials,
 cookies and arbitrary receiver text are never logged.
 
 Loopback tests assert exact preamble bytes, HKP 4, empty body, request order,
-same-socket M1–M4 plus encrypted OPTIONS, immediate stop on 403/470/500 with no
+exact experimental and default M1 body bytes, same-socket M1–M4 plus encrypted OPTIONS, immediate stop on 403/470/500 with no
 fallback, non-transient rejection, safe logs and the normal transient regression.
 These synthetic tests establish protocol behavior, not receiver compatibility.
 
 ## Scope and hardware findings
 
 The existing `--experimental-pyatv-transient-preamble` name is retained for CLI
-compatibility; it now selects the complete preamble/M1/M3 HTTP profile. It is
+compatibility; it selects the complete preamble/M1/M3 HTTP profile and experimental M1 ordering. It is
 explicit, disabled by default and never triggers detection or fallback.
 
-Prior real HomePod mini testing (AudioAccessory5,1, firmware 27.2) returned 403
-for default HKP 4 M1, 200 for the experimental HKP 4 preamble, then 403 for
-PiAir-formatted M1. That isolates a header-profile difference worth testing; it
-does not establish that headers caused rejection. This PR has no new hardware
-evidence and makes no HomePod compatibility claim.
+Previous real HomePod mini testing (AudioAccessory5,1, firmware 27.2):
+
+| Experiment | Response |
+| --- | --- |
+| Default PiAir transient M1 | HTTP 403 |
+| pyatv HKP 4 `/pair-pin-start` | HTTP 200 |
+| pyatv preamble + PiAir HTTP framing for M1 | HTTP 403 |
+| pyatv preamble + pyatv HTTP framing for M1 (PR #14) | HTTP 400 |
+
+PR #14 established a different response to the experimental HTTP profile, but
+M1 was still rejected. These results do not identify the cause of rejection.
+This M1 ordering experiment has no new hardware evidence and makes no HomePod
+compatibility claim.
 
 For both M1 and M3, the exact header sequence is:
 
@@ -98,10 +105,23 @@ content-type: application/octet-stream\r\n
 \r\n
 ```
 
-Only HTTP framing changes. PiAir retains its existing SRP calculations, TLV
-ordering/encoding (M1 State/Method/Flags, versus pyatv Method/State/Flags), bounded parser, authorization checks, receiver-proof
-verification and encryption. In particular, the pinned pyatv transient routine
-returns after M3 without verifying M4's receiver proof; PiAir still requires it.
-Loopback validation checks exact M1/M3 headers and unchanged SRP payload behavior,
-M3 rejection and invalid receiver proof as well as preamble/M1 rejection. These
-are synthetic tests, not a compatibility fix.
+PR #15 changes only the experimental M1 TLV field order. In pinned pyatv,
+`verify_credentials` constructs the dictionary in Method, SeqNo (State), Flags
+order. [`hap_tlv8.py`, `write_tlv`](https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/auth/hap_tlv8.py)
+iterates `data.items()` in insertion order and writes each type, one-byte length,
+and value. Method is 0x00, State is 0x06 and Flags is 0x13; the transient flag is
+0x10. The experimental M1 is therefore exactly:
+
+```text
+00 01 00 06 01 01 13 01 10
+```
+
+Default PiAir M1 remains State/Method/Flags (`06 01 01 00 01 00 13 01 10`).
+All field types, lengths and values are unchanged. The generic TLV encoder,
+PR #14 HTTP framing, M3, SRP calculations, bounded parser, authorization checks,
+receiver-proof verification, encryption and credential handling are unchanged.
+In particular, the pinned pyatv transient routine returns after M3 without
+verifying M4's receiver proof; PiAir still requires it.
+Loopback validation checks exact M1 bytes in successful and rejected exchanges,
+exact M1/M3 headers, request order, default regression, M3 rejection and invalid
+receiver proof as well as preamble/M1 rejection. These are synthetic tests.

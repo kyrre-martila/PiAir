@@ -196,14 +196,14 @@ pub fn transient(mut wire: Wire) -> Result<Wire> {
         "explicit transient selection required; no fallback"
     );
     wire.restart_deadline();
-    let m2 = exchange(
-        &mut wire,
-        "/pair-setup",
-        &[(STATE, &[1]), (0, &[0]), (FLAGS, &[0x10])],
-        2,
-        &[SALT, PUBLIC_KEY, FLAGS],
-    )
-    .context("transient authentication M2")?;
+    // Match pinned pyatv's insertion order only in the explicit experiment.
+    let m1: [(u8, &[u8]); 3] = if wire.uses_pyatv_transient_profile() {
+        [(0, &[0]), (STATE, &[1]), (FLAGS, &[0x10])]
+    } else {
+        [(STATE, &[1]), (0, &[0]), (FLAGS, &[0x10])]
+    };
+    let m2 = exchange(&mut wire, "/pair-setup", &m1, 2, &[SALT, PUBLIC_KEY, FLAGS])
+        .context("transient authentication M2")?;
     ensure!(
         m2.integer(FLAGS)?.is_none_or(|flags| flags == 0x10),
         "transient M2: unsupported authentication flags"

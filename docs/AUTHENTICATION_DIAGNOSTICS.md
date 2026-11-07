@@ -83,8 +83,10 @@ Inspected sources at fixed revisions:
   and [pairing.rs](https://github.com/kyrre-martila/PiAir/blob/cde3f77ac93fff550c6e836e86462aaa22e4e08d/src/receiver/pairing.rs).
 
 The PiAir column below describes the unchanged default profile. The explicit
-[HTTP framing experiment](PYATV_TRANSIENT_PREAMBLE.md) uses pyatv headers for
-preamble, M1 and M3.
+[HTTP framing and M1 ordering experiment](PYATV_TRANSIENT_PREAMBLE.md) uses pyatv
+headers for preamble, M1 and M3, plus Method/State/Flags ordering for M1 only.
+Its diagnostic record includes the prior HomePod mini 403/200/403/400 results;
+there is no new hardware success evidence.
 
 | Detail | OwnTone | pyatv transient | PiAir |
 |---|---|---|---|
