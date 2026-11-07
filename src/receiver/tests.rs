@@ -1359,3 +1359,191 @@ fn replayed_encrypted_response_and_plaintext_reentry_close_control() {
 
 #[path = "stream_tests.rs"]
 mod stream_tests;
+
+#[test]
+fn operational_status_transitions_preserve_saved_approval_and_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let store = store::Store::new(&config).unwrap();
+    store.save(&credential()).unwrap();
+    // Exercise both aliases through discovery parsing, not a hand-built Selection.
+    for (saved, current) in [
+        ("0x18644", "0x118644"),
+        ("0x118644", "0x18644"),
+        ("0x18644", "0x3fe40"),
+    ] {
+        let make = |flags: &str| {
+            let info = mdns_sd::ServiceInfo::new(
+                "_airplay._tcp.local.",
+                "Stua",
+                "fixture.local.",
+                "127.0.0.1",
+                port,
+                [
+                    ("deviceid", "AA:BB:CC:DD:EE:FF"),
+                    ("pi", PI),
+                    ("model", "AppleTV6,2"),
+                    ("features", "0x80200,0x4000"),
+                    ("flags", flags),
+                    ("sf", flags),
+                ]
+                .as_slice(),
+            )
+            .unwrap();
+            vec![Receiver {
+                id: ID.into(),
+                name: "Stua".into(),
+                services: vec![discovery::Advertisement::test_from_info(&info)],
+            }]
+        };
+        let selected = Selection::from_receiver(&make(saved)[0], Method::PinDisplay).unwrap();
+        store.select(&selected).unwrap();
+        let path = dir.path().join("receiver-state/selected.toml");
+        let before = std::fs::read(&path).unwrap();
+        // Load the existing persisted format, including its raw status snapshot.
+        let selected = store.selection().unwrap().unwrap();
+        let observed = make(current);
+        let wire = Wire::connect(&config, ID, &selected, &observed).unwrap();
+        drop(wire);
+        drop(listener.accept().unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            store.credential(ID).unwrap().unwrap().receiver_key,
+            credential().receiver_key
+        );
+        std::fs::write(&config, "").unwrap();
+        assert!(Wire::connect(&config, ID, &selected, &observed).is_err());
+        assert!(listener.accept().is_err());
+        std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+    }
+}
+
+#[test]
+fn status_exceptions_do_not_relax_identity_endpoint_or_capability_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut original = snapshot(port);
+    original[0].services[0]
+        .capabilities
+        .insert("flags".into(), "0x18644".into());
+    original[0].services[0]
+        .capabilities
+        .insert("features".into(), "0x80200,0x4000".into());
+    let selected = Selection::from_receiver(&original[0], Method::PinDisplay).unwrap();
+    store::Store::new(&config)
+        .unwrap()
+        .select(&selected)
+        .unwrap();
+    let make = || {
+        let mut r = snapshot(port);
+        r[0].services[0].capabilities = original[0].services[0].capabilities.clone();
+        r[0].services[0]
+            .capabilities
+            .insert("flags".into(), "0x118644".into());
+        r
+    };
+    for (key, value) in [
+        ("pi", "CHANGED"),
+        ("flags", "0x1186c4"), // password
+        ("flags", "0x11864c"), // PIN policy
+        ("flags", "0x118444"), // one-time pairing policy
+        ("flags", "0x118244"), // HomeKit access control
+        ("flags", "0x158644"), // unknown bit
+        ("sf", "0x18644"),     // contradictory aliases
+        ("pw", "true"),
+        ("acl", "1"),
+        ("protovers", "99"),
+        ("features", "0x80200,0x0"),    // persistent HAP removed
+        ("features", "0x80000,0x4000"), // audio removed
+        ("features", "0x200,0x4000"),   // ALAC removed
+        ("features", "0x80200,0x4100"), // even feature additions remain pinned
+    ] {
+        let mut r = make();
+        r[0].services[0]
+            .capabilities
+            .insert(key.into(), value.into());
+        assert!(
+            Wire::connect(&config, ID, &selected, &r).is_err(),
+            "{key}={value}"
+        );
+    }
+    for key in ["flags", "pi"] {
+        let mut r = make();
+        r[0].services[0].capabilities.remove(key);
+        assert!(Wire::connect(&config, ID, &selected, &r).is_err());
+    }
+    let mut r = make();
+    r[0].services[0].addresses = ["127.0.0.2".parse().unwrap()].into();
+    assert!(Wire::connect(&config, ID, &selected, &r).is_err());
+    let mut r = make();
+    r[0].services[0].port = if port == 65535 { port - 1 } else { port + 1 };
+    assert!(Wire::connect(&config, ID, &selected, &r).is_err());
+    let mut r = make();
+    r[0].id = "device:112233445566".into();
+    assert!(Wire::connect(&config, ID, &selected, &r).is_err());
+    // Service identity disagrees with the enclosing receiver.
+    let mut conflict = snapshot(port).remove(0);
+    conflict.id = "device:112233445566".into();
+    let mut r = make();
+    r[0].services = conflict.services.clone();
+    r[0].id = conflict.id.clone();
+    assert!(Selection::from_receiver(&r[0], Method::PinDisplay).is_err());
+    // A second identity shares the approved address, or a duplicate endpoint exists.
+    let mut r = make();
+    r.push(conflict);
+    assert!(Wire::connect(&config, ID, &selected, &r).is_err());
+    let mut r = make();
+    let duplicate = r[0].services[0].clone();
+    r[0].services.push(duplicate);
+    assert!(Wire::connect(&config, ID, &selected, &r).is_err());
+    assert!(listener.accept().is_err());
+}
+
+#[test]
+fn stua_hardware_advertisement_fixture_accepts_both_playback_transitions() {
+    // Construct advertisements only: never discover or connect to this address.
+    let make = |flags: &str| {
+        let info = mdns_sd::ServiceInfo::new(
+            "_airplay._tcp.local.",
+            "Stua",
+            "stua.local.",
+            "192.168.1.236",
+            7000,
+            [
+                ("deviceid", "02:D8:99:C1:83:3F"),
+                ("pi", PI),
+                ("model", "AppleTV6,2"),
+                ("features", "0x80200,0x4000"),
+                ("sf", flags),
+            ]
+            .as_slice(),
+        )
+        .unwrap();
+        Receiver {
+            id: "device:02d899c1833f".into(),
+            name: "Stua".into(),
+            services: vec![discovery::Advertisement::test_from_info(&info)],
+        }
+    };
+    for method in [Method::PinDisplay, Method::SetupCode] {
+        let idle = Selection::from_receiver(&make("0x18644"), method).unwrap();
+        let playing = Selection::from_receiver(&make("0x118644"), method).unwrap();
+        assert!(idle.matches_observation(&playing));
+        assert!(playing.matches_observation(&idle));
+        let mut different_method = playing.clone();
+        different_method.method = if method == Method::PinDisplay {
+            Method::SetupCode
+        } else {
+            Method::PinDisplay
+        };
+        assert!(!idle.matches_observation(&different_method));
+    }
+}

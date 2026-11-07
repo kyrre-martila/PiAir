@@ -171,8 +171,8 @@ addresses only (no hostname/DNS path). It reloads current approval and persisted
 selection, rejects changed/ambiguous IDs and endpoints, and makes one bounded
 connection attempt. No redirects, retries, alternate addresses or unauthenticated
 fallback. IPv6 link-local scope handling is unsupported. Shared-address conflicting
-advertisements cause rejection. Full status/capability changes can also require
-explicit reselection; that strict policy may cause false refusals.
+advertisements cause rejection. Discovery comparison permits only the operational
+status changes defined below; persisted approval comparisons remain exact.
 
 Advertised `pi` is optional, untrusted discovery metadata, pinned for change
 detection. It is **not** used as an authenticated identifier or mandatory expected
@@ -361,3 +361,86 @@ and read-only dispatch are covered. Apple's HAP R2 §5.5.2 numerical vector chec
 A/K independently of the mock; fixture data is not implementation source.
 GitHub Actions stays manual-only (`workflow_dispatch`). Mock success is not
 Apple TV/HomePod interoperability evidence or ARM64/hardware validation.
+
+
+## Selection validation across operational status changes (PR #9)
+
+`Selection::from_receiver` still requires one unambiguous AirPlay service,
+matching canonical device identity, a valid optional `pi`, literal nonempty
+addresses and a nonzero port. It parses both feature aliases and both status
+aliases numerically, rejects contradictions/malformed fields, and runs
+`Capabilities::decide` for the explicitly selected method on **every connection**.
+Persistent HAP still requires feature bit 46; password protection, unresolved
+ACLs, unknown protocol versions and transient profiles are rejected. Feature
+words remain exactly pinned, including unknown bits: additions and removals both
+require review. Audio/ALAC feature downgrades therefore fail before connecting;
+stream-test also requires bits 9/19 and retains authenticated GET /info profile
+validation. This change adds no streaming profile or authentication fallback.
+
+The previous whole-Selection comparison treated changing status as a new
+receiver. Discovery now uses a dedicated comparison; `PartialEq` is unchanged
+for the persisted selection recheck before connecting, live revocation checks,
+media leases and enrollment handoff. ID, optional advertised `pi` (including
+presence), address set, port and selected method must match exactly. Password,
+ACL and protocol fields also retain exact values/presence. Only the following
+`flags`/`sf` bits may change in either direction when both snapshots contain flags:
+
+| Bit | Operational interpretation |
+| --- | --- |
+| 2 | Audio cable attached |
+| 11 | Relay/current-track availability |
+| 12 | Silent primary |
+| 13 | Synchronization group leader |
+| 14 | Synchronization buddy unreachable |
+| 17 | Receiver session active |
+| 20 | Observed Apple TV local TV playback status; provisional interpretation |
+
+The [unofficial status reference](https://openairplay.github.io/airplay-spec/status_flags.html)
+defines bits 2 and 11–17. The
+[receiver implementation](https://github.com/openairplay/airplay2-receiver/blob/6c343d3679ddb561c61566985acaaf587d0a3bd3/ap2/bitflags.py)
+corroborates those names; its session lifecycle toggles bit 17. These are
+reverse-engineered references, not an Apple specification. Bit 20 is absent
+from their definitions: the supplied Stua observation is the evidence for this
+specific exception, **not** proof of a general bit-20 meaning. The reported
+receiver ID, IPv4 address, port, `pi` and model stayed unchanged
+while flags changed `0x18644` ↔ `0x118644`. Model/name are informational discovery
+metadata, never authorization or authenticated identity.
+
+Bits 3/9 (PIN/pairing), 7 (password), 10 (HomeKit access control), cloud/support
+and subscription/library bits, problem/configuration bits and every other
+unknown bit remain pinned. Removing or introducing the flags field also fails.
+The exceptions report topology/activity rather than granting access; they never
+relax allowlisting, endpoint pinning, explicit confirmation, credential binding,
+HAP signature verification or encrypted control. No status bit authorizes a
+receiver or triggers selection, pairing or endpoint changes. Operational
+acceptance does not establish that a receiver is available or that playback will
+succeed, nor grant permission to interrupt existing playback.
+
+The serialized selection format and raw status snapshot are unchanged. Existing
+idle or playing selections load directly; no migration, rewrite, automatic
+reselection or credential replacement occurs. Tests verify the saved bytes and
+credential key remain unchanged. Regression tests use loopback only: both
+observed transitions, additional operational bits, exhaustive single-bit policy,
+changed/missing `pi`, endpoint changes, conflicting identities/services,
+capability downgrade, contradictory advertisements, changed persisted method,
+and allowlist revocation. Existing credential/signature and live revocation tests
+remain applicable.
+
+No hardware was contacted, no playback was started, and no OwnTone, Autostream
+or system services were changed. Remaining assumptions are the provisional
+bit-20 interpretation and the reverse-engineered meanings above; genuine changes
+to other fields still fail closed and require explicit review. Realtime
+negotiation and Apple TV playback remain unverified by these local tests.
+
+Validation from fresh main `1e60b6b` (merged PR #8), Rust 1.99.1:
+
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --locked -- -D warnings` — passed.
+- `cargo test --locked` — passed: 91 unit tests and 11 integration tests.
+- `git diff --check` — passed.
+
+Rust tooling and official Debian ALSA development headers were installed into
+workspace-local directories. The final test run required loopback socket access;
+an initial sandboxed invocation failed with `PermissionDenied` on mock binds,
+then the same suite passed with local sockets enabled. No hardware access was
+needed or attempted.

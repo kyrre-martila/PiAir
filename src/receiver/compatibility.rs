@@ -31,6 +31,28 @@ pub struct Capabilities {
     pub protocol_version: Option<String>,
 }
 impl Capabilities {
+    /// Only operational status may drift after selection. Keep feature words,
+    /// authentication/access policy, protocol version, unknown bits and even
+    /// presence/absence pinned. See docs/PAIRING.md for evidence and assumptions.
+    pub fn matches_selection(&self, selected: &Self) -> bool {
+        const OPERATIONAL: u32 = (1 << 2) // audio cable attached
+            | (1 << 11) // relay/current-track availability
+            | (1 << 12) // silent primary
+            | (1 << 13) // synchronization group leader
+            | (1 << 14) // synchronization buddy unreachable
+            | (1 << 17) // receiver session active
+            | (1 << 20); // observed Apple TV local TV playback status
+        let flags_match = match (self.flags, selected.flags) {
+            (Some(current), Some(saved)) => (current ^ saved) & !OPERATIONAL == 0,
+            (None, None) => true,
+            _ => false,
+        };
+        flags_match
+            && self.features == selected.features
+            && self.password == selected.password
+            && self.access_control == selected.access_control
+            && self.protocol_version == selected.protocol_version
+    }
     pub fn parse(service: &Advertisement) -> Result<Self> {
         let txt = &service.capabilities;
         let flags = txt
@@ -126,6 +148,38 @@ mod tests {
             password: None,
             access_control: None,
             protocol_version: None,
+        }
+    }
+    #[test]
+    fn only_explicit_operational_status_bits_may_change() {
+        let mut saved = caps(1 << 46);
+        saved.flags = Some(0x18644);
+        for bit in 0..32 {
+            let mut observed = saved.clone();
+            observed.flags = saved.flags.map(|f| f ^ (1 << bit));
+            assert_eq!(
+                observed.matches_selection(&saved),
+                [2, 11, 12, 13, 14, 17, 20].contains(&bit),
+                "bit {bit}"
+            );
+            assert_eq!(
+                saved.matches_selection(&observed),
+                [2, 11, 12, 13, 14, 17, 20].contains(&bit),
+                "bit {bit}"
+            );
+        }
+        let mut observed = saved.clone();
+        observed.flags = None;
+        assert!(!observed.matches_selection(&saved));
+        for change in 0..4 {
+            let mut observed = saved.clone();
+            match change {
+                0 => observed.features ^= 1 << 40,
+                1 => observed.password = Some(false),
+                2 => observed.access_control = Some(0),
+                _ => observed.protocol_version = Some("1.1".into()),
+            }
+            assert!(!observed.matches_selection(&saved));
         }
     }
     #[test]
