@@ -316,6 +316,7 @@ impl Wire {
                 "authenticated control session required"
             );
             self.reauthorize()?;
+            self.auth_phase("encrypted OPTIONS");
             self.restart_deadline();
             self.seq = self
                 .seq
@@ -328,7 +329,10 @@ impl Wire {
                 body.is_empty() && self.pending_start == self.pending_end,
                 "unexpected OPTIONS payload or unsolicited message"
             );
-            self.reauthorize()
+            self.reauthorize()?;
+            tracing::debug!(target: "piair::auth", phase = self.auth_phase, status = 200, cseq = self.seq,
+                "encrypted control check validated");
+            Ok(())
         })();
         if result.is_err() {
             self.close();
@@ -679,6 +683,10 @@ impl Wire {
         );
         if self.keys.is_none() {
             super::diagnostics::response(text, self.auth_phase);
+        } else {
+            // Log only the validated numeric status, never decrypted headers or payloads.
+            tracing::debug!(target: "piair::auth", phase = self.auth_phase, status = %words[1],
+                "encrypted control response status");
         }
         ensure!(
             words[1] == "200",

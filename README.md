@@ -262,3 +262,6 @@ For opt-in safe authentication logs and the HomePod 403 investigation, see
 Controlled hardware diagnostic: [explicit pyatv transient HTTP framing experiment](docs/PYATV_TRANSIENT_PREAMBLE.md), disabled by default; HomePod support remains unverified.
 
 See the [OwnTone-reference RTSP authentication-only experiment](docs/OWNTONE_TRANSIENT.md) for the new explicit profile, verified protocol comparison and current hardware evidence.
+
+For the pinned OwnTone control-channel audit, exact non-playback HomePod test
+command, expected results and limitations, see [encrypted control verification](docs/ENCRYPTED_CONTROL_CHECK.md).
