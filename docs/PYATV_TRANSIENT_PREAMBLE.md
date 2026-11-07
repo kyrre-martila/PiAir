@@ -1,4 +1,4 @@
-# Explicit pyatv transient preamble experiment
+# Explicit pyatv transient HTTP framing experiment
 
 This is a controlled hardware experiment, not a compatibility fix. No hardware
 success is established here; HomePod support is unverified. The normal transient
@@ -24,24 +24,33 @@ Inspected pyatv revision `b277a4c8222ecdcbaab8a24e3e713ca44765adb4`:
   calls `http.post("/pair-pin-start", headers=_AIRPLAY_HEADERS)` with no body,
   before M1 and M3.
 - [`http.py`, `post`, `send_and_receive`, `_format_message`](https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/support/http.py)
-  defaults to HTTP/1.1, preserves the supplied headers, and adds Content-Length
+  defaults to HTTP/1.1, converts supplied names to lowercase through `CaseInsensitiveDict`, and adds Content-Length
   only for a truthy body. No Host or CSeq is synthesized.
+
+[`collections.py`, `CaseInsensitiveDict`](https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/support/collections.py)
+lowercases dictionary keys while preserving insertion order. PR #13 missed this
+normalization; the complete experiment corrects casing for the preamble too.
+Generated `Content-Length` retains its capitalization.
 
 The experimental preamble is exactly:
 
 ```http
 POST /pair-pin-start HTTP/1.1
-User-Agent: AirPlay/320.20
-Connection: keep-alive
-X-Apple-HKP: 4
-Content-Type: application/octet-stream
+user-agent: AirPlay/320.20
+connection: keep-alive
+x-apple-hkp: 4
+content-type: application/octet-stream
 
 ```
 
 The wire uses CRLF and an empty body. Host, CSeq and Content-Length are absent;
 there is no PIN or TLV payload. This request does not consume PiAir's CSeq counter.
-After a 200 response, the existing PiAir M1–M4 requests retain their original
-headers, SRP validation and required receiver proof verification. The same
+After a 200 response, M1 and M3 use the same pyatv profile, with
+`Content-Length: <body byte count>` immediately after the request line and before
+User-Agent. Host and CSeq remain absent. The length covers PiAir's unchanged TLV
+bytes. PiAir retains its internal sequence accounting for subsequent control
+requests, but sends no CSeq in experimental HTTP requests. SRP validation and
+required receiver proof verification remain unchanged. The same
 currently authorized numeric receiver connection is used throughout. Unlike the
 pinned pyatv transient procedure, PiAir continues to verify M4's proof before
 establishing directional encrypted control/event keys.
@@ -64,3 +73,35 @@ Loopback tests assert exact preamble bytes, HKP 4, empty body, request order,
 same-socket M1–M4 plus encrypted OPTIONS, immediate stop on 403/470/500 with no
 fallback, non-transient rejection, safe logs and the normal transient regression.
 These synthetic tests establish protocol behavior, not receiver compatibility.
+
+## Scope and hardware findings
+
+The existing `--experimental-pyatv-transient-preamble` name is retained for CLI
+compatibility; it now selects the complete preamble/M1/M3 HTTP profile. It is
+explicit, disabled by default and never triggers detection or fallback.
+
+Prior real HomePod mini testing (AudioAccessory5,1, firmware 27.2) returned 403
+for default HKP 4 M1, 200 for the experimental HKP 4 preamble, then 403 for
+PiAir-formatted M1. That isolates a header-profile difference worth testing; it
+does not establish that headers caused rejection. This PR has no new hardware
+evidence and makes no HomePod compatibility claim.
+
+For both M1 and M3, the exact header sequence is:
+
+```text
+POST /pair-setup HTTP/1.1\r\n
+Content-Length: <length>\r\n
+user-agent: AirPlay/320.20\r\n
+connection: keep-alive\r\n
+x-apple-hkp: 4\r\n
+content-type: application/octet-stream\r\n
+\r\n
+```
+
+Only HTTP framing changes. PiAir retains its existing SRP calculations, TLV
+ordering/encoding (M1 State/Method/Flags, versus pyatv Method/State/Flags), bounded parser, authorization checks, receiver-proof
+verification and encryption. In particular, the pinned pyatv transient routine
+returns after M3 without verifying M4's receiver proof; PiAir still requires it.
+Loopback validation checks exact M1/M3 headers and unchanged SRP payload behavior,
+M3 rejection and invalid receiver proof as well as preamble/M1 rejection. These
+are synthetic tests, not a compatibility fix.

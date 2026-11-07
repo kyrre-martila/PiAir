@@ -1,4 +1,4 @@
-> Optional controlled experiment: [pyatv transient preamble](PYATV_TRANSIENT_PREAMBLE.md).
+> Optional controlled experiment: [pyatv transient HTTP framing](PYATV_TRANSIENT_PREAMBLE.md).
 > The default flow described below remains unchanged.
 
 # Transient AirPlay authentication
@@ -78,7 +78,8 @@ close the channel. No retry, profile cycling, or method fallback occurs.
 pyatv differs: it first sends `/pair-pin-start` with HKP 4, then M1/M3. Its pinned
 transient client does not inspect M4's receiver proof. PiAir adopts OwnTone's
 proof verification. The default path does not send pyatv's additional PIN-start request;
-the authenticate-only experiment linked above explicitly opts into it.
+the authenticate-only experiment linked above opts into that preamble and the
+pyatv HTTP profile for M1 and M3.
 OwnTone can switch to persistent PIN pairing on 470; PiAir deliberately does not.
 Receivers requiring another preamble are unsupported by this implementation.
 

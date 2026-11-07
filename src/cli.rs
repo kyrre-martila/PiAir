@@ -45,7 +45,7 @@ pub enum Command {
         /// Explicitly test encrypted RTSP OPTIONS on the same verified socket.
         #[arg(long)]
         control_check: bool,
-        /// Controlled hardware experiment: send the pinned pyatv HKP 4 preamble.
+        /// Controlled hardware experiment: use pinned pyatv HTTP framing for preamble, M1 and M3.
         #[arg(long)]
         experimental_pyatv_transient_preamble: bool,
     },

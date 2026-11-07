@@ -82,6 +82,10 @@ Inspected sources at fixed revisions:
 - PiAir baseline [wire.rs](https://github.com/kyrre-martila/PiAir/blob/cde3f77ac93fff550c6e836e86462aaa22e4e08d/src/receiver/wire.rs)
   and [pairing.rs](https://github.com/kyrre-martila/PiAir/blob/cde3f77ac93fff550c6e836e86462aaa22e4e08d/src/receiver/pairing.rs).
 
+The PiAir column below describes the unchanged default profile. The explicit
+[HTTP framing experiment](PYATV_TRANSIENT_PREAMBLE.md) uses pyatv headers for
+preamble, M1 and M3.
+
 | Detail | OwnTone | pyatv transient | PiAir |
 |---|---|---|---|
 | Transient sequence | two POST /pair-setup | POST /pair-pin-start then two POST /pair-setup | two POST /pair-setup |
@@ -107,7 +111,7 @@ pyatv's preamble is a concrete difference worth a separately authorized experime
 The pinned implementation does not condition it on firmware 27.2 or explain a
 27.2-specific requirement. Neither source inspection nor a 403 establishes that
 adding it would work. PiAir's HKP 3 PIN-start rejection is not a test of pyatv's
-HKP 4 preamble. The separately opt-in [controlled preamble experiment](PYATV_TRANSIENT_PREAMBLE.md)
+HKP 4 preamble. The separately opt-in [controlled HTTP framing experiment](PYATV_TRANSIENT_PREAMBLE.md)
 now implements this exact HKP 4 preamble; the default path remains unchanged. Header,
 protocol and Home access-policy differences remain independent hypotheses.
 
