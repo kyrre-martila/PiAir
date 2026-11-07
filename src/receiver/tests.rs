@@ -1288,7 +1288,7 @@ fn stalled_control_has_an_absolute_deadline_and_closes_without_retry() {
     session.start(|| Ok(wire), &credential()).unwrap();
     assert!(session.check_control().is_err());
     assert_eq!(session.state(), session::State::Failed);
-    assert!(session.failure().unwrap().contains("timed out"));
+    assert!(session.failure().unwrap().contains("read timeout"));
     server.join().unwrap();
 }
 

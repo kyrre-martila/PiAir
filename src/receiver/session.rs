@@ -104,6 +104,7 @@ impl Session {
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("control session absent"))?
                 .options()
+                .context("control check stage=OPTIONS method=OPTIONS")
         })();
         self.finish(result)
     }
@@ -147,37 +148,41 @@ impl Session {
             .control
             .as_mut()
             .context("control absent")?
-            .request(method, &uri, &headers, body)?;
-        if let Some(raw) = response.headers.get("session") {
-            let mut parts = raw.split(';');
-            let token = parts.next().unwrap_or("");
-            ensure!(
-                !token.is_empty()
-                    && token.len() <= 128
-                    && token
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
-                "invalid receiver session identifier"
-            );
-            for parameter in parts {
-                let n = parameter
-                    .trim()
-                    .strip_prefix("timeout=")
-                    .context("unsupported Session parameter")?;
+            .request(method, &uri, &headers, body)
+            .with_context(|| format!("RTSP method={method}"))?;
+        (|| {
+            if let Some(raw) = response.headers.get("session") {
+                let mut parts = raw.split(';');
+                let token = parts.next().unwrap_or("");
                 ensure!(
-                    n.parse::<u32>().is_ok_and(|n| (1..=3600).contains(&n)),
-                    "invalid Session timeout"
+                    !token.is_empty()
+                        && token.len() <= 128
+                        && token
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
+                    "invalid receiver session identifier"
                 );
+                for parameter in parts {
+                    let n = parameter
+                        .trim()
+                        .strip_prefix("timeout=")
+                        .context("unsupported Session parameter")?;
+                    ensure!(
+                        n.parse::<u32>().is_ok_and(|n| (1..=3600).contains(&n)),
+                        "invalid Session timeout"
+                    );
+                }
+                ensure!(
+                    self.session_header
+                        .as_deref()
+                        .is_none_or(|old| old == token),
+                    "receiver session identifier changed"
+                );
+                self.session_header = Some(token.to_owned());
             }
-            ensure!(
-                self.session_header
-                    .as_deref()
-                    .is_none_or(|old| old == token),
-                "receiver session identifier changed"
-            );
-            self.session_header = Some(token.to_owned());
-        }
-        Ok(response)
+            Ok(response)
+        })()
+        .with_context(|| format!("RTSP method={method} status=200 response validation failed"))
     }
     fn plist_response(reply: &Reply) -> Result<Value> {
         ensure!(
@@ -191,6 +196,8 @@ impl Session {
     }
     /// Explicit concrete profile: HAP, ALAC/44100/16/2, realtime UDP, NTP.
     pub fn negotiate_realtime(&mut self) -> Result<()> {
+        let mut stage = "local initialization";
+        let mut status = None;
         let result = (|| {
             ensure!(
                 self.state == State::Negotiating,
@@ -205,8 +212,13 @@ impl Session {
                 .context("control absent")?
                 .local_ip()?;
             self.uri = format!("rtsp://{local}/{session_id}");
+            status = None;
+            stage = "GET /info";
             let info = self.call("GET", Some("/info"), &[], &[])?;
+            status = Some(200);
             profile::capabilities(&Self::plist_response(&info)?)?;
+            status = None;
+            stage = "media socket binding";
             let mut ports = self.control.as_ref().unwrap().bind_media()?;
             let control_port = ports.control()?;
             let timing_port = ports.timing()?;
@@ -225,8 +237,11 @@ impl Session {
                 ("timingProtocol", Value::String("NTP".into())),
                 ("timingPort", profile::uint(u64::from(timing_port))),
             ]))?;
+            status = None;
+            stage = "initial SETUP";
             self.remote_attempted = true;
             let base = self.call("SETUP", None, &body, &[])?;
+            status = Some(200);
             let base = Self::plist_response(&base)?;
             let d = profile::dictionary(&base)?;
             if let Some(protocol) = d.get("timingProtocol") {
@@ -237,22 +252,34 @@ impl Session {
             }
             let event_port = profile::port(d, "eventPort")?;
             let receiver_timing = profile::port(d, "timingPort")?;
+            status = None;
+            stage = "NTP worker startup";
             self.control.as_ref().unwrap().start_timing(
                 &mut ports,
                 receiver_timing,
                 self.clock.as_ref().unwrap().clone(),
             )?;
+            status = None;
+            stage = "event connection";
             self.events = Some(self.control.as_mut().unwrap().event(event_port)?);
             // The timing endpoint is authenticated before any timing reply is sent.
             // Stream ports arrive later; retain the bound sockets until then.
+            status = None;
+            stage = "RECORD";
             let record = self.call("RECORD", None, &[], &[])?;
+            status = Some(200);
             self.latency = realtime::latency(&record.headers)?;
+            status = None;
+            stage = "stream SETUP";
             let offer = profile::stream_offer(encoder.key(), control_port, session_id)?;
             let stream = self.call("SETUP", None, &offer, &[])?;
+            status = Some(200);
             let negotiated =
                 profile::stream(&Self::plist_response(&stream).context("stream SETUP response")?)?;
             self.stream_id = negotiated.id;
             let (data, control) = (negotiated.data, negotiated.control);
+            status = None;
+            stage = "media socket connection";
             self.media = Some(self.control.as_ref().unwrap().media(
                 ports,
                 data,
@@ -260,13 +287,18 @@ impl Session {
                 receiver_timing,
             )?);
             self.encoder = Some(encoder);
+            status = None;
+            stage = "SET_PARAMETER volume";
             let volume = self.call(
                 "SET_PARAMETER",
                 None,
                 b"volume: -30.000000\r\n",
                 &[("Content-Type", "text/parameters".into())],
             )?;
+            status = Some(200);
             ensure!(volume.body.is_empty(), "unexpected volume response body");
+            status = None;
+            stage = "NTP/event synchronization";
             let deadline = Instant::now() + Duration::from_secs(3);
             while self.media.as_ref().unwrap().timing.count() == 0
                 || self.events.as_ref().unwrap().count() == 0
@@ -274,14 +306,32 @@ impl Session {
                 self.workers()?;
                 ensure!(
                     Instant::now() < deadline,
-                    "receiver did not complete NTP synchronization and initial event"
+                    "synchronization wait timed out: ntp_ready={} event_ready={}",
+                    self.media.as_ref().unwrap().timing.count() > 0,
+                    self.events.as_ref().unwrap().count() > 0
                 );
                 std::thread::park_timeout(Duration::from_millis(5));
             }
             self.workers()?;
             self.state = State::Ready;
             Ok(())
-        })();
+        })()
+        .with_context(|| {
+            // All labels are local constants; never format a URI, header or receiver value.
+            let method = match stage {
+                "GET /info" => " method=GET",
+                "initial SETUP" | "stream SETUP" => " method=SETUP",
+                "RECORD" => " method=RECORD",
+                "SET_PARAMETER volume" => " method=SET_PARAMETER",
+                _ => "",
+            };
+            match status {
+                Some(code) => format!(
+                    "realtime negotiation stage={stage}{method} status={code} response validation failed"
+                ),
+                None => format!("realtime negotiation stage={stage}{method}"),
+            }
+        });
         self.finish(result)
     }
     fn workers(&self) -> Result<()> {
@@ -290,10 +340,10 @@ impl Session {
             "diagnostic interrupted"
         );
         if let Some(event) = &self.events {
-            event.check()?;
+            event.check().context("event worker")?;
         }
         if let Some(media) = &self.media {
-            media.timing.check()?;
+            media.timing.check().context("NTP worker")?;
             ensure!(
                 media.timing.age() < Duration::from_secs(5),
                 "receiver NTP timing stalled"
@@ -467,6 +517,10 @@ impl Session {
         if let Err(error) = &result {
             if self.failure.is_none() {
                 self.failure = Some(format!("{error:#}"));
+            }
+            // Cleanup must not spend a fresh request budget waiting for the peer.
+            if let Some(control) = &mut self.control {
+                control.limit_cleanup();
             }
             let _ = self.teardown();
             self.release();
