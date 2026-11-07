@@ -2329,3 +2329,82 @@ fn owntone_profile_rejects_persistent_method_without_a_request() {
     drop(wire);
     server.join().unwrap();
 }
+
+#[test]
+fn owntone_info_uses_airplay_endpoint_and_reference_agent_without_preamble_or_retry() {
+    use mdns_sd::ServiceInfo;
+    let airplay = TcpListener::bind("127.0.0.1:0").unwrap();
+    let raop = TcpListener::bind("127.0.0.1:0").unwrap();
+    airplay.set_nonblocking(true).unwrap();
+    raop.set_nonblocking(true).unwrap();
+    let port = airplay.local_addr().unwrap().port();
+    let mut observed = snapshot(port);
+    observed[0].services[0]
+        .capabilities
+        .insert("features".into(), "0x0,0x10000".into());
+    observed[0].services[0]
+        .capabilities
+        .insert("flags".into(), "0x4".into());
+    let raop_info = ServiceInfo::new(
+        "_raop._tcp.local.",
+        "AABBCCDDEEFF@Fixture",
+        "fixture.local.",
+        "127.0.0.1",
+        raop.local_addr().unwrap().port(),
+        [("features", "0x0,0x4000")].as_slice(),
+    )
+    .unwrap();
+    // Put RAOP first: selection must use service type, never vector order or IP.
+    observed[0]
+        .services
+        .insert(0, discovery::Advertisement::test_from_info(&raop_info));
+    let selected = Selection::from_receiver(&observed[0], Method::Transient).unwrap();
+    assert_eq!(selected.port, port);
+    let mut only_raop = snapshot(port);
+    only_raop[0].services = vec![observed[0].services[0].clone()];
+    assert!(Selection::from_receiver(&only_raop[0], Method::Transient).is_err());
+    let mut duplicate = snapshot(port);
+    let second_airplay = duplicate[0].services[0].clone();
+    duplicate[0].services.push(second_airplay);
+    assert!(Selection::from_receiver(&duplicate[0], Method::Transient).is_err());
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+    let store = store::Store::new(&config).unwrap();
+    store.select(&selected).unwrap();
+    let identity = dir.path().join("receiver-state/client-identity.toml");
+    std::fs::write(
+        &identity,
+        "client = \"123456789ABCDEF0\"\nremote = 123456789\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&identity, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
+        let mut wire = Wire::connect(&config, ID, &selected, &observed).unwrap();
+        let (mut peer, _) = airplay.accept().unwrap();
+        peer.set_nonblocking(false).unwrap();
+        let server = thread::spawn(move || {
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            // Independent literal: checks every byte actually received, including
+            // order, CRLF, absent Host/body and absence of any prior exchange.
+            let expected = b"GET /info RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: AirPlay/999.0.0\r\nX-Apple-Client-Name: PiAir\r\nClient-Instance: 123456789ABCDEF0\r\nDACP-ID: 123456789ABCDEF0\r\nActive-Remote: 123456789\r\n\r\n";
+            let mut actual = vec![0; expected.len()];
+            peer.read_exact(&mut actual).unwrap();
+            assert_eq!(actual, expected);
+            peer.write_all(b"RTSP/1.0 403 Forbidden\r\nCSeq: 1\r\nContent-Length: 0\r\nSet-Cookie: secret-cookie\r\n\r\n").unwrap();
+            assert_eof(&mut peer);
+        });
+        assert!(wire.owntone_transient(&selected.capabilities).is_err());
+        drop(wire);
+        server.join().unwrap();
+    });
+    assert!(output.contains(&format!("127.0.0.1:{port}")));
+    assert!(output.contains("_airplay._tcp.local."));
+    assert!(output.contains("AirPlay/999.0.0"));
+    assert!(output.contains("403"));
+    assert!(!output.contains("secret"));
+    assert!(!output.contains("123456789ABCDEF0"));
+    assert!(airplay.accept().is_err());
+    assert!(raop.accept().is_err());
+}
