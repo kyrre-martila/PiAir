@@ -256,6 +256,35 @@ pub fn stream(value: &Value) -> Result<Stream> {
     })
 }
 
+/// /info flags are a separate observation from mDNS flags/sf. Only compare
+/// established authentication bits; operational bits need not match.
+pub fn transient_info(bytes: &[u8], selected: &super::compatibility::Capabilities) -> Result<()> {
+    selected.decide(super::compatibility::Method::Transient)?;
+    let value = parse(bytes)?;
+    let d = dictionary(&value)?;
+    let flags = integer(d, "statusFlags")?;
+    ensure!(
+        flags <= u64::from(u32::MAX),
+        "unsupported /info statusFlags width"
+    );
+    let auth = (1 << 3) | (1 << 7) | (1 << 9);
+    let pinned = u64::from(selected.flags.context("selected mDNS flags absent")?);
+    ensure!(
+        (flags ^ pinned) & auth == 0,
+        "contradictory /info and selected mDNS authentication policy; no fallback"
+    );
+    ensure!(
+        flags & auth == 0,
+        "/info requires unsupported PIN/password/persistent authentication; no fallback"
+    );
+    for field in ["acl", "act", "accessControlLevel", "accessControlType"] {
+        if d.contains_key(field) {
+            ensure!(integer(d, field)? == 0, "unsupported /info access policy");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

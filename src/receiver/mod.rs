@@ -15,6 +15,7 @@ mod store;
 mod tests;
 mod tlv;
 mod wire;
+pub use wire::AuthProfile;
 
 use crate::{
     config::{self, Loaded},
@@ -167,12 +168,13 @@ pub fn pair(
     id: &str,
     authenticate: bool,
     control_check: bool,
-    pyatv_preamble: bool,
+    auth_profile: AuthProfile,
 ) -> Result<()> {
     exact_id(id)?;
     ensure!(loaded.config.allows(id), "receiver is not approved");
     ensure!(
-        pyatv_preamble || (io::stdin().is_terminal() && io::stdout().is_terminal()),
+        (auth_profile != AuthProfile::Legacy)
+            || (io::stdin().is_terminal() && io::stdout().is_terminal()),
         "pair/authenticate requires an interactive terminal"
     );
     let store = store::Store::new(&loaded.path)?;
@@ -181,7 +183,10 @@ pub fn pair(
         .context("select this approved receiver first")?;
     ensure!(selected.id == id, "receiver is not selected");
     let transient = selected.method == Method::Transient;
-    ensure!(!pyatv_preamble || (authenticate && transient), "experimental pyatv preamble requires authenticate with explicit transient selection; no fallback");
+    ensure!(
+        auth_profile == AuthProfile::Legacy || (authenticate && transient),
+        "experimental profile requires authenticate with explicit transient selection; no fallback"
+    );
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "pair/authenticate requires an interactive terminal"
@@ -199,8 +204,10 @@ pub fn pair(
         transient || authenticate == existing.is_some(),
         "pair requires no existing credentials; authenticate requires stored credentials"
     );
-    if pyatv_preamble {
-        println!("Controlled hardware experiment: pyatv transient HTTP profile (preamble, M1, M3); no compatibility or HomePod support claim.");
+    match auth_profile {
+        AuthProfile::Legacy => (),
+        AuthProfile::OwnToneTransient => println!("Controlled hardware experiment: OwnTone-reference RTSP transient authentication; HomePod compatibility unverified. No playback."),
+        AuthProfile::PyatvDiagnostic => println!("Controlled hardware experiment: pyatv transient HTTP profile (preamble, M1, M3); no compatibility or HomePod support claim."),
     }
     print!(
         "{} {id}? Type the exact receiver ID to continue: ",
@@ -222,8 +229,12 @@ pub fn pair(
         session.start_selected(
             || {
                 let mut wire = wire::Wire::connect(&loaded.path, id, &selected, &snapshot)?;
-                if pyatv_preamble {
-                    wire.pyatv_transient_preamble()?;
+                match auth_profile {
+                    AuthProfile::Legacy => (),
+                    AuthProfile::OwnToneTransient => {
+                        wire.owntone_transient(&selected.capabilities)?
+                    }
+                    AuthProfile::PyatvDiagnostic => wire.pyatv_transient_preamble()?,
                 }
                 Ok(wire)
             },

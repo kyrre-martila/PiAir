@@ -183,3 +183,5 @@ reports setup/transmission/teardown separately. Confirm audible output physicall
 an encrypted OPTIONS success alone is not audio compatibility. The supplied
 HomePod PIN-start 403 does not establish whether this transient flow is supported.
 PR #10 on the Apple TV also remains hardware-unverified.
+
+See the [OwnTone-reference RTSP authentication-only experiment](OWNTONE_TRANSIENT.md) for the new explicit profile, verified protocol comparison and current hardware evidence.

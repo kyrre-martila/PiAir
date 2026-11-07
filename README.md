@@ -260,3 +260,5 @@ For opt-in safe authentication logs and the HomePod 403 investigation, see
 [AirPlay authentication diagnostics](docs/AUTHENTICATION_DIAGNOSTICS.md).
 
 Controlled hardware diagnostic: [explicit pyatv transient HTTP framing experiment](docs/PYATV_TRANSIENT_PREAMBLE.md), disabled by default; HomePod support remains unverified.
+
+See the [OwnTone-reference RTSP authentication-only experiment](docs/OWNTONE_TRANSIENT.md) for the new explicit profile, verified protocol comparison and current hardware evidence.

@@ -125,3 +125,5 @@ verifying M4's receiver proof; PiAir still requires it.
 Loopback validation checks exact M1 bytes in successful and rejected exchanges,
 exact M1/M3 headers, request order, default regression, M3 rejection and invalid
 receiver proof as well as preamble/M1 rejection. These are synthetic tests.
+
+See the [OwnTone-reference RTSP authentication-only experiment](OWNTONE_TRANSIENT.md) for the new explicit profile, verified protocol comparison and current hardware evidence.
