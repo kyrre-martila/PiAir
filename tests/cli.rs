@@ -302,3 +302,31 @@ fn pyatv_preamble_option_is_authenticate_only_and_disabled_by_default() {
         assert_eq!(output.status.code(), Some(2));
     }
 }
+
+#[test]
+fn owntone_experiment_is_authentication_only_and_mutually_exclusive() {
+    let flag = "--experimental-owntone-transient";
+    let help = run(&["authenticate", "--help"]);
+    assert!(String::from_utf8(help.stdout).unwrap().contains(flag));
+    for command in ["pair", "stream-test", "select"] {
+        assert_eq!(
+            run(&[command, "device:aabbccddeeff", flag]).status.code(),
+            Some(2)
+        );
+    }
+    assert_eq!(
+        run(&[
+            "authenticate",
+            "device:aabbccddeeff",
+            flag,
+            "--experimental-pyatv-transient-preamble"
+        ])
+        .status
+        .code(),
+        Some(2)
+    );
+    assert!(
+        String::from_utf8_lossy(&run(&["authenticate", "device:aabbccddeeff", flag]).stderr)
+            .contains("not approved")
+    );
+}

@@ -208,14 +208,31 @@ pub fn transient(mut wire: Wire) -> Result<Wire> {
         m2.integer(FLAGS)?.is_none_or(|flags| flags == 0x10),
         "transient M2: unsupported authentication flags"
     );
+    if wire.uses_owntone_transient_profile() {
+        ensure!(
+            m2.get(SALT)?.len() == 16,
+            "OwnTone transient M2 requires 16-byte salt"
+        );
+    }
     let client = srp::Client::transient(m2.get(SALT)?, m2.get(PUBLIC_KEY)?)
         .context("transient SRP parameters")?;
+    // The reference encodes A as a minimal unsigned integer. SRP calculations
+    // still use group-width padding where required by the existing profile.
+    let public = if wire.uses_owntone_transient_profile() {
+        &client.public[client
+            .public
+            .iter()
+            .position(|b| *b != 0)
+            .context("zero SRP public key")?..]
+    } else {
+        &client.public[..]
+    };
     let m4 = exchange(
         &mut wire,
         "/pair-setup",
         &[
             (STATE, &[3]),
-            (PUBLIC_KEY, &client.public),
+            (PUBLIC_KEY, public),
             (PROOF, client.proof.as_ref()),
         ],
         4,

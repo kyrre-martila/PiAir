@@ -12,12 +12,19 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AuthProfile {
+    Legacy,
+    PyatvDiagnostic,
+    OwnToneTransient,
+}
+
 pub struct Wire {
     socket: TcpStream,
     deadline: Instant,
     budget: Duration,
     seq: u32,
-    pyatv_http: bool,
+    auth_profile: AuthProfile,
     auth_started: Instant,
     auth_phase: &'static str,
     client_instance: u64,
@@ -120,7 +127,7 @@ impl Wire {
             deadline: Instant::now() + budget,
             budget,
             seq: 0,
-            pyatv_http: false,
+            auth_profile: AuthProfile::Legacy,
             auth_started: Instant::now(),
             auth_phase: "connect",
             client_instance: rand::random(),
@@ -490,10 +497,24 @@ impl Wire {
         Worker::events(event)
     }
     pub fn post(&mut self, path: &str, body: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        self.auth_post(path, body, self.pyatv_http)
+        if self.auth_profile == AuthProfile::OwnToneTransient {
+            ensure!(
+                path == "/pair-setup",
+                "OwnTone transient endpoint forbidden"
+            );
+            return self.owntone_exchange("POST", path, body);
+        }
+        self.auth_post(
+            path,
+            body,
+            self.auth_profile == AuthProfile::PyatvDiagnostic,
+        )
+    }
+    pub(super) fn uses_owntone_transient_profile(&self) -> bool {
+        self.auth_profile == AuthProfile::OwnToneTransient
     }
     pub(super) fn uses_pyatv_transient_profile(&self) -> bool {
-        self.pyatv_http
+        self.auth_profile == AuthProfile::PyatvDiagnostic
     }
     pub(super) fn pyatv_transient_preamble(&mut self) -> Result<()> {
         ensure!(
@@ -502,8 +523,73 @@ impl Wire {
         );
         self.auth_phase("pyatv transient preamble");
         self.auth_post("/pair-pin-start", &[], true)?;
-        self.pyatv_http = true;
+        self.auth_profile = AuthProfile::PyatvDiagnostic;
         Ok(())
+    }
+    /// Select once, fetch policy on this socket, then allow only transient setup.
+    pub(super) fn owntone_transient(
+        &mut self,
+        selected: &super::compatibility::Capabilities,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.method == Method::Transient
+                    && self.seq == 0
+                    && self.auth_profile == AuthProfile::Legacy,
+                "explicit fresh transient selection required; no fallback"
+            );
+            selected.decide(Method::Transient)?;
+            if let Some((path, _)) = &self.authorization {
+                (self.client_instance, self.active_remote) =
+                    super::store::Store::new(path)?.client_identity()?;
+            }
+            self.auth_profile = AuthProfile::OwnToneTransient;
+            self.auth_phase("OwnTone transient /info");
+            let body = self.owntone_exchange("GET", "/info", &[])?;
+            super::profile::transient_info(&body, selected)
+        })();
+        if result.is_err() {
+            self.close();
+        }
+        result
+    }
+    fn owntone_exchange(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        let started = Instant::now();
+        let result = (|| {
+            ensure!(
+                !self.failed && self.keys.is_none(),
+                "plaintext authentication transport unavailable"
+            );
+            self.reauthorize()?;
+            self.seq = self.seq.checked_add(1).context("CSeq exhausted")?;
+            let header = owntone_header(
+                method,
+                path,
+                self.seq,
+                self.client_instance,
+                self.active_remote,
+                body.len(),
+            )?;
+            super::diagnostics::request(&header, body.len(), self.auth_phase);
+            self.write_message(header.as_bytes())?;
+            self.write_message(body)?;
+            let response = self.response()?;
+            self.reauthorize()?;
+            Ok(response)
+        })();
+        tracing::debug!(target: "piair::auth", phase = self.auth_phase, method = ?self.method,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            total_elapsed_ms = self.auth_started.elapsed().as_millis() as u64,
+            success = result.is_ok(), "authentication exchange completed");
+        if result.is_err() {
+            self.close();
+        }
+        result
     }
     fn auth_post(
         &mut self,
@@ -582,8 +668,9 @@ impl Wire {
             "invalid receiver response protocol"
         );
         ensure!(
-            self.keys.is_none() || words[0] == "RTSP/1.0",
-            "encrypted control response must use RTSP/1.0"
+            (self.keys.is_none() && self.auth_profile != AuthProfile::OwnToneTransient)
+                || words[0] == "RTSP/1.0",
+            "selected transport requires RTSP/1.0 response"
         );
         ensure!(
             words[1].len() == 3 && words[1].bytes().all(|b| b.is_ascii_digit()),
@@ -662,6 +749,28 @@ impl Wire {
         })()
         .context("RTSP/HTTP status=200 malformed or incomplete response")
     }
+}
+
+/// Protocol serialization is independent of the reference implementation.
+fn owntone_header(
+    method: &str,
+    path: &str,
+    seq: u32,
+    client: u64,
+    remote: u32,
+    length: usize,
+) -> Result<String> {
+    ensure!(
+        (method == "GET" && path == "/info" && length == 0)
+            || (method == "POST" && path == "/pair-setup" && length <= super::tlv::LIMIT),
+        "unsupported OwnTone authentication request"
+    );
+    let mut header = format!("{method} {path} RTSP/1.0\r\nCSeq: {seq}\r\nUser-Agent: PiAir/0.1\r\nX-Apple-Client-Name: PiAir\r\nClient-Instance: {client:X}\r\nDACP-ID: {client:X}\r\nActive-Remote: {remote}\r\n");
+    if method == "POST" {
+        header.push_str(&format!("Content-Type: application/octet-stream\r\nX-Apple-HKP: 4\r\nContent-Length: {length}\r\n"));
+    }
+    header.push_str("\r\n");
+    Ok(header)
 }
 
 impl Drop for Wire {
@@ -1096,5 +1205,23 @@ mod auth_diagnostic_tests {
                 "{output}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn owntone_test_header(method: &str, path: &str, seq: u32, length: usize) -> String {
+    // Literal independent expectation, not the serializer under test.
+    let suffix = if method == "POST" {
+        format!("Content-Type: application/octet-stream\r\nX-Apple-HKP: 4\r\nContent-Length: {length}\r\n")
+    } else {
+        String::new()
+    };
+    format!("{method} {path} RTSP/1.0\r\nCSeq: {seq}\r\nUser-Agent: PiAir/0.1\r\nX-Apple-Client-Name: PiAir\r\nClient-Instance: 123456789ABCDEF0\r\nDACP-ID: 123456789ABCDEF0\r\nActive-Remote: 123456789\r\n{suffix}\r\n")
+}
+#[cfg(test)]
+impl Wire {
+    pub(super) fn owntone_test_identity(&mut self) {
+        self.client_instance = 0x123456789abcdef0;
+        self.active_remote = 123456789;
     }
 }

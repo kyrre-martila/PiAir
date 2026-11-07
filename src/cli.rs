@@ -48,6 +48,9 @@ pub enum Command {
         /// Controlled hardware experiment: use pinned pyatv HTTP framing for preamble, M1 and M3.
         #[arg(long)]
         experimental_pyatv_transient_preamble: bool,
+        /// Authentication-only OwnTone-reference RTSP transient experiment; no fallback.
+        #[arg(long, conflicts_with = "experimental_pyatv_transient_preamble")]
+        experimental_owntone_transient: bool,
     },
     /// Explicit short AirPlay 2 realtime ALAC/44100/NTP test; interactive approval.
     StreamTest {

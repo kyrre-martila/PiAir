@@ -29,19 +29,30 @@ fn run_with_discovery(
             receiver_id,
             method,
         } => receiver::select(&loaded, &receiver_id, method)?,
-        Command::Pair { receiver_id } => {
-            receiver::pair(&loaded, &receiver_id, false, false, false)?
-        }
+        Command::Pair { receiver_id } => receiver::pair(
+            &loaded,
+            &receiver_id,
+            false,
+            false,
+            receiver::AuthProfile::Legacy,
+        )?,
         Command::Authenticate {
             receiver_id,
             control_check,
             experimental_pyatv_transient_preamble,
+            experimental_owntone_transient,
         } => receiver::pair(
             &loaded,
             &receiver_id,
             true,
             control_check,
-            experimental_pyatv_transient_preamble,
+            if experimental_owntone_transient {
+                receiver::AuthProfile::OwnToneTransient
+            } else if experimental_pyatv_transient_preamble {
+                receiver::AuthProfile::PyatvDiagnostic
+            } else {
+                receiver::AuthProfile::Legacy
+            },
         )?,
         Command::StreamTest {
             receiver_id,

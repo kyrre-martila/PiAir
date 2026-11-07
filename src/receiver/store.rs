@@ -125,6 +125,30 @@ impl Store {
         File::open(&self.root)?.sync_all()?;
         Ok(())
     }
+    pub fn client_identity(&self) -> Result<(u64, u32)> {
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Identity {
+            client: u64,
+            remote: u32,
+        }
+        let path = self.root.join("client-identity.toml");
+        if let Some(text) = self.read(&path)? {
+            let identity: Identity =
+                toml::from_str(&text).context("invalid PiAir client identity")?;
+            ensure!(
+                identity.client != 0 && identity.remote != 0,
+                "zero client identity"
+            );
+            return Ok((identity.client, identity.remote));
+        }
+        let identity = Identity {
+            client: rand::random::<u64>().max(1),
+            remote: rand::random::<u32>().max(1),
+        };
+        self.write(&path, &toml::to_string(&identity)?, false)?;
+        Ok((identity.client, identity.remote))
+    }
     pub fn credential(&self, id: &str) -> Result<Option<Credential>> {
         let Some(text) = self.read(&self.path(id)?)? else {
             return Ok(None);

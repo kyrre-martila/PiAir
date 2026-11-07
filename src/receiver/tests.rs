@@ -51,13 +51,14 @@ fn request_http_profile(
         header.push(b[0]);
     }
     let text = String::from_utf8(header).unwrap();
-    assert!(text.starts_with(&format!("POST {expected} HTTP/1.1\r\n")));
+    let own = text.starts_with(&format!("POST {expected} RTSP/1.0\r\n"));
+    assert!(own || text.starts_with(&format!("POST {expected} HTTP/1.1\r\n")));
     assert!(text.contains(&format!(
         "{}: {}\r\n",
         if pyatv { "x-apple-hkp" } else { "X-Apple-HKP" },
         if method == Method::Transient { 4 } else { 3 }
     )));
-    if !pyatv {
+    if !pyatv && !own {
         assert!(text.contains("Host: 127.0.0.1:"));
     }
     let length = text
@@ -70,12 +71,24 @@ fn request_http_profile(
     if pyatv {
         assert_eq!(text, format!("POST {expected} HTTP/1.1\r\nContent-Length: {length}\r\nuser-agent: AirPlay/320.20\r\nconnection: keep-alive\r\nx-apple-hkp: 4\r\ncontent-type: application/octet-stream\r\n\r\n"));
     }
-    if !pyatv {
+    if !pyatv && !own {
         let seq = text
             .lines()
             .find_map(|line| line.strip_prefix("CSeq: "))
             .unwrap();
         assert_eq!(text, format!("POST {expected} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nCSeq: {seq}\r\nUser-Agent: PiAir/0.1\r\nContent-Type: application/octet-stream\r\nX-Apple-HKP: {}\r\nContent-Length: {length}\r\n\r\n", socket.local_addr().unwrap(), if method == Method::Transient {4} else {3}));
+    }
+    if own {
+        let seq = text
+            .lines()
+            .find_map(|l| l.strip_prefix("CSeq: "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            text,
+            super::wire::owntone_test_header("POST", expected, seq, length)
+        );
     }
     let mut body = vec![0; length];
     socket.read_exact(&mut body).unwrap();
@@ -148,12 +161,27 @@ fn setup_mock_with_transient(
 }
 #[allow(clippy::too_many_arguments)]
 fn setup_mock_http(
+    socket: TcpStream,
+    fault: Fault,
+    method: Method,
+    pin: &str,
+    signed_id: &str,
+    pyatv: bool,
+    transient: impl FnOnce(TcpStream, Zeroizing<[u8; 64]>),
+) {
+    setup_mock_transport(
+        socket, fault, method, pin, signed_id, pyatv, false, transient,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn setup_mock_transport(
     mut socket: TcpStream,
     fault: Fault,
     method: Method,
     pin: &str,
     signed_id: &str,
     pyatv: bool,
+    own: bool,
     transient: impl FnOnce(TcpStream, Zeroizing<[u8; 64]>),
 ) {
     let reply = |socket: &mut TcpStream, seq: u32, fields: &[(u8, &[u8])]| {
@@ -166,6 +194,21 @@ fn setup_mock_http(
             )
             .unwrap();
             socket.write_all(&body).unwrap();
+        } else if own {
+            let body = encode(fields);
+            let response = [
+                format!(
+                    "RTSP/1.0 200 OK\r\nCSeq: {}\r\nContent-Length: {}\r\n\r\n",
+                    seq + 1,
+                    body.len()
+                )
+                .as_bytes(),
+                &body,
+            ]
+            .concat();
+            for chunk in response.chunks(3) {
+                socket.write_all(chunk).unwrap();
+            }
         } else {
             reply(socket, seq, fields);
         }
@@ -228,7 +271,7 @@ fn setup_mock_http(
         return;
     }
     let a = m3.get(PUBLIC_KEY).unwrap();
-    let u = BigUint::from_bytes_be(hash(&[a, &b]).as_ref());
+    let u = BigUint::from_bytes_be(hash(&[&srp::pad(a).unwrap(), &b]).as_ref());
     let shared = server.compute_premaster_secret(
         &BigUint::from_bytes_be(a),
         &BigUint::from_bytes_be(&verifier),
@@ -1973,7 +2016,7 @@ fn pyatv_option_rejects_persistent_selection_before_confirmation_or_connection()
     let store = store::Store::new(&config).unwrap();
     store.select(&selection(7000)).unwrap();
     let loaded = crate::config::load(Some(config)).unwrap();
-    let error = pair(&loaded, ID, true, false, true).unwrap_err();
+    let error = pair(&loaded, ID, true, false, AuthProfile::PyatvDiagnostic).unwrap_err();
     assert!(error.to_string().contains("explicit transient selection"));
     assert!(store.credential(ID).unwrap().is_none());
 }
@@ -2000,4 +2043,256 @@ fn pyatv_m3_rejection_and_invalid_proof_are_final() {
         assert!(pairing::transient(wire).is_err());
         server.join().unwrap();
     }
+}
+
+fn owntone_caps() -> compatibility::Capabilities {
+    compatibility::Capabilities {
+        features: 1 << 48,
+        flags: Some(0x98404),
+        password: Some(false),
+        access_control: Some(0),
+        access_control_type: Some(0),
+        protocol_version: Some("1.1".into()),
+    }
+}
+fn owntone_info(socket: &mut TcpStream, status: u16, body: &[u8]) {
+    let expected = super::wire::owntone_test_header("GET", "/info", 1, 0);
+    let mut actual = vec![0; expected.len()];
+    socket.read_exact(&mut actual).unwrap();
+    assert_eq!(actual, expected.as_bytes());
+    let response = [
+        format!(
+            "RTSP/1.0 {status} Test\r\nCSeq: 1\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .as_bytes(),
+        body,
+    ]
+    .concat();
+    // Deliberate fragmentation, including CRLF and plist scalar boundaries.
+    for chunk in response.chunks(3) {
+        socket.write_all(chunk).unwrap();
+    }
+}
+fn info_body(flags: u64) -> Vec<u8> {
+    profile::binary(&mut profile::dict([("statusFlags", profile::uint(flags))]))
+        .unwrap()
+        .to_vec()
+}
+#[test]
+fn owntone_info_policy_is_strict_and_separate_from_mdns() {
+    let caps = owntone_caps();
+    assert!(profile::transient_info(&info_body(0), &caps).is_ok());
+    for flags in [8, 128, 512, u64::MAX] {
+        assert!(profile::transient_info(&info_body(flags), &caps).is_err());
+    }
+    for value in [
+        profile::dict([]),
+        profile::dict([("statusFlags", plist::Value::String("0".into()))]),
+        profile::dict([("statusFlags", plist::Value::Integer((-1).into()))]),
+        profile::dict([
+            ("statusFlags", profile::uint(0)),
+            ("accessControlLevel", profile::uint(1)),
+        ]),
+    ] {
+        let body = profile::binary(&mut value.clone()).unwrap();
+        assert!(profile::transient_info(&body, &caps).is_err());
+    }
+    for bytes in [
+        b"bplist00".to_vec(),
+        vec![0; 8193],
+        include_bytes!("../../tests/fixtures/cyclic.plist").to_vec(),
+    ] {
+        assert!(profile::transient_info(&bytes, &caps).is_err());
+    }
+}
+#[test]
+fn owntone_same_socket_info_m1_m4_and_encrypted_options() {
+    let (mut wire, server) = local_mock_method(Method::Transient, |mut socket| {
+        owntone_info(&mut socket, 200, &info_body(0));
+        setup_mock_transport(
+            socket,
+            Fault::None,
+            Method::Transient,
+            "3939",
+            PI,
+            false,
+            true,
+            |mut socket, shared| {
+                let mut keys = ControlKeys::new(shared.as_ref());
+                keys.swap_directions_for_test();
+                encrypted_request(&mut socket, &mut keys, 4);
+                socket
+                    .write_all(
+                        &keys
+                            .encrypt(b"RTSP/1.0 200 OK\r\nCSeq: 4\r\nContent-Length: 0\r\n\r\n")
+                            .unwrap(),
+                    )
+                    .unwrap();
+                assert_eof(&mut socket);
+            },
+        );
+    });
+    wire.owntone_test_identity();
+    wire.owntone_transient(&owntone_caps()).unwrap();
+    let mut wire = pairing::transient(wire).unwrap();
+    wire.options().unwrap();
+    drop(wire);
+    server.join().unwrap();
+}
+#[test]
+fn owntone_rejections_and_bad_policy_stop_before_m1() {
+    for (status, body) in [
+        (400, vec![]),
+        (403, vec![]),
+        (470, vec![]),
+        (200, info_body(8)),
+        (200, vec![0; 40]),
+    ] {
+        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
+            owntone_info(&mut socket, status, &body);
+            assert_eof(&mut socket);
+        });
+        wire.owntone_test_identity();
+        assert!(wire.owntone_transient(&owntone_caps()).is_err());
+        drop(wire);
+        server.join().unwrap();
+    }
+}
+#[test]
+fn owntone_m1_rejections_do_not_fallback_or_log_secrets() {
+    for status in [400, 403, 470] {
+        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
+            owntone_info(&mut socket, 200, &info_body(0));
+            assert_eq!(
+                request_method(&mut socket, "/pair-setup", Method::Transient),
+                [6, 1, 1, 0, 1, 0, 19, 1, 16]
+            );
+            write!(socket, "RTSP/1.0 {status} secret-marker\r\nCSeq: 2\r\nContent-Length: 0\r\nSet-Cookie: secret-cookie\r\n\r\n").unwrap();
+            assert_eof(&mut socket);
+        });
+        wire.owntone_test_identity();
+        let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
+            wire.owntone_transient(&owntone_caps()).unwrap();
+            assert!(pairing::transient(wire).is_err());
+        });
+        assert!(!output.contains("secret"));
+        server.join().unwrap();
+    }
+}
+#[test]
+fn owntone_invalid_tlv_state_or_srp_proof_never_activates_cipher() {
+    for fault in [Fault::Proof, Fault::State, Fault::M2Fields] {
+        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
+            owntone_info(&mut socket, 200, &info_body(0));
+            let mut observer = socket.try_clone().unwrap();
+            setup_mock_transport(
+                socket,
+                fault,
+                Method::Transient,
+                "3939",
+                PI,
+                false,
+                true,
+                |_, _| panic!("invalid authentication accepted"),
+            );
+            assert_eof(&mut observer);
+        });
+        wire.owntone_test_identity();
+        wire.owntone_transient(&owntone_caps()).unwrap();
+        assert!(pairing::transient(wire).is_err());
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn owntone_m3_rejections_are_final() {
+    for status in [400, 403, 470] {
+        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
+            owntone_info(&mut socket, 200, &info_body(0));
+            assert_eq!(
+                request_method(&mut socket, "/pair-setup", Method::Transient),
+                [6, 1, 1, 0, 1, 0, 19, 1, 16]
+            );
+            let salt = [7; 16];
+            let verifier =
+                SrpClient::<Sha512>::new(&G_3072).compute_verifier(b"Pair-Setup", b"3939", &salt);
+            let b = srp::pad(
+                &SrpServer::<Sha512>::new(&G_3072).compute_public_ephemeral(&[9; 32], &verifier),
+            )
+            .unwrap();
+            reply(
+                &mut socket,
+                2,
+                &[(STATE, &[2]), (SALT, &salt), (PUBLIC_KEY, &b)],
+            );
+            let m3 = request_method(&mut socket, "/pair-setup", Method::Transient);
+            assert_eq!(Tlv::parse(&m3).unwrap().get(STATE).unwrap(), [3]);
+            write!(
+                socket,
+                "RTSP/1.0 {status} Test\r\nCSeq: 3\r\nContent-Length: 0\r\n\r\n"
+            )
+            .unwrap();
+            assert_eof(&mut socket);
+        });
+        wire.owntone_test_identity();
+        wire.owntone_transient(&owntone_caps()).unwrap();
+        let error = format!("{:#}", pairing::transient(wire).err().unwrap());
+        assert!(error.contains(&status.to_string()));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn owntone_response_framing_cannot_change_transport_or_sequence() {
+    for response in [
+        "HTTP/1.1 200 OK\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n",
+        "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Length: 0\r\n\r\n",
+        "RTSP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n",
+        "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n",
+        "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 8193\r\n\r\n",
+        "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n",
+    ] {
+        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
+            let mut request = vec![0; wire::owntone_test_header("GET", "/info", 1, 0).len()];
+            socket.read_exact(&mut request).unwrap();
+            socket.write_all(response.as_bytes()).unwrap();
+            assert_eof(&mut socket);
+        });
+        wire.owntone_test_identity();
+        assert!(wire.owntone_transient(&owntone_caps()).is_err());
+        drop(wire);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn owntone_client_identity_is_stable_private_and_independent_of_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::Store::new(&dir.path().join("config.toml")).unwrap();
+    store.save(&credential()).unwrap();
+    let identity = store.client_identity().unwrap();
+    assert_ne!(identity.0, 0);
+    assert_ne!(identity.1, 0);
+    assert_eq!(identity, store.client_identity().unwrap());
+    assert_eq!(
+        store.credential(ID).unwrap().unwrap().seed,
+        credential().seed
+    );
+    let path = dir.path().join("receiver-state/client-identity.toml");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    std::fs::write(&path, "client = 0\nremote = 0\n").unwrap();
+    assert!(store.client_identity().is_err());
+}
+
+#[test]
+fn owntone_profile_rejects_persistent_method_without_a_request() {
+    let (mut wire, server) =
+        local_mock_method(Method::SetupCode, |mut socket| assert_eof(&mut socket));
+    assert!(wire.owntone_transient(&owntone_caps()).is_err());
+    drop(wire);
+    server.join().unwrap();
 }
