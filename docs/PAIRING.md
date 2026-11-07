@@ -282,6 +282,39 @@ controls before another attempt. File sync failure can leave an installed file;
 check state rather than assuming rollback. Revocation is checked before connections
 and enrollment persistence, without an instant background revocation watcher.
 
+## Collecting safe hardware pairing diagnostics
+
+A reported Apple TV 4K (AppleTV6,2, tvOS 26.6.1) displayed a PIN but
+failed the decrypted M6 field allowlist. The unexpected type is not yet known;
+these diagnostics do not establish a compatibility fix.
+
+1. If an earlier attempt reached M5/M6 or reported possible partial enrollment,
+   stop PIN attempts first. `selected` and `approved` with `paired=false` means
+   no valid local credential; it does not prove the receiver has no controller record.
+   Inspect receiver-side controller/pairing records using supported receiver or
+   administrator tools. Record only whether a stale record exists, without
+   exporting identifiers, keys, or credentials. tvOS may not expose the relevant
+   AirPlay records in its UI; if unavailable, consult receiver support rather
+   than guessing, repeatedly pairing, or resetting unrelated records.
+2. Only after resolving possible partial enrollment and explicitly deciding to
+   retry, run the updated binary's existing `pair` command once on the physically
+   verified, selected, allowlisted receiver, from an interactive terminal. Enter
+   the PIN only at the hidden prompt. No debug/trace logging or packet capture is
+   needed. Do not automate retries or run playback as a diagnostic.
+3. Copy only the command failure's stage/context chain and unexpected TLV type
+   numbers, plus PiAir commit, receiver model and firmware. For example:
+   `pair-setup M6 decrypted payload: unexpected pairing TLV types: [19]`
+   is an illustrative diagnostic, not the observed field or permission to accept it.
+   Outer TLV failures, decryption, SRP proof and signature verification have
+   separate context. Review output before sharing and redact local paths and
+   device identifiers. Never share PINs, raw packets/TLV values, SRP material,
+   keys, signatures, encrypted bodies, or files from `receiver-state/`.
+4. After a partial-enrollment warning, stop again and check receiver-side records
+   before any further explicit attempt. PiAir does not retry, unpair remotely,
+   remove records, or start playback on this failure. Local `unpair` cannot clean
+   receiver records. Strict field validation and authenticated identity verification
+   still apply; unexpected type numbers alone do not establish their semantics.
+
 ## Controlled commands and the PR #4 boundary
 
 Only use a physically verified, intentionally allowlisted receiver. IDs are examples:

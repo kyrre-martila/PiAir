@@ -18,9 +18,18 @@ fn exchange(
     state: u8,
     allowed: &[u8],
 ) -> Result<Tlv> {
-    let message = Tlv::parse(&wire.post(path, &encode(fields))?)?;
-    message.response(state, allowed)?;
-    Ok(message)
+    (|| -> Result<Tlv> {
+        let message = Tlv::parse(&wire.post(path, &encode(fields))?)?;
+        message.response(state, allowed)?;
+        Ok(message)
+    })()
+    .with_context(|| format!("{path} M{state} outer TLV exchange"))
+}
+// No plaintext or field values enter diagnostic context.
+fn decrypted_payload(plaintext: &[u8], allowed: &[u8]) -> Result<Tlv> {
+    let payload = Tlv::parse(plaintext)?;
+    payload.only(allowed)?;
+    Ok(payload)
 }
 /// Consuming, linear exchange: any error drops the socket and all owned secrets.
 /// Credentials are returned only after M6's AEAD AND signed identity verification.
@@ -47,7 +56,9 @@ fn setup_inner(
         "transient method unsupported; no fallback"
     );
     if wire.method().pin_start() {
-        let response = wire.post("/pair-pin-start", &[])?;
+        let response = wire
+            .post("/pair-pin-start", &[])
+            .context("pair-setup PIN-start exchange")?;
         ensure!(response.is_empty(), "unsupported PIN-start response");
     }
     let m2 = exchange(
@@ -57,7 +68,7 @@ fn setup_inner(
         2,
         &[SALT, PUBLIC_KEY, FLAGS],
     )?;
-    ensure!(m2.integer(FLAGS)?.unwrap_or(0)==0, "receiver proposed transient/split/unknown flags during persistent enrollment; authentication downgrade rejected");
+    ensure!(m2.integer(FLAGS).context("pair-setup M2 flags")?.unwrap_or(0)==0, "pair-setup M2: receiver proposed transient/split/unknown flags during persistent enrollment; authentication downgrade rejected");
     let pin = pin()?;
     let valid_pin = if wire.method().pin_start() {
         (4..=8).contains(&pin.len()) && pin.bytes().all(|b| b.is_ascii_digit())
@@ -73,7 +84,8 @@ fn setup_inner(
     };
     ensure!(valid_pin, "invalid setup-code format: displayed PIN is 4..8 digits; existing HAP setup code is XXX-XX-XXX (dashes preserved)");
     wire.restart_deadline();
-    let client = srp::Client::start(pin.as_bytes(), m2.get(SALT)?, m2.get(PUBLIC_KEY)?)?;
+    let client = (|| srp::Client::start(pin.as_bytes(), m2.get(SALT)?, m2.get(PUBLIC_KEY)?))()
+        .context("pair-setup M2 SRP parameters")?;
     drop(pin);
     let m4 = exchange(
         wire,
@@ -86,7 +98,8 @@ fn setup_inner(
         4,
         &[PROOF],
     )?;
-    let key = client.finish(m4.get(PROOF)?)?;
+    let key =
+        (|| client.finish(m4.get(PROOF)?))().context("pair-setup M4 SRP proof verification")?;
     let encryption = crypto::derive(
         key.as_ref(),
         "Pair-Setup-Encrypt-Salt",
@@ -107,7 +120,8 @@ fn setup_inner(
         (PUBLIC_KEY, &public),
         (SIGNATURE, &signature),
     ]);
-    let encrypted = crypto::seal(&encryption, &crypto::nonce(b"PS-Msg05"), &sub, &[])?;
+    let encrypted = crypto::seal(&encryption, &crypto::nonce(b"PS-Msg05"), &sub, &[])
+        .context("pair-setup M5 encryption")?;
     // M5 can enroll the controller even if M6 is lost or invalid. Never erase
     // remote state automatically, and never retry enrollment on this failure.
     let result = (|| -> Result<Credential> {
@@ -121,34 +135,42 @@ fn setup_inner(
         let plaintext = crypto::open(
             &encryption,
             &crypto::nonce(b"PS-Msg06"),
-            m6.get(ENCRYPTED)?,
+            m6.get(ENCRYPTED)
+                .context("pair-setup M6 outer TLV fields")?,
             &[],
-        )?;
-        let receiver = Tlv::parse(&plaintext)?;
-        receiver.only(&[IDENTIFIER, PUBLIC_KEY, SIGNATURE])?;
-        let pairing_id = std::str::from_utf8(receiver.get(IDENTIFIER)?)
-            .context("invalid authenticated receiver identifier")?;
-        ensure!(
-            super::valid_pairing_id(pairing_id),
-            "invalid authenticated receiver identifier"
-        );
-        let receiver_key = receiver.array(PUBLIC_KEY)?;
-        let x = crypto::derive(
-            key.as_ref(),
-            "Pair-Setup-Accessory-Sign-Salt",
-            "Pair-Setup-Accessory-Sign-Info",
-        );
-        let info = Zeroizing::new([x.as_ref(), receiver.get(IDENTIFIER)?, &receiver_key].concat());
-        crypto::verify(&receiver_key, &info, receiver.get(SIGNATURE)?)?;
-        Ok(Credential {
-            version: 2,
-            receiver_id: receiver_id.to_owned(),
-            pairing_id: pairing_id.to_owned(),
-            advertised_pi: advertised_pi.map(str::to_owned),
-            controller_id,
-            seed: signing.to_bytes(),
-            receiver_key,
-        })
+        )
+        .context("pair-setup M6 decryption")?;
+        let receiver = decrypted_payload(&plaintext, &[IDENTIFIER, PUBLIC_KEY, SIGNATURE])
+            .context("pair-setup M6 decrypted payload")?;
+        let credential = (|| -> Result<Credential> {
+            let pairing_id = std::str::from_utf8(receiver.get(IDENTIFIER)?)
+                .context("invalid authenticated receiver identifier")?;
+            ensure!(
+                super::valid_pairing_id(pairing_id),
+                "invalid authenticated receiver identifier"
+            );
+            let receiver_key = receiver.array(PUBLIC_KEY)?;
+            let x = crypto::derive(
+                key.as_ref(),
+                "Pair-Setup-Accessory-Sign-Salt",
+                "Pair-Setup-Accessory-Sign-Info",
+            );
+            let info =
+                Zeroizing::new([x.as_ref(), receiver.get(IDENTIFIER)?, &receiver_key].concat());
+            crypto::verify(&receiver_key, &info, receiver.get(SIGNATURE)?)
+                .context("pair-setup M6 signature verification")?;
+            Ok(Credential {
+                version: 2,
+                receiver_id: receiver_id.to_owned(),
+                pairing_id: pairing_id.to_owned(),
+                advertised_pi: advertised_pi.map(str::to_owned),
+                controller_id,
+                seed: signing.to_bytes(),
+                receiver_key,
+            })
+        })()
+        .context("pair-setup M6 authenticated identity")?;
+        Ok(credential)
     })();
     result.context("enrollment may be partial on the receiver; inspect receiver-side controller records before any explicit retry")
 }
@@ -180,9 +202,14 @@ fn verify_inner(wire: &mut Wire, credential: &Credential) -> Result<(ControlKeys
         2,
         &[PUBLIC_KEY, ENCRYPTED],
     )?;
-    let receiver_public = m2.array(PUBLIC_KEY)?;
+    let receiver_public = m2
+        .array(PUBLIC_KEY)
+        .context("pair-verify M2 outer TLV fields")?;
     let shared = private.diffie_hellman(&PublicKey::from(receiver_public));
-    ensure!(shared.was_contributory(), "invalid receiver X25519 key");
+    ensure!(
+        shared.was_contributory(),
+        "pair-verify M2: invalid receiver X25519 key"
+    );
     let encryption = crypto::derive(
         shared.as_bytes(),
         "Pair-Verify-Encrypt-Salt",
@@ -191,17 +218,20 @@ fn verify_inner(wire: &mut Wire, credential: &Credential) -> Result<(ControlKeys
     let plaintext = crypto::open(
         &encryption,
         &crypto::nonce(b"PV-Msg02"),
-        m2.get(ENCRYPTED)?,
+        m2.get(ENCRYPTED)
+            .context("pair-verify M2 outer TLV fields")?,
         &[],
-    )?;
-    let receiver = Tlv::parse(&plaintext)?;
-    receiver.only(&[IDENTIFIER, SIGNATURE])?;
+    )
+    .context("pair-verify M2 decryption")?;
+    let receiver = decrypted_payload(&plaintext, &[IDENTIFIER, SIGNATURE])
+        .context("pair-verify M2 decrypted payload")?;
     ensure!(
         receiver.get(IDENTIFIER)? == credential.pairing_id.as_bytes(),
-        "authenticated receiver identity changed"
+        "pair-verify M2: authenticated receiver identity changed"
     );
     let info = [&receiver_public[..], receiver.get(IDENTIFIER)?, &public].concat();
-    crypto::verify(&credential.receiver_key, &info, receiver.get(SIGNATURE)?)?;
+    crypto::verify(&credential.receiver_key, &info, receiver.get(SIGNATURE)?)
+        .context("pair-verify M2 signature verification")?;
     let signing = SigningKey::from_bytes(&credential.seed);
     let info = [
         &public[..],
