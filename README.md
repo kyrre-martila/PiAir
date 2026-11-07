@@ -208,11 +208,12 @@ fail explicitly. No hardware testing was performed. See [session behavior,
 bounds and limitations](docs/AIRPLAY_SESSION.md).
 
 A tested capability decision rejects unsupported combinations before connection,
-including transient/system-only, required MFi, password and Home-access paths.
+including protected transient profiles, required MFi, password and Home-access paths.
 Bit 51 with bit 46 can be explicitly selected for persistent HAP; it is a
 capability, not proof that MFi is mandatory. Unexpected MFi exchange fields fail.
-No method is inferred from model/name and no fallback occurs. **Transient remains
-unsupported because AirPlay wire-profile variants need reliable validation.**
+No method is inferred from model/name and no fallback occurs. Explicit transient
+SRP authentication is implemented without persistent credentials or durable
+receiver identity verification. See [transient flow, trust model and verification](docs/TRANSIENT_AUTHENTICATION.md).
 No Apple TV/HomePod hardware/firmware is verified, and a usable HomePod HAP setup
 code is not assumed. See the [compatibility matrix and evidence ledger](docs/PAIRING.md#compatibility-matrix).
 Mock success proves the implemented protocol path, not hardware playback.

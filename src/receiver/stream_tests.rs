@@ -101,7 +101,16 @@ enum Mode {
 }
 fn receiver(s: TcpStream, mode: Mode, seen: Arc<AtomicU64>) {
     let mut shared = [0; 32];
-    let (mut socket, mut keys) = verify_mock_core(s, Fault::None, PI, |key| shared = *key).unwrap();
+    let (socket, keys) = verify_mock_core(s, Fault::None, PI, |key| shared = *key).unwrap();
+    receiver_authenticated(socket, keys, shared.to_vec(), mode, seen);
+}
+fn receiver_authenticated(
+    mut socket: TcpStream,
+    mut keys: ControlKeys,
+    shared: Vec<u8>,
+    mode: Mode,
+    seen: Arc<AtomicU64>,
+) {
     socket
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
@@ -254,6 +263,7 @@ fn receiver(s: TcpStream, mode: Mode, seen: Arc<AtomicU64>) {
     }
     let event = event.unwrap();
     let event_stop = stop.clone();
+    let event_keys = ControlKeys::events(&shared);
     let events = thread::spawn(move || {
         let (mut socket, _) = event.accept().unwrap();
         socket
@@ -266,7 +276,7 @@ fn receiver(s: TcpStream, mode: Mode, seen: Arc<AtomicU64>) {
             assert_eof(&mut socket);
             return;
         }
-        let mut keys = ControlKeys::events(&shared);
+        let mut keys = event_keys;
         keys.swap_directions_for_test();
         let mut body = Vec::new();
         profile::dict([
@@ -324,7 +334,7 @@ fn receiver(s: TcpStream, mode: Mode, seen: Arc<AtomicU64>) {
         assert_eq!(stream_d[k].as_unsigned_integer(), Some(v));
     }
     let media_key: [u8; 32] = stream_d["shk"].as_data().unwrap().try_into().unwrap();
-    assert_ne!(media_key, shared);
+    assert_ne!(media_key.as_slice(), shared.as_slice());
     let client_control = stream_d["controlPort"].as_unsigned_integer().unwrap() as u16;
     if matches!(mode, Mode::BadSession) {
         let response = format!(
@@ -872,4 +882,34 @@ fn request_failures_attribute_each_negotiation_stage_and_close_channels() {
             server.join().unwrap();
         }
     }
+}
+
+#[test]
+fn transient_session_negotiates_encrypted_audio_and_acknowledges_teardown() {
+    let seen = Arc::new(AtomicU64::new(0));
+    let count = seen.clone();
+    let (wire, server) = local_mock_method(Method::Transient, move |s| {
+        setup_mock_with_transient(
+            s,
+            Fault::None,
+            Method::Transient,
+            "3939",
+            PI,
+            |socket, shared| {
+                let mut keys = ControlKeys::new(shared.as_ref());
+                keys.swap_directions_for_test();
+                receiver_authenticated(socket, keys, shared.to_vec(), Mode::Good, count);
+            },
+        );
+    });
+    let mut session = Session::new();
+    session.start_selected(|| Ok(wire), None).unwrap();
+    session.negotiate_realtime().unwrap();
+    session.transmit_test(1).unwrap();
+    let sent = session.packets_sent;
+    session.stop().unwrap();
+    assert_eq!(session.state(), State::Disconnected);
+    server.join().unwrap();
+    assert!(sent > 350);
+    assert_eq!(seen.load(Ordering::Relaxed), sent);
 }

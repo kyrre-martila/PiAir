@@ -470,7 +470,7 @@ impl Wire {
             .seq
             .checked_add(1)
             .context("request sequence exhausted")?;
-        let header=format!("POST {path} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nCSeq: {}\r\nUser-Agent: PiAir/0.1\r\nContent-Type: application/octet-stream\r\nX-Apple-HKP: 3\r\nContent-Length: {}\r\n\r\n",self.socket.peer_addr()?,self.seq,body.len());
+        let header=format!("POST {path} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nCSeq: {}\r\nUser-Agent: PiAir/0.1\r\nContent-Type: application/octet-stream\r\nX-Apple-HKP: {}\r\nContent-Length: {}\r\n\r\n",self.socket.peer_addr()?,self.seq,if self.method == Method::Transient { 4 } else { 3 },body.len());
         self.write_message(header.as_bytes())?;
         self.write_message(body)?;
         self.response()

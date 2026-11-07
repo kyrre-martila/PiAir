@@ -29,6 +29,19 @@ pub fn proofs(
     let m2 = hash(&[a, m1.as_ref(), k]);
     (m1, m2)
 }
+// OwnTone pair.c hashes integer s/A/B without leading zero octets in x/proofs,
+// while u/k always use group-width padding. Keep persistent behavior unchanged.
+fn integer(bytes: &[u8]) -> &[u8] {
+    &bytes[bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len())..]
+}
+pub fn transient_proofs(
+    a: &[u8],
+    b: &[u8],
+    salt: &[u8],
+    key: &[u8],
+) -> (Zeroizing<[u8; 64]>, Zeroizing<[u8; 64]>) {
+    proofs(integer(a), integer(b), integer(salt), key)
+}
 pub struct Client {
     pub public: [u8; 384],
     pub proof: Zeroizing<[u8; 64]>,
@@ -41,6 +54,11 @@ impl Client {
         OsRng.try_fill_bytes(private.as_mut())?;
         Self::with_private(b"Pair-Setup", pin, salt, b, &private[..])
     }
+    pub fn transient(salt: &[u8], b: &[u8]) -> Result<Self> {
+        let mut private = Zeroizing::new([0; 32]);
+        OsRng.try_fill_bytes(private.as_mut())?;
+        Self::with_profile(b"Pair-Setup", b"3939", salt, b, private.as_ref(), true)
+    }
     fn with_private(
         username: &[u8],
         pin: &[u8],
@@ -48,7 +66,27 @@ impl Client {
         b: &[u8],
         private: &[u8],
     ) -> Result<Self> {
-        ensure!(salt.len() == 16 && b.len() == 384, "invalid SRP parameters");
+        Self::with_profile(username, pin, salt, b, private, false)
+    }
+    fn with_profile(
+        username: &[u8],
+        pin: &[u8],
+        salt: &[u8],
+        b: &[u8],
+        private: &[u8],
+        transient: bool,
+    ) -> Result<Self> {
+        ensure!(
+            if transient {
+                (1..=16).contains(&salt.len()) && (1..=384).contains(&b.len())
+            } else {
+                salt.len() == 16 && b.len() == 384
+            },
+            "invalid SRP parameters"
+        );
+        let padded_b = pad(b)?;
+        let b = padded_b.as_slice();
+        let salt = if transient { integer(salt) } else { salt };
         let c = SrpClient::<Sha512>::new(&G_3072);
         let public = pad(&c.compute_public_ephemeral(private))?;
         let b_int = BigUint::from_bytes_be(b);
@@ -75,7 +113,11 @@ impl Client {
             .to_bytes_be(),
         );
         let key = hash(&[&secret]);
-        let (proof, expected) = proofs(&public, b, salt, key.as_ref());
+        let (proof, expected) = if transient {
+            transient_proofs(&public, b, salt, key.as_ref())
+        } else {
+            proofs(&public, b, salt, key.as_ref())
+        };
         Ok(Self {
             public,
             proof,
@@ -118,9 +160,59 @@ mod tests {
         assert_eq!(client.key.as_ref(), decode("key"));
     }
     #[test]
+    fn independently_generated_transient_srp_proofs_and_control_keys() {
+        let fixture: std::collections::BTreeMap<String, String> =
+            toml::from_str(include_str!("../../tests/fixtures/transient-srp.toml")).unwrap();
+        let decode = |name: &str| {
+            let text = &fixture[name];
+            (0..text.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let client = Client::with_profile(
+            b"Pair-Setup",
+            b"3939",
+            &decode("salt"),
+            &decode("b_public"),
+            &decode("private"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(client.public.as_slice(), decode("a_public"));
+        assert_eq!(client.proof.as_ref(), decode("proof"));
+        let compact = Client::with_profile(
+            b"Pair-Setup",
+            b"3939",
+            integer(&decode("salt")),
+            integer(&decode("b_public")),
+            &decode("private"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(compact.proof.as_ref(), decode("proof"));
+        compact.finish(&decode("receiver_proof")).unwrap();
+        let shared = client.finish(&decode("receiver_proof")).unwrap();
+        assert_eq!(shared.as_ref(), decode("key"));
+        let mut keys = crate::receiver::crypto::ControlKeys::new(shared.as_ref());
+        let plain = b"OPTIONS * RTSP/1.0\r\nCSeq: 3\r\n\r\n";
+        assert_eq!(
+            keys.encrypt(plain).unwrap().as_slice(),
+            decode("write_frame")
+        );
+        assert_eq!(
+            keys.decrypt(&decode("read_frame")).unwrap().as_slice(),
+            plain
+        );
+    }
+    #[test]
     fn malformed_and_zero_srp_keys_fail() {
+        for salt in [vec![], vec![7; 17]] {
+            assert!(Client::transient(&salt, &[9; 384]).is_err());
+        }
         for b in [vec![], vec![0; 384], G_3072.n.to_bytes_be(), vec![255; 385]] {
             assert!(Client::start(b"1234", &[0; 16], &b).is_err());
+            assert!(Client::transient(&[7; 16], &b).is_err());
         }
     }
 }
