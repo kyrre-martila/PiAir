@@ -1,9 +1,70 @@
 # Encrypted control verification after transient SRP
 
-PR #18 hardware evidence supplied for this work: HomePod AudioAccessory5,1,
+PR #20 hardware evidence supplied for this work: HomePod AudioAccessory5,1,
 firmware 27.2; GET /info, SRP M1/M2 and M3/M4 returned 200, and PiAir verified
-the receiver SRP proof. No audio session was established. That evidence does
-not establish that the subsequent encrypted control request succeeds.
+the receiver SRP proof. Encrypted OPTIONS returned a valid encrypted RTSP
+403 Forbidden response. No audio playback was attempted. This supports a working
+encrypted channel but does not identify why the request was rejected.
+
+## OPTIONS header correction (PR #20)
+
+Compared [OwnTone 29.3 `request_headers_add`](https://github.com/owntone/owntone-server/blob/29.3/src/outputs/airplay.c#L886-L935)
+with both PiAir request paths. OwnTone adds CSeq, its configured User-Agent and
+client name, uppercase hex Client-Instance/DACP-ID, and unsigned decimal
+Active-Remote through one shared function. Its digest target for OPTIONS is `*`.
+It delegates Content-Length to evrtsp. It does not add X-Apple-ProtocolVersion
+in that shared function; PiAir retains its existing authenticated value of 1.
+OwnTone uses its library hash and receiver-derived Active-Remote; PiAir retains
+its own established sender identifiers rather than copying those values.
+
+Previously PiAir's dedicated OPTIONS sent only CSeq, User-Agent: PiAir/0.1,
+and Content-Length: 0. The general authenticated RTSP path also sent
+Client-Instance, DACP-ID, Active-Remote, X-Apple-Client-Name and
+X-Apple-ProtocolVersion. OPTIONS now uses that same header builder, preserving
+`OPTIONS * RTSP/1.0`, an empty body, checked CSeq increment, encryption and strict
+response validation. The OwnTone transient profile retains its established
+AirPlay/999.0.0 User-Agent from /info and SRP through encrypted control. Other
+profiles retain PiAir/0.1. The agent constant is shared with plaintext OwnTone
+authentication; no new identity is introduced.
+
+The connection retains its existing client and remote values through the secure
+upgrade. The OwnTone profile loads those values from the established identity
+store before /info. Persistent Apple TV pair-verify and its encrypted control
+keep their agent and framing; the existing independent SETUP frame fixture
+must remain byte-for-byte unchanged. No pairing cryptography, SETUP/RECORD logic,
+codec or media transport changes are included. A 403 still closes the connection
+and fails the check without retries or fallback.
+
+## Raspberry Pi deployment
+
+Run these commands **on the Raspberry Pi**, from the same shell/configuration
+context used for the earlier successful transient authentication. Build a separate
+checkout and retain its standalone binary; do not replace a service executable.
+These commands do not modify, stop, restart or reconfigure OwnTone mini or
+autostream. They do not install or change any systemd unit.
+
+```sh
+git clone --branch fix/encrypted-options-identity --single-branch \
+  https://github.com/kyrre-martila/PiAir.git PiAir-pr20
+cd PiAir-pr20
+# Record and compare this SHA with the PR head before testing.
+git rev-parse HEAD
+cargo build --release --locked
+install -D -m 755 target/release/piair "$HOME/.local/lib/piair-pr20/piair"
+```
+
+Run the command below from the directory/context containing your existing PiAir
+configuration, or supply its existing absolute path with `--config`. Do not
+create a new selection or change the running services for this check.
+
+```sh
+"$HOME/.local/lib/piair-pr20/piair" -v authenticate device:3ae5c9a302ad --experimental-owntone-transient --control-check
+```
+
+Only a successful authenticated response from the physical HomePod establishes
+that this header correction resolves the reported rejection. Until then,
+HomePod acceptance remains unverified; the 403 could also reflect receiver
+policy or other firmware requirements. These tests establish no audio support.
 
 ## Reference audit
 
@@ -11,7 +72,8 @@ Protocol reference: OwnTone `f7ace58dc2aeb5305360770da37fd62095f5bb21`.
 Reference sources: [control transport](https://github.com/owntone/owntone-server/blob/f7ace58dc2aeb5305360770da37fd62095f5bb21/src/outputs/airplay.c),
 [SRP and cipher framing](https://github.com/owntone/owntone-server/blob/f7ace58dc2aeb5305360770da37fd62095f5bb21/src/pair_ap/pair_homekit.c).
 The Rust implementation is independent; no OwnTone source was copied.
-The existing `--control-check` is retained, with phase/status diagnostics added.
+The PR #19 encryption audit below remains applicable; PR #20 changes the
+request envelope described above, retaining its phase/status diagnostics.
 
 | Concern | Pinned OwnTone reference | PiAir implementation and result |
 | --- | --- | --- |
@@ -82,10 +144,9 @@ No HomePod is available in this workspace: **encrypted OPTIONS on hardware has
 not been tested here**. OPTIONS is a non-playback RTSP capability query; OwnTone
 recognizes its wildcard target, but this audit does not establish acceptance by
 HomePod firmware 27.2 after transient SRP. A rejection is evidence to investigate,
-not permission to try SETUP or change authentication. The existing PiAir OPTIONS
-User-Agent remains PiAir/0.1; whether this firmware requires the /info experiment's
-OwnTone identity headers for encrypted OPTIONS is unverified. Do not change them
-without evidence. Transient SRP proves shared session-key possession, not a
+not permission to try SETUP or change authentication. Whether the shared
+headers and retained AirPlay User-Agent suffice on this firmware remains
+unverified. Transient SRP proves shared session-key possession, not a
 persistent receiver identity. This diagnostic establishes no audio compatibility.
 
 Response completion follows RTSP Content-Length and the authenticated plaintext
@@ -94,13 +155,14 @@ additional frames later; no timing-dependent socket peek is used to make that
 claim. TCP write fragmentation tests cover incremental reads but the OS may
 coalesce writes; correctness must not depend on packet boundaries.
 
-Checks for this revision use Rust 1.99.1 on x86_64 Linux, with official Debian
-ALSA development headers extracted locally and the installed ALSA runtime:
-`cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
-`cargo test --locked --test cli`, and `cargo build --locked --release` pass.
-The first full `cargo test --locked` run passed 130 unit tests and failed the
-existing realtime streaming test at its 100 ms sample-timeline deadline while
-builds ran concurrently. The full suite was rerun with
-`cargo test --locked -- --test-threads=1` passed all 131 unit tests and 13 CLI
-integration tests, including the previously failing realtime test.
-Cargo.lock is unchanged. No hardware or Raspberry Pi cross-build result is claimed.
+PR #20 validation uses Rust 1.99.1 on x86_64 Linux, with official Debian ALSA
+headers extracted locally and the installed runtime. Formatting and Clippy
+(`--all-targets --locked -- -D warnings`) pass. The full serial suite
+(`cargo test --locked -- --test-threads=1`) passes all 132 unit tests and 13 CLI
+integration tests. `cargo build --release --locked` also passes. Tests include
+persistent pair-verify, exact encrypted SETUP
+fixture compatibility, encrypted OPTIONS successes and malformed response
+rejections. The initial sandbox run denied loopback socket binds with
+`Operation not permitted`; the successful full run used the same code outside
+that sandbox. Cargo.lock is unchanged. No hardware or Raspberry Pi cross-build
+result is claimed.
