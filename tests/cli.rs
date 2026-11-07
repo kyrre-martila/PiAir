@@ -25,7 +25,7 @@ fn local_commands_use_defaults_without_writing() {
     assert!(output.status.success());
     let status = String::from_utf8(output.stdout).unwrap();
     assert!(status.contains("built-in defaults; file absent"));
-    assert!(status.contains("AirPlay playback: not implemented"));
+    assert!(status.contains("AirPlay playback: explicit stream-test available"));
     assert!(run(&["config", "check"]).status.success());
     let output = run(&["config", "show"]);
     assert!(output.status.success());
@@ -252,6 +252,33 @@ fn control_diagnostic_is_opt_in_and_cannot_bypass_authentication() {
         .arg("--config")
         .arg(path)
         .args(["authenticate", "device:aabbccddeeff", "--control-check"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
+    assert!(!dir.path().join("receiver-state").exists());
+}
+
+#[test]
+fn realtime_diagnostic_requires_approval_interaction_and_bounded_duration() {
+    for duration in ["0", "4"] {
+        assert_eq!(
+            run(&["stream-test", "device:aabbccddeeff", "--seconds", duration])
+                .status
+                .code(),
+            Some(2)
+        );
+    }
+    let unapproved = run(&["stream-test", "device:aabbccddeeff"]);
+    assert!(!unapproved.status.success());
+    assert!(String::from_utf8_lossy(&unapproved.stderr).contains("not approved"));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_piair"))
+        .arg("--config")
+        .arg(path)
+        .args(["stream-test", "device:aabbccddeeff"])
         .output()
         .unwrap();
     assert!(!output.status.success());

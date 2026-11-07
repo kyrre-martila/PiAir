@@ -261,10 +261,18 @@ fn verify_mock_continue(
     verify_mock_before_finish(socket, fault, signed_id, || {})
 }
 fn verify_mock_before_finish(
-    mut socket: TcpStream,
+    socket: TcpStream,
     fault: Fault,
     signed_id: &str,
     before_m4: impl FnOnce(),
+) -> Option<(TcpStream, ControlKeys)> {
+    verify_mock_core(socket, fault, signed_id, |_| before_m4())
+}
+fn verify_mock_core(
+    mut socket: TcpStream,
+    fault: Fault,
+    signed_id: &str,
+    before_m4: impl FnOnce(&[u8; 32]),
 ) -> Option<(TcpStream, ControlKeys)> {
     let m1 = Tlv::parse(&request(&mut socket, "/pair-verify")).unwrap();
     let controller_public: [u8; 32] = m1.array(PUBLIC_KEY).unwrap();
@@ -335,7 +343,7 @@ fn verify_mock_before_finish(
         sub.get(SIGNATURE).unwrap(),
     )
     .unwrap();
-    before_m4();
+    before_m4(shared.as_bytes());
     if matches!(fault, Fault::State) {
         reply(&mut socket, 2, &[(STATE, &[2])]);
         None
@@ -1176,3 +1184,6 @@ fn replayed_encrypted_response_and_plaintext_reentry_close_control() {
     control.close();
     server.join().unwrap();
 }
+
+#[path = "stream_tests.rs"]
+mod stream_tests;

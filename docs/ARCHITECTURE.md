@@ -3,8 +3,8 @@
 PiAir is an original Apache-2.0 implementation targeting Raspberry Pi OS 64-bit
 (Debian aarch64), with development on standard Linux. This milestone implements
 configuration, passive DNS-SD discovery, capture-only audio activity tools,
-and an explicit receiver pairing/authentication and encrypted control foundation. AirPlay 2 playback does not work
-yet. No code is copied, translated, or imported from Autostream, OwnTone/OwnTone
+and an explicit receiver pairing/authentication and encrypted control foundation. An explicit realtime UDP/ALAC/NTP sender is implemented;
+hardware playback compatibility remains unverified. No code is copied, translated, or imported from Autostream, OwnTone/OwnTone
 Mini, or airplay2-rs. Those projects may only inform publicly observable behavior
 and protocol understanding. No existing AirPlay sender is a dependency.
 
@@ -35,7 +35,12 @@ and protocol understanding. No existing AirPlay sender is a dependency.
 - `receiver/media.rs`: no-I/O receiver-observed encrypted packet components,
   sample timeline and bounded queue; no negotiated profile or receiver caller.
 - `receiver/session.rs`: persistent authenticated control owner, typed lifecycle,
-  terminal failures/idempotent cleanup and disabled buffered-audio gate.
+  typed negotiation, READY/STREAMING, bounded deterministic transmission,
+  FLUSH/TEARDOWN, terminal failures and cleanup; buffered-audio gate remains closed.
+- `receiver/profile.rs`: typed fixed-profile plist offers/responses and bounded
+  binary-plist preflight; no speculative negotiation.
+- `receiver/realtime.rs`: original realtime RTP/ALAC media encryption, cached
+  retransmission, NTP replies/sync and absolute sample-clock math.
 - `receiver/pairing.rs`: socket-owning persistent HAP setup/verify; displayed-PIN and
   existing-setup-code profiles, with no method fallback.
 - `receiver/srp.rs`, `crypto.rs`, `tlv.rs`: HAP protocol composition and bounded messages.
@@ -46,8 +51,8 @@ and protocol understanding. No existing AirPlay sender is a dependency.
 See [PAIRING.md](PAIRING.md) for protocol research, sequence diagrams, exact
 supported profile, identity rules, cryptographic/storage limitations and recovery.
 See [AIRPLAY_SESSION.md](AIRPLAY_SESSION.md) for the implemented encrypted control
-profile and the precise media blockers. No complete audio session implementation
-is provided; READY/STREAMING remain unreachable. Keep one `piair` executable and eventually
+profile and the precise media blockers. The explicit realtime sender reaches READY/STREAMING only after validated
+negotiation. Buffered TCP remains disabled. Keep one `piair` executable and eventually
 one systemd service. No web UI, database, Bluetooth, Spotify, media library, or
 Docker requirement belongs in this architecture.
 
@@ -72,9 +77,9 @@ when the advertised ID is unchanged. DNS advertisements are unauthenticated and
 can be spoofed; an allowlist is user intent, not cryptographic authentication.
 
 The empty allowlist denies every future connection. Discovery lists unapproved
-receivers explicitly and never selects a receiver. **All connection code uses `receiver::wire::Wire::connect`, which rechecks the current
-allowlist and exact selected endpoint at the connection boundary**, before opening any socket,
-pairing, authentication, reconnect, or playback operation. Check again after
+receivers explicitly and never selects a receiver. **Every session starts at `receiver::wire::Wire::connect`, which rechecks the current
+allowlist and exact selected endpoint.** Negotiated socket factories remain in wire.rs,
+use only authenticated peer/port bindings and recheck the same authorization lease. Check again after
 configuration changes; authenticated credentials are bound to the authorized
 stable receiver ID and the actual signed pairing ID. Advertised `pi` is only an
 untrusted change-detection pin, never an authenticated identity assertion. Hiding devices in a CLI is insufficient. Unknown receivers
@@ -87,25 +92,31 @@ separate specification facts, independent behavior reports and unresolved firmwa
 assumptions. Both persistent profiles share HKP-3 HTTP/1.1 setup/verify; a setup
 code source is explicit and never discovered by trying methods. Transient,
 MFi/legacy, Home-membership and password paths remain unsupported. Capability
-bit 51 is not misrepresented as a universal MFi requirement: the policy is blocked
-because PiAir cannot safely determine/validate that enrollment policy.
+bit 51 is a capability rather than a universal MFi requirement; an explicit
+persistent-HAP selection with bit 46 may proceed, with the wire exchange checked
+strictly for unsupported MFi requirements.
 
-PR #4 retains the identity/authorization boundary, capability policy, HAP
-exchanges and schema-2 credentials. Successful pair-verify now transfers the live
-wire and directional keys to a session owner; encrypted OPTIONS is available only
-through the explicit authenticate diagnostic. Approval and selection are checked
-at handoff and before/after control operations. Audio transport remains disabled:
-SETUP/codec/media protection/clock/feedback evidence is incomplete. Hardware
-behavior must be validated before claiming playback. No raw socket API or
-automatic authentication fallback bridges these gaps.
+Merged PR #4's HAP/control and codec foundations are preserved. The continuation
+uses a source-traced realtime AirPlay 2 NTP/UDP profile, not the earlier proposed
+buffered profile. Source revisions, exact function traces and licenses are in
+[AIRPLAY_REFERENCE_ANALYSIS.md](AIRPLAY_REFERENCE_ANALYSIS.md). Bit 51 no longer
+causes blanket refusal when explicit persistent HAP bit 46 is present; unknown
+MFi/transient exchange requirements still fail. Approval and signed identity
+checks are unchanged.
+
+All additional socket operations are confined to wire.rs and constrained to the
+verified control peer plus authenticated validated ports. Event and timing workers
+exist only for explicit diagnostic sessions, and are stopped/joined on cleanup.
+No raw socket or secret API is available to the capture/activity engine.
 
 ## Future audio and network lifecycles
 
-Current data flow (no network consumer). The standalone ALAC/media components
-are compiled but not connected to this graph; [BUFFERED_RESEARCH.md](BUFFERED_RESEARCH.md)
-explains the unresolved Apple TV profile. Components never authorize sockets,
+Current capture data flow (no network consumer). Capture remains disconnected
+from the realtime sender; the older buffered
+components remain disabled; [BUFFERED_RESEARCH.md](BUFFERED_RESEARCH.md)
+records the historical buffered investigation. The current realtime profile is
+described in AIRPLAY_SESSION.md. Capture/detector code never authorizes sockets,
 SETUP or READY/STREAMING state transitions:
-
 
 ```text
 ALSA capture -> PCM normalization -> RMS/activity detector -> intent events
@@ -153,9 +164,10 @@ Use a bounded queue between capture and network; network backpressure must never
 block capture or grow memory without limit. Overflow is observable and invalidates
 continuity; it must not silently play stale music later.
 
-The session lifecycle owns explicit receiver approval, authentication, timing,
-encoding, packet transport, reconnect and actual playback teardown. It starts
-only on confirmed activity and explicit receiver configuration. Capture errors
+The active session lifecycle owns explicit receiver approval, authentication,
+timing, encoding, packet transport and teardown. Today it starts only through
+interactive stream-test. Future activity-driven scheduling requires a separate
+explicitly enabled capture integration; it is not implemented here. Capture errors
 invalidate activity evidence. Network failure must not restart ALSA unnecessarily;
 ALSA recovery must not implicitly reopen a receiver session. Reconnect remains
 bounded, requires fresh activity and current approval, and drops obsolete audio.

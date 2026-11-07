@@ -88,9 +88,9 @@ impl Capabilities {
                 .is_none_or(|v| ["1.0", "1.1"].contains(&v)),
             "unknown AirPlay protocol version; collect documented firmware evidence before use"
         );
-        if self.features & (1 << 51) != 0 {
-            bail!("receiver advertises unified pairing/MFi (bit 51); this does not prove MFi is mandatory, but PiAir cannot validate that enrollment policy; no method-0 downgrade attempted");
-        }
+        // Bit 51 advertises a capability, not mandatory MFi. Pinned OwnTone's
+        // persistent HAP path does not require auth-setup/MFi (see source analysis).
+        // Explicit method 0 still requires bit 46 and rejects MFi TLVs on wire.
         if requested == Method::Transient {
             if self.features & ((1 << 43) | (1 << 48)) == 0 {
                 bail!("receiver does not advertise system/transient pairing (bits 43/48)");
@@ -135,6 +135,7 @@ mod tests {
             (1 << 46) | (1 << 38),
             (1 << 46) | (1 << 43) | (1 << 48),
             (1 << 46) | (1 << 40) | (1 << 41),
+            (1 << 46) | (1 << 51),
         ] {
             for method in [Method::PinDisplay, Method::SetupCode] {
                 assert_eq!(caps(features).decide(method).unwrap(), method);
@@ -147,7 +148,6 @@ mod tests {
             1 << 48,
             (1 << 40) | (1 << 41),
             1 << 27,
-            (1 << 46) | (1 << 51),
             1 << 51,
         ] {
             for method in [Method::PinDisplay, Method::SetupCode, Method::Transient] {

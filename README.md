@@ -3,9 +3,8 @@
 A lightweight Rust AirPlay 2 transmitter project for Raspberry Pi OS 64-bit
 (Debian ARM64). Implements ALSA capture, activity monitoring/calibration, passive
 receiver discovery, persistent PIN pairing/authentication and encrypted control
-session diagnostics.
-**AirPlay audio playback is not implemented. Apple TV/HomePod compatibility is
-unverified.** Audio tools never discover or contact receivers. Existing Autostream
+session diagnostics and an explicit AirPlay 2 realtime UDP/ALAC/NTP audio test.
+**Real Apple TV/HomePod playback compatibility remains unverified.** Audio tools never discover or contact receivers. Existing Autostream
 and OwnTone services are never modified.
 
 ## Build on Raspberry Pi OS ARM64
@@ -187,20 +186,36 @@ approval, selection, credentials and interactive exact-ID confirmation. OPTIONS
 success does not establish audio readiness or receiver playback compatibility.
 See [session implementation, research and precise blockers](docs/AIRPLAY_SESSION.md).
 
-Prompt 4b adds a genuine stereo S16/48 kHz ALAC escape-frame encoder, validated
-with an independent decoder, plus bounded sample buffering and receiver-observed
-encrypted packet components. These have no receiver-directed caller. A complete
-Apple TV buffered negotiation/clock profile remains unresolved; no audio-send
-diagnostic, media connection or audible-playback claim is enabled. See the
-[additional research and exact evidence gaps](docs/BUFFERED_RESEARCH.md).
+The active sender follows the [source-traced OwnTone NTP profile](docs/AIRPLAY_REFERENCE_ANALYSIS.md):
+AirPlay 2 persistent HAP, realtime UDP type 96, ALAC 44100/16/stereo, 352 frames,
+encrypted events/media, NTP sync, feedback/retransmit and FLUSH/TEARDOWN.
+OwnTone's inspected sender does not implement buffered TCP type 103. PiAir's
+older 48 kHz buffered packet components remain separate and disabled.
+
+After reviewing the physical receiver and existing approval/selection/pairing,
+the explicit diagnostic is:
+
+```sh
+piair --config config.toml stream-test device:aabbccddeeff --seconds 1
+```
+
+It requires an interactive terminal and exact receiver-ID confirmation. It sends
+1..3 seconds of deterministic stereo signal plus two seconds latency drain,
+sets receiver volume to -30 dB (which may persist), and reports authentication,
+negotiation, audio packets and acknowledged teardown separately. No audible
+playback is claimed. PTP-only, other codecs and unsupported authorization paths
+fail explicitly. No hardware testing was performed. See [session behavior,
+bounds and limitations](docs/AIRPLAY_SESSION.md).
 
 A tested capability decision rejects unsupported combinations before connection,
-including transient/system-only, unresolved MFi, password and Home-access paths.
+including transient/system-only, required MFi, password and Home-access paths.
+Bit 51 with bit 46 can be explicitly selected for persistent HAP; it is a
+capability, not proof that MFi is mandatory. Unexpected MFi exchange fields fail.
 No method is inferred from model/name and no fallback occurs. **Transient remains
 unsupported because AirPlay wire-profile variants need reliable validation.**
 No Apple TV/HomePod hardware/firmware is verified, and a usable HomePod HAP setup
 code is not assumed. See the [compatibility matrix and evidence ledger](docs/PAIRING.md#compatibility-matrix).
-Mock success proves only the implemented local exchanges; no audio session exists.
+Mock success proves the implemented protocol path, not hardware playback.
 
 Credentials live separately in `receiver-state/` next to config, with owned 0700
 directory/0600 files on Linux. Filesystem permissions are the primary protection;
@@ -236,7 +251,6 @@ OS scheduling can delay capture and produce reported discontinuities.
 Original code is Apache-2.0; existing licenses are preserved. No source from
 Autostream, OwnTone or airplay2-rs is imported or translated. No AirPlay sender
 library, web UI, database, Docker dependency or systemd installation is included.
-Encrypted control continuation is implemented and tested locally. Buffered audio
-remains disabled under the verified-components fallback: media negotiation, codec,
-packet encryption, timing and feedback require a validated profile. Current
-activity events never initiate network connections.
+Encrypted control and the explicit realtime audio sender are implemented and
+mock-tested. Buffered TCP/PTP profiles remain unsupported. Current activity events
+never initiate network connections; ALSA/silence/pre-roll integration is deferred.

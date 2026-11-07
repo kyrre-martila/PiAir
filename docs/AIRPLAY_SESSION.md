@@ -1,236 +1,228 @@
-# AirPlay session foundation
+# AirPlay 2 session and audio transport
 
-## Status and scope
+## Implemented profile and evidence
 
-PR #4 uses the requested **verified-components fallback**. It implements a live
-persistent HAP authenticated control owner and real encrypted RTSP OPTIONS I/O.
-Prompt 4b adds independently validated
-ALAC encoding and receiver-observed packet-protection components without
-enabling a network audio profile.
-**It does not implement a complete buffered audio transport profile.** No audio
-is transmitted, even to the mock receiver. No Apple TV or HomePod model/firmware
-has been validated. READY and STREAMING are deliberately unreachable.
+PiAir now implements an explicitly invoked **AirPlay 2 realtime UDP / persistent
+HAP / NTP / ALAC 44100 Hz, 16-bit stereo / 352 sample frames per packet** sender.
+The original ALAC encoder, pairing, authorization and encrypted control work is
+preserved. This profile is distinct from buffered TCP type 103 and legacy
+ANNOUNCE/RSA/AES RAOP. The preserved type-103 components remain disconnected.
 
-The base is fresh main at `62f28d879789ee0c7ee5e7cd66d5801a0f93f02e`, the merge
-commit of PR #3 (GitHub reported merged at 2026-11-07T09:20:43Z). PRs #1–#3 are
-in its history. All additions are original; no sender implementation code is
-copied, translated or incorporated. No new runtime crate is needed; Symphonia
-is a test-only independent ALAC decoder (see DEPENDENCIES.md).
+[AIRPLAY_REFERENCE_ANALYSIS.md](AIRPLAY_REFERENCE_ANALYSIS.md) pins the inspected
+OwnTone and pyatv sender revisions, functions, differences and licenses. OwnTone's
+actual active sender uses type 96/UDP, not buffered type 103. Its NTP configuration
+provides the complete chosen sequence. pyatv independently corroborates HAP,
+encrypted events, NTP, media-key offering, authenticated packets and feedback;
+its PCM codec offer is not used. No sender implementation code is copied or
+mechanically translated. No GPL component is linked into PiAir.
 
-## Evidence and transport profile research
+**Hardware compatibility and audible playback remain unverified.** Local mocks
+exercise the production sender, not a separate protocol or a claim that an Apple
+TV will play. A receiver that requires PTP, transient/Home membership, password,
+MFi/FairPlay or another codec fails explicitly. No automatic transport fallback.
 
-Reviewed 2026-11-07. Sources describe different profiles; they cannot be combined
-into an assumed successful Apple TV session.
+## Approval and cryptographic ownership
 
-| Reference | Evidence and consequence |
-| --- | --- |
-| [HAP R2 §6.5.2, public mirror](https://forum.iobroker.net/assets/uploads/files/1634848447889-apple-spezifikation-homekit.pdf) | Normative HAP IP session-security framing and directional key derivation after pair-verify. Implements control protection, not media protection. |
-| [Independent AirPlay HKP notes](https://openairplay.github.io/airplay-spec/pairing/hkp.html) | Corroborates AirPlay's switch to encrypted control on the existing connection and separate keys/counters. Does not establish buffered playback. |
-| [AirPlay 2 Internals: RTSP](https://emanuelecozzi.net/docs/airplay2/rtsp/) | Documents binary plist control, a two-stage SETUP, event channel and timing selection; distinguishes type 96 realtime and type 103 buffered streams. The worked audio example is type 96 ALAC, not a complete 48 kHz buffered profile. |
-| [AirPlay 2 Internals: RTP](https://emanuelecozzi.net/docs/airplay2/rtp/) | Describes a 12-byte RTP header, timestamp/SSRC AAD, sender-generated `shk`, ChaCha20-Poly1305 and a media nonce/tag trailer. The illustrated header is type 96. This does not validate type 103 framing, counter lifecycle or receiver-specific key requirements. |
-| [AirPlay 2 Internals: encryption](https://emanuelecozzi.net/docs/airplay2/encryption/) | Distinguishes outer control protection from encrypted media, including observations with outer encryption disabled. PiAir never attempts such a downgrade. |
-| [pyatv protocol documentation: AirPlay 2](https://pyatv.dev/documentation/protocols/#airplay-2) | Explicitly incomplete; its detailed flow is remote-control-only (type 130). Event/data channel keys and `timingProtocol=None` in that example cannot be repurposed as audio transport or synchronization. It also reports control blocks larger than HAP's limit; PiAir conservatively rejects blocks over 1024. |
-| [Legacy SETUP](https://openairplay.github.io/airplay-spec/audio/rtsp_requests/setup.html), [RTP streams](https://openairplay.github.io/airplay-spec/audio/rtp_streams.html) | UDP AirTunes examples, RTP sequence/sample timestamps, NTP sync and retransmission. They are not sufficient evidence for buffered TCP audio. |
-| [FLUSHBUFFERED](https://openairplay.github.io/airplay-spec/audio/rtsp_requests/flushbuffered.html) | Buffered flush uses binary plist sequence/timestamp ranges, unlike legacy FLUSH's RTP-Info header. |
-| [RFC 2326](https://www.rfc-editor.org/rfc/rfc2326), [RFC 3550](https://www.rfc-editor.org/rfc/rfc3550), [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439) | RTSP correlation/body framing, RTP fundamentals and the established AEAD primitive. These do not specify Apple's buffered profile. |
+Only explicit commands connect. The exact approved selected device identity,
+persisted discovery selection and current allowlist are checked by `Wire::connect`
+before one bounded TCP attempt. Pair-verify validates the enrolled receiver ID,
+Ed25519 signature, fresh contributory X25519 exchange, AEAD and M4. Credentials
+prove enrollment; they are never interpreted as live authentication.
 
-The Internals site returned HTTP 502/503 directly during research; indexed
-versions of its RTSP/RTP/encryption pages were available. Treat those observations
-as incomplete research evidence. No receiver capture was made. Sender-project
-search excerpts were not treated as independent conformance evidence or used as
-implementation code.
+The same socket transfers into encrypted control ownership. Keys and raw sockets
+are private. Separate event keys are derived during verify and can be consumed
+only once by the event-channel owner. Media keys are fresh OS-random 32-byte
+values per negotiated session, not HAP control/event keys or the verify secret.
+The offered `shk` is transmitted only inside encrypted SETUP. Secret-bearing
+serialized bodies and key material are zeroizing; temporary plist Data values are
+wiped after serialization. Existing process-memory/local-user limitations in
+PAIRING.md still apply; complete memory erasure is not claimed.
 
-## Prompt 4b profile decision
+Additional event, timing, data and control endpoints are created in `wire.rs`
+only after authenticated response validation. Their IP is always the live
+verified TCP peer IP; a response supplies only checked nonzero u16 ports. URLs,
+redirects, hostnames and address lists cannot redirect a connection. IPv4 only
+for this initial diagnostic. UDP sockets bind to the actual control connection's
+local interface; both IP and port are checked on received datagrams, including
+anything queued before UDP connect.
 
-[BUFFERED_RESEARCH.md](BUFFERED_RESEARCH.md) records the new evidence and scope
-before component implementation. An independent receiver parser resolves a
-specific buffered layout: 24-bit sequence (no normal RTP PT byte), timestamp,
-format word, ciphertext/tag/nonce and a two-byte TCP length counting itself.
-This is **not** a complete modern Apple TV profile. ALAC codec validity is now
-verified; its acceptance, format-word semantics, key exchange and PTP/anchor
-requirements remain unestablished. No SETUP/RECORD/FLUSH/TEARDOWN sequence or
-receiver-directed streaming diagnostic is enabled. The existing encrypted
-control owner and authorization boundary are preserved.
+Approval/selection are reloaded before every control operation, media send, sync,
+event acknowledgement and timing reply. Revocation closes the session and
+prevents remote cleanup traffic to the now-unapproved peer. There is no instant
+watcher during a single bounded operation and no reconnect/resurrection loop.
 
-## Authentication-to-session transition
+The earlier blanket refusal of discovery bit 51 is refined: that capability does
+not establish mandatory MFi. Pinned OwnTone uses ordinary persistent HAP without
+its disabled auth-setup path. An explicitly selected persistent method still
+requires bit 46; bit 51 alone grants nothing. MFi fields/flags, unsupported methods,
+password/Home restrictions and invalid signatures remain errors; no fallback or
+attestation bypass is introduced.
 
-`Session::start` progresses DISCONNECTED → CONNECTING → AUTHENTICATING →
-NEGOTIATING. Production supplies `Wire::connect`, the sole receiver TCP boundary.
-That boundary reloads approval and pinned selection, compares the discovery
-snapshot and rejects ambiguous identities/endpoints before one connect attempt.
-There are no retries, DNS resolution, alternate addresses or redirects.
+## Control and event encryption
 
-`pairing::verify` consumes the wire and checks the enrolled receiver identifier,
-Ed25519 signature, fresh contributory X25519 shared secret, M2 AEAD and M4 success.
-It then transfers that same wire into encrypted mode with derived keys; neither
-socket nor secrets escape the owner. Approval and persisted selection are checked
-again at handoff. A credential file proves enrollment, never current liveness or
-active session authentication. Credentials and ephemeral control keys are separate.
+Control uses HKDF-SHA512 with Control-Salt and directional
+Control-Write-Encryption-Key / Control-Read-Encryption-Key labels. Each frame is
+`[u16 LE length][ciphertext][16-byte Poly1305 tag]`; the length is AAD and the nonce
+is four zero bytes followed by a per-direction u64 LE counter. Frames contain
+1..1024 bytes, headers/bodies at most 8192 bytes each. Counter exhaustion, bad
+tags, framing, status, correlation or I/O failure poison and close the wire.
+There is no plaintext reentry, retry or nonce reset on an active connection.
 
-The session can retain the connection for repeated explicit control checks.
-OPTIONS success leaves it NEGOTIATING; it proves neither usable codecs nor media
-ports, readiness or playback. Calling the internal `start_buffered_audio` gate
-fails explicitly and closes control without sending SETUP or media.
+Events use Events-Salt with **sender transmit Events-Read-Encryption-Key and
+sender receive Events-Write-Encryption-Key**, independently counted from control.
+The event worker accepts bounded `POST /command RTSP/1.0` binary-plist updateInfo
+messages, validates framing/CSeq/type/value, and sends an encrypted correlated 200,
+including CSeq zero. Unknown requests, invalid tags, termination or closure fail
+the session. Remote play/pause commands are not implemented or silently accepted.
 
-| State | Entry condition / exit |
-| --- | --- |
-| DISCONNECTED | New owner or successful local shutdown; explicit start only |
-| CONNECTING | Authorization boundary invoked; error → FAILED |
-| AUTHENTICATING | Connected wire consumed by pair-verify; error → FAILED |
-| NEGOTIATING | Verified M4 and approval recheck; encrypted OPTIONS permitted |
-| READY | Reserved; no implemented SETUP can enter it |
-| STREAMING | Reserved; no implemented RECORD/media path can enter it |
-| STOPPING | Synchronous local resource cleanup |
-| FAILED | First failure reason retained, socket/keys dropped; no restart on this owner |
+A control request has a 15-second absolute monotonic budget and at most a
+three-second wait per partial I/O; event messages have a three-second budget.
+Event/timing workers use bounded receive waits and are stopped/joined on cleanup.
 
-Shutdown/drop is idempotent. No audio session was created, so local shutdown does
-not send a speculative TEARDOWN. A future implemented SETUP must add appropriate
-remote cleanup, including cleanup following partial setup failures.
+## Typed negotiation and session state
 
-## Control-channel encryption
+Startup uses production encoders/decoders and this fixed sequence:
 
-HKDF-SHA-512 over the fresh verify shared secret uses `Control-Salt` and
-`Control-Write-Encryption-Key` (controller transmit) or
-`Control-Read-Encryption-Key` (controller receive). Neither derives a media key.
-Each frame is `[u16 LE plaintext length][ciphertext][16-byte Poly1305 tag]`.
-The two-byte length is AAD. The nonce is four zero bytes followed by the direction's
-u64 LE counter. Both counters start at zero and advance independently per frame;
-the implementation rejects exhaustion before wraparound. Keys are never cloned
-or used with another socket. No plaintext POST is permitted after the upgrade.
+1. Fresh HAP pair-verify, then encrypted `GET /info`. Require audio/ALAC feature
+   evidence and reject an advertised supportedFormats.audioStream mask excluding
+   ALAC 44100/16/stereo. No codec guessing or fallback.
+2. Bind local UDP timing/control/data sockets. Send session SETUP binary plist:
+   deviceID, fresh sessionUUID, timingPort and timingProtocol=NTP. The sender
+   deviceID is a fresh locally administered identifier; no iOS/model impersonation.
+3. Validate eventPort and **timingPort** from the authenticated response. Reject
+   PTP/None timing. Start NTP on the authenticated timing endpoint and connect the
+   encrypted event channel to the same peer. No reply is sent to an unnegotiated
+   timing source. Missing/zero timingPort is explicitly unsupported, unlike
+   OwnTone's more permissive timing listener.
+4. Send RECORD and validate any Audio-Latency header within 11025..88200 samples.
+   Absent latency uses the explicitly offered minimum 11025; zero is rejected.
+5. SETUP one stream: type=96, audioFormat=0x40000, ct=2, spf=352, sr=44100,
+   isMedia=true, latencyMin=11025, latencyMax=88200, local controlPort, independent
+   shk, session streamConnectionID, supportsDynamicStreamID=false. Validate one
+   returned stream, exact type and any echoed format/rate/latency fields, streamID
+   and dataPort/controlPort. Connect UDP only to those peer-bound ports.
+6. Set receiver volume to -30 dB using SET_PARAMETER text/parameters. Require a
+   successful NTP query/reply and initial encrypted event acknowledgement before
+   READY. Then send initial sync and the first authenticated audio datagram;
+   only a successful send enters STREAMING.
 
-Production I/O handles partial reads/writes, arbitrary TCP fragmentation and RTSP
-headers crossing encrypted frame boundaries. It bounds frames to 1..1024 bytes,
-headers to 8192 and bodies to 8192 bytes. A diagnostic request has a 15-second
-absolute monotonic deadline, recalculated before each partial I/O, and a maximum
-three-second wait per read/write. There is one in-flight request. CSeq continues
-from pairing and is mandatory/matched for encrypted replies; only RTSP/1.0 200
-is accepted. RTSP's omitted Content-Length means zero; explicit invalid lengths,
-duplicates, redirects, transfer encodings, connection-close and unsolicited
-messages fail. Unexpected OPTIONS bodies or buffered trailing plaintext fail.
+URI is a fresh sender-address/numeric-session-ID RTSP URI; CSeq continues from
+pairing. Responses must be RTSP/1.0 200 with matching CSeq. A returned Session
+header is validated, pinned and included in subsequent requests; changes fail.
+Optional streamID is range checked and correlated in feedback. Binary-plist
+preflight rejects oversized/cyclic/deep/excessively expanding graphs before the
+general parser allocates; total traversal <=2048 nodes, depth <=24, collection
+size <=256. Unsupported binary object families and XML are rejected.
 
-Framing, I/O, tag, counter, authorization or protocol failure closes the socket,
-drops zeroizing keys and clears the fixed plaintext frame buffer. No retry,
-plaintext fallback or counter reset on a live connection is allowed. Stalls and
-EOF during an operation are terminal. There is no background idle socket monitor:
-idle peer closure or revocation is detected at the next operation (or explicit
-shutdown). Approval/selection are rechecked before and after each diagnostic;
-there is no instant revocation watcher during an in-flight bounded operation.
-Secret-copy/allocator and same-user-process limitations in PAIRING.md still apply.
+The lifecycle is DISCONNECTED → CONNECTING → AUTHENTICATING → NEGOTIATING → READY
+→ STREAMING → STOPPING → DISCONNECTED. Any failure enters FAILED with the first
+reason preserved and releases all resources. FAILED cannot reconnect. An explicit
+new start after successful stop creates fresh authentication, identifiers, media
+keys and counters. Repeated stop is safe.
 
-## Audio components; network streaming disabled
+## Audio packetization and media protection
 
-The required input contract is stereo 48,000 Hz signed 16-bit PCM, ordered left /
-right sample frames. This is an input requirement, **not** an asserted AirPlay
-wire codec. Existing capture normalizes native interleaved S16/S32 to indexed
-`detector::Frame` values and can negotiate rates other than 48 kHz. No adapter
-currently forwards those values to this session.
+The source for this milestone is deterministic stereo S16 **at 44100 Hz**. There
+is no automatic ALSA adapter or resampling of the default 48 kHz capture. ALAC
+escape coding supplies genuine CPE/partial-count/escape/END framing, without
+predictive/entropy compression. Independent Symphonia decoding recovers exact
+samples at the selected rate. No raw PCM is mislabeled ALAC/AAC.
 
-No wire codec is negotiated. `audio::alac` independently implements stereo
-48 kHz / S16 ALAC escape frames, decoder configuration and checked normalized
-sample conversion. It does not merely relabel PCM: the output has CPE/escape/
-partial-count/END syntax and is decoded bit-exactly by Symphonia in tests.
-There is no predictive/entropy compression. Blocks contain 1..4096 sample frames;
-maximum encoded size is bounded by 16,392 bytes.
+Each UDP datagram is:
 
-`receiver::media` supplies components with no sockets, key export/exchange or
-session negotiation: a bounded ordered S16 queue, absolute sample-duration
-arithmetic and an observed-layout packetizer using fresh OS-random independent
-media keys. Its sequence field is 24 bits, timestamp is 32 bits, and nonce is an
-independent 64-bit LE counter. Sequence/timestamp wrap cannot reset the nonce.
-AEAD uses timestamp/format-word bytes as AAD and appends the tag then eight-byte
-nonce; TCP framing adds a big-endian length counting itself. Validation or nonce
-exhaustion poisons the packetizer. No HAP secret is accepted as its key input.
+`[12-byte RTP PT96 header][ALAC ciphertext][16-byte tag][8-byte nonce]`
 
-This packet model matches the pinned receiver parser in BUFFERED_RESEARCH.md;
-its field/reserved-bit meanings and wrap convention are not verified Apple TV
-behavior. The supplied opaque format word is not a negotiated codec identifier.
-Components have no caller on a receiver-directed path, are compiled under a
-narrow dead-code allowance and are exercised by deterministic component tests.
-No media is sent to a receiver or socket, no media key is exchanged, and no
-successful audio session can be inferred from these tests.
+Header fields are version 2, first-packet marker, 16-bit big-endian sequence,
+32-bit big-endian sample timestamp and random SSRC. One packet advances timestamp
+by 352; both sequence and timestamp wrap normally. Timestamp+SSRC (header bytes
+4..11) are AAD. ChaCha20-Poly1305 uses a fresh independent media key and nonce
+`zero32 || u64 LE packet counter`; the last eight nonce bytes are transmitted.
+The nonce is independent of sequence and never resets on wrap or FLUSH. Exhaustion
+poisons the encoder. Unlike the inspected OwnTone u16 sequence nonce, this does
+not repeat after sequence wrap; pyatv independently corroborates counter nonces.
 
-## Timing, feedback and recovery: disabled
+One source block is generated on demand; there is no unbounded producer queue.
+The resend cache holds at most 256 authenticated datagrams (~372 KiB). The older
+48 kHz/type103 queue is not used by this realtime sender.
 
-The control deadline uses `Instant`, not sleeps. It is not a playback clock.
-There is no NTP/PTP responder, rate-anchor exchange, receiver latency negotiation,
-clock drift estimator, playout scheduler or feedback worker. The new sample
-timeline derives elapsed time from total 48 kHz sample count
-without accumulating per-packet rounding; it is not clock drift correction.
-Existing detector sample indices are local capture time only. Legacy NTP sync packets and UDP
-retransmission queries must not be assumed to apply to type 103 TCP transport.
-The audio queue bounds capacity to at most 48,000 stereo frames (one second);
-it refuses full writes atomically, without eviction or index advancement. Its
-capacity is a local safety bound, not negotiated receiver latency. There is no
-retransmission buffer, keepalive loop or reconnect loop.
-Receiver-initiated requests on the control socket fail as unsupported protocol;
-no event channel has been negotiated. Idle event-channel termination is untested.
+## Timing, latency, feedback and recovery
 
-## Precise blockers before enabling buffered audio
+A wall-clock NTP epoch is sampled once and advanced by monotonic elapsed time,
+avoiding later wall-clock steps. Timing d2 queries receive d3 replies with echoed
+origin and measured receive/transmit timestamps. Only the authenticated peer's
+negotiated port can obtain a reply. NTP traffic is protocol-defined plaintext;
+there is no plaintext control/media downgrade. At least one timing exchange is
+required before READY; silence over five seconds fails liveness.
 
-1. Establish a coherent authenticated type 103 transcript for the allowed Apple
-   TV firmware/profile: `/info` formats, complete two-stage SETUP fields, event
-   channel behavior, session/stream identifiers and port validation, RECORD,
-   pause/flush/rate-anchor and TEARDOWN, including partial-setup rollback.
-2. Validate a stereo 48 kHz wire format and its advertised format-bit/`ct`/`spf`
-   mapping. Implement the actual codec and framing it needs. ALAC support must
-   follow its specification; changing an identifier around raw PCM is invalid.
-3. Confirm buffered packet framing, exact media AEAD AAD and tag/nonce placement,
-   nonce endianness/width and long-session uniqueness against independent Apple
-   TV observations. A pinned independent receiver now confirms tag-before-nonce
-   and 24-bit buffered sequence, superseding the older realtime diagram for our
-   component tests. It does not establish Apple TV acceptance/reserved-bit rules.
-   A wrapping sequence alone cannot be a safe long-session nonce.
-   Validate `shk` acceptance/key protection separately from HAP. Required FairPlay
-   or MFi exchange must remain an explicit unsupported error, never a bypass.
-4. Validate the receiver's PTP/NTP dialect and rate-anchor requirements, map a
-   monotonic sample epoch to that clock, bound drift and latency, and test the
-   sequence/timestamp wrap rules. A remote-control `None` timing profile or fixed
-   sleeps cannot supply playback synchronization.
-5. Validate buffered feedback, flow-control/buffer limits, stalls and transport
-   reliability semantics. Determine whether any application retransmission is
-   required rather than copying legacy UDP recovery into TCP.
+The sample timeline uses total frames/44100, not summed rounded packet durations.
+Audio deadlines are absolute from one Instant epoch. Waits are computed from the
+next sample deadline while servicing feedback/workers. A scheduler gap of 100 ms
+fails rather than producing an unbounded catch-up burst or queue. Deterministic
+source and sender clock share the same monotonic rate; there is no capture clock
+or adaptive resampler here, and no claim of correcting an independent ADC clock.
 
-These are gaps in PiAir's evidence and implementation, not a claim that the
-protocol is impossible or that no other project implements it. Current approval
-policy still excludes unresolved bit-51, transient, password/Home-membership,
-legacy and FairPlay profiles. HomePod transient pairing remains out of scope.
+NTP sync d4 packets go to the negotiated control port initially and about once
+per sample second. They map rendering RTP position, NTP time and next RTP sample.
+As in OwnTone's NTP model, a two-second total output lead is represented by a
+sync gap of 88200 minus the accepted receiver latency; this profile offers
+11025 minimum and 88200 maximum. The diagnostic sends two seconds of silence
+following the signal to drain latency before explicit stop. Exact physical
+render latency remains hardware dependent. PTP d7 and buffered rate anchors are
+not mixed into this NTP profile.
 
-## Component validation added in Prompt 4b
+POST /feedback runs every two seconds and must succeed, with bounded valid
+stream feedback if present. Eight-byte 0x80d5 loss requests specify a first u16
+sequence/count. Up to 32 packets per request, three retries per cached packet and
+1024 total requested packets per diagnostic are allowed. Cached ciphertext is
+resent unchanged on the data UDP socket (the inspected OwnTone behavior), not
+re-encrypted. Out-of-window packets are unavailable; no retry/reconnect loop.
+Media/event/control loss, malformed feedback or worker failure closes the session.
 
-Tests pass real encoded packets through authenticated media decryption and an
-independent Symphonia ALAC decoder, preserving the deterministic stereo signal.
-They check partial/full codec blocks, signed extremes, conversion rejection,
-queue backpressure/gaps/limits, sample-duration rounding, observed sequence and
-sample-timestamp wrap, independent nonce progression/exhaustion, key invalidation,
-fresh keys and tamper rejection. A Python cryptography 50.0.0 fixture validates
-packet bytes independently of RustCrypto composition. The fixture is synthetic,
-not a hardware capture; this is component validation, not a full session mock.
-No Python, FFmpeg or external executable is required by cargo tests.
+## FLUSH, teardown, partial setup and diagnostics
 
-## Tests and PR #5 integration contract
+FLUSH uses RTP-Info with the next sequence/timestamp. It clears resend history and
+marks the next packet as a new start, without resetting keys/nonces. Explicit
+stop then sends empty binary-plist TEARDOWN for the whole session, before closing
+media, workers, event and control ownership. Any attempted session SETUP is
+recorded so even a schema/port failure attempts bounded best-effort TEARDOWN if
+the authenticated control channel and approval remain valid. A framing or I/O
+failure may make remote teardown impossible; local cleanup still occurs.
 
-Loopback tests run the production persistent verify exchange, control framing,
-RTSP parser, authorization boundary and state owner. They cover repeated encrypted
-OPTIONS with differing transmit/receive frame counts, fragmented headers/lengths/
-tags, independent fixtures, nonce exhaustion/replay, invalid statuses/CSeq/lengths,
-plaintext rejection, identity mismatch, approval revocation during verify and
-before requests, selection changes, disconnects, a stalled operation and repeated
-shutdown. Existing tests cover read-only dispatch with an approved selected
-loopback endpoint; no receiver connection occurs. No tests contact real receivers.
+`piair --config config.toml stream-test device:aabbccddeeff --seconds 1`
+requires the currently approved selected receiver, existing credentials, a real
+interactive terminal and exact-ID confirmation. Duration is 1..3 seconds of
+signal plus two seconds drain; signal amplitude is bounded around -18 dBFS and
+receiver volume is set to -30 dB. The low receiver volume may persist after the
+test; the prompt says so. Authentication, READY, packets/retransmits/timing and
+acknowledged teardown are reported separately. Ctrl+C signals cancellation and
+attempts bounded authenticated teardown, then closes resources; a blocked I/O
+still respects its existing timeout. Failure reports transmission
+counts and cleanup attempts. **Audible playback always remains unverified unless
+a person physically confirms it.** No hardware is contacted during development
+or automated tests. No startup, status, config, discovery or audio activity path
+calls the diagnostic.
 
-`tests/fixtures/hap-control.hex` is generated independently using Python
-cryptography 50.0.0 (HKDF-SHA512/ChaCha20Poly1305), with public synthetic inputs and
-counter 0/1 in both directions. The optional generator is included; cargo reads
-static bytes and needs no Python dependency. This is independent composition
-validation, not a captured Apple TV transcript.
+## Validation boundaries and next integration
 
-PR #5 must not wire activity events or ALSA into networking until the blockers
-above are resolved. Keep `audio` independent of receiver connections. The future
-adapter must validate the actual capture rate, convert explicitly to the verified
-codec input, preserve ordered frame indices within one epoch, reject discontinuity,
-and propagate bounded backpressure instead of growing or silently dropping audio.
-Provide deterministic frames to that same adapter first; a mock must use production
-media encoders and the state machine before any claim of encrypted audio success.
-Any eventual new event/media connection must go through the approval boundary
-with validated negotiated ports and authenticated identity binding. No raw socket
-or key API should be exposed to capture/activity code.
+Loopback integration executes production verify, encrypted control/event I/O,
+authenticated port binding, SETUP/RECORD/volume, NTP, actual UDP media, feedback,
+loss/retransmit, FLUSH and TEARDOWN. It independently decodes ALAC and checks the
+signal, RTP progression, nonce counter and sync latency fields. Negative paths
+cover partial setup, bad codec/port/event tag, missing timing, live approval
+revocation, disconnect and repeated sessions. Existing tests retain identity
+mismatch, authorization/selection changes, control framing/replay and no-connect
+read-only coverage. Python plistlib/cryptography fixtures validate the stream
+offer and exact RTP/AEAD bytes; these are synthetic fixtures, not Apple TV captures.
+
+Remaining unsupported behavior has concrete source boundaries: OwnTone's separate
+PTP path uses libairptp and d7 sync, not this NTP path; the pinned sender has no
+active buffered103 or rate-anchor implementation to reproduce. Future PTP or
+buffered support requires its own profile and tests, not relabeling these UDP
+messages. Event variants, NTP acceptance and latency on particular Apple TV or
+HomePod firmware require hardware evidence. No manufacturer compatibility claim.
+
+Future capture/activity integration must explicitly validate/resample the actual
+ALSA rate to 44100 for this profile, propagate discontinuities, preserve bounded
+pre-roll/backpressure and retain the same authorization owner. It must not simply
+connect the default 48000 Hz detector stream or wire silence events into startup.
+The planned capture integration remains a separate milestone.

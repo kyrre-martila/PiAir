@@ -1,5 +1,9 @@
 # Buffered-profile research update (Prompt 4b)
 
+Historical component scope. Prompt 4c adds a separate source-traced realtime
+UDP/NTP profile; it does not enable buffered type 103. See
+[AIRPLAY_REFERENCE_ANALYSIS.md](AIRPLAY_REFERENCE_ANALYSIS.md).
+
 Research decision recorded before implementing the additional components,
 2026-11-07. The existing branch was fetched at `8830ce0`.
 

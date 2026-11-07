@@ -19,12 +19,19 @@ pub fn from_normalized(pcm: [f32; 2]) -> Result<[i16; 2]> {
 /// Apple's 24-byte ALACSpecificConfig, stereo 48 kHz / 16 bit.
 /// This is decoder configuration, not an AirPlay audioFormat/ct offer.
 pub fn cookie() -> [u8; 24] {
+    cookie_for_rate(RATE).expect("fixed supported rate")
+}
+pub fn cookie_for_rate(rate: u32) -> Result<[u8; 24]> {
+    ensure!(
+        [44_100, 48_000].contains(&rate),
+        "unsupported ALAC sample rate"
+    );
     let mut cookie = [0; 24];
     cookie[..4].copy_from_slice(&(MAX_FRAMES as u32).to_be_bytes());
     cookie[5..10].copy_from_slice(&[16, 40, 10, 14, 2]);
     cookie[10..12].copy_from_slice(&255_u16.to_be_bytes());
-    cookie[20..].copy_from_slice(&RATE.to_be_bytes());
-    cookie
+    cookie[20..].copy_from_slice(&rate.to_be_bytes());
+    Ok(cookie)
 }
 
 /// Encode one independently decodable channel-pair element plus END and padding.
@@ -81,14 +88,17 @@ pub(crate) mod tests {
         formats::Packet,
     };
     pub(crate) fn decode(packet: &[u8]) -> Vec<[i16; 2]> {
+        decode_at_rate(packet, RATE)
+    }
+    pub(crate) fn decode_at_rate(packet: &[u8], rate: u32) -> Vec<[i16; 2]> {
         let mut params = CodecParameters::new();
         params
             .for_codec(CODEC_TYPE_ALAC)
-            .with_extra_data(Box::new(cookie()));
+            .with_extra_data(Box::new(cookie_for_rate(rate).unwrap()));
         let mut decoder = AlacDecoder::try_new(&params, &DecoderOptions::default()).unwrap();
         let input = Packet::new_from_slice(0, 0, 0, packet);
         let decoded = decoder.decode(&input).unwrap();
-        assert_eq!(decoded.spec().rate, RATE);
+        assert_eq!(decoded.spec().rate, rate);
         assert_eq!(decoded.spec().channels.count(), 2);
         let mut samples = symphonia_core::audio::AudioBuffer::<i16>::new(
             decoded.capacity() as u64,

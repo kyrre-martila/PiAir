@@ -206,3 +206,34 @@ The committed lockfile adds these packages (and disambiguates existing bitflags
 | bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT | Test decoder dependency |
 | symphonia-codec-alac | 0.5.5 | MPL-2.0 | Independent ALAC decoder in tests |
 | symphonia-core | 0.5.5 | MPL-2.0 | Independent decoder framework in tests |
+
+## Source-traced realtime sender (Prompt 4c)
+
+OwnTone GPL-2.0-or-later implementation source was inspected for externally
+observable protocol facts only, as explicitly authorized. No source was copied,
+mechanically translated, vendored, linked or executed. pyatv and RAOP-Player
+(MIT roots with third-party exceptions) supply additional protocol corroboration;
+no implementation code is incorporated. See AIRPLAY_REFERENCE_ANALYSIS.md for
+exact revisions, function traces and the distinction from a personnel-separated
+clean room. The application remains original Apache-2.0 Rust.
+
+`plist` is MIT and is used for binary-plist encoding/decoding behind PiAir's own
+bounded preflight and typed protocol schemas. Metadata for new locked packages
+was checked with `cargo metadata --format-version 1 --locked --offline`:
+
+| Package | Version | Declared license |
+| --- | --- | --- |
+| base64 | 0.23.1 | MIT OR Apache-2.0 |
+| deranged | 0.5.9 | MIT OR Apache-2.0 |
+| num-conv | 0.2.2 | MIT OR Apache-2.0 |
+| plist | 1.10.3 | MIT |
+| powerfmt | 0.2.1 | MIT OR Apache-2.0 |
+| quick-xml | 0.42.0 | MIT |
+| time | 0.3.55 | MIT OR Apache-2.0 |
+| time-core | 0.1.9 | MIT OR Apache-2.0 |
+| time-macros | 0.2.32 | MIT OR Apache-2.0 |
+
+Some are target/feature resolution dependencies rather than compiled runtime
+code. Existing locked package versions are preserved. Symphonia remains test-only.
+No FFmpeg executable/library or AirPlay sender library is added to production.
+As before, assemble exact license notices before binary redistribution.
