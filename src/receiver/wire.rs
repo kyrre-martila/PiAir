@@ -17,6 +17,8 @@ pub struct Wire {
     deadline: Instant,
     budget: Duration,
     seq: u32,
+    auth_started: Instant,
+    auth_phase: &'static str,
     client_instance: u64,
     active_remote: u32,
     failed: bool,
@@ -79,10 +81,28 @@ impl Wire {
             .find(|ip| ip.is_ipv4())
             .or_else(|| selected.addresses.iter().next())
             .context("receiver has no address")?;
+        tracing::debug!(target: "piair::auth", method = ?selected.method,
+            flags = ?observed.capabilities.flags, features = observed.capabilities.features,
+            acl = ?observed.capabilities.access_control, act = ?observed.capabilities.access_control_type,
+            password_required = ?observed.capabilities.password,
+            protocol = ?observed.capabilities.protocol_version, "authentication receiver policy");
+        for service in &receiver.services {
+            for key in ["model", "am", "osvers", "srcvers", "fv"] {
+                if let Some(value) = service.capabilities.get(key) {
+                    tracing::debug!(target: "piair::auth", field = key, value = %super::diagnostics::metadata(value),
+                        "advertised receiver metadata");
+                }
+            }
+        }
+        let connect_started = Instant::now();
         let socket = TcpStream::connect_timeout(
             &SocketAddr::new(*ip, selected.port),
             Duration::from_secs(3),
         )
+        .inspect_err(|error| {
+            tracing::debug!(target: "piair::auth", phase = "connect", elapsed_ms = connect_started.elapsed().as_millis() as u64,
+                outcome = ?error.kind(), "authentication connection failed");
+        })
         .context("approved receiver connection failed (no retry)")?;
         let mut wire = Self::new(
             socket,
@@ -99,6 +119,8 @@ impl Wire {
             deadline: Instant::now() + budget,
             budget,
             seq: 0,
+            auth_started: Instant::now(),
+            auth_phase: "connect",
             client_instance: rand::random(),
             active_remote: rand::random(),
             failed: false,
@@ -125,6 +147,10 @@ impl Wire {
         method: Method,
     ) -> Self {
         Self::new(socket, budget, id.to_owned(), method)
+    }
+    pub(super) fn auth_phase(&mut self, phase: &'static str) {
+        self.auth_phase = phase;
+        tracing::debug!(target: "piair::auth", phase, method = ?self.method, "authentication phase");
     }
     pub fn method(&self) -> Method {
         self.method
@@ -153,16 +179,24 @@ impl Wire {
     fn read_raw(&mut self, bytes: &mut [u8]) -> Result<()> {
         let mut offset = 0;
         while offset < bytes.len() {
-            self.timeout()?;
+            self.timeout().inspect_err(|_| {
+                tracing::debug!(target: "piair::auth", phase = self.auth_phase, "connection deadline expired");
+            })?;
             let n = self
                 .socket
                 .read(&mut bytes[offset..])
-                .map_err(|error| match error.kind() {
+                .map_err(|error| {
+                    tracing::debug!(target: "piair::auth", phase = self.auth_phase, outcome = ?error.kind(), "connection read failed");
+                    match error.kind() {
                     std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
                         anyhow::anyhow!("receiver read timeout")
                     }
                     _ => anyhow::anyhow!("receiver read failed: kind={:?}", error.kind()),
+                    }
                 })?;
+            if n == 0 {
+                tracing::debug!(target: "piair::auth", phase = self.auth_phase, "peer closed connection");
+            }
             ensure!(n > 0, "truncated receiver response");
             offset += n;
         }
@@ -200,7 +234,9 @@ impl Wire {
         let mut offset = 0;
         while offset < bytes.len() {
             self.timeout()?;
-            let n = self.socket.write(&bytes[offset..])?;
+            let n = self.socket.write(&bytes[offset..]).inspect_err(|error| {
+                tracing::debug!(target: "piair::auth", phase = self.auth_phase, outcome = ?error.kind(), "connection write failed");
+            })?;
             ensure!(n > 0, "receiver write failed");
             offset += n;
         }
@@ -250,6 +286,10 @@ impl Wire {
         Ok(self)
     }
     pub(super) fn close(&mut self) {
+        if !self.failed && self.keys.is_none() {
+            tracing::debug!(target: "piair::auth", phase = self.auth_phase,
+                elapsed_ms = self.auth_started.elapsed().as_millis() as u64, "authentication connection closed locally");
+        }
         self.failed = true;
         self.keys = None;
         self.events = None;
@@ -448,6 +488,7 @@ impl Wire {
         Worker::events(event)
     }
     pub fn post(&mut self, path: &str, body: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        let started = Instant::now();
         let result = (|| {
             ensure!(
                 !self.failed && self.keys.is_none(),
@@ -455,6 +496,10 @@ impl Wire {
             );
             self.post_inner(path, body)
         })();
+        tracing::debug!(target: "piair::auth", phase = self.auth_phase, method = ?self.method,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            total_elapsed_ms = self.auth_started.elapsed().as_millis() as u64,
+            success = result.is_ok(), "authentication exchange completed");
         if result.is_err() {
             self.close();
         }
@@ -471,6 +516,8 @@ impl Wire {
             .checked_add(1)
             .context("request sequence exhausted")?;
         let header=format!("POST {path} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nCSeq: {}\r\nUser-Agent: PiAir/0.1\r\nContent-Type: application/octet-stream\r\nX-Apple-HKP: {}\r\nContent-Length: {}\r\n\r\n",self.socket.peer_addr()?,self.seq,if self.method == Method::Transient { 4 } else { 3 },body.len());
+        tracing::debug!(target: "piair::auth", host = %self.socket.peer_addr()?, "authentication numeric Host");
+        super::diagnostics::request(&header, body.len(), self.auth_phase);
         self.write_message(header.as_bytes())?;
         self.write_message(body)?;
         self.response()
@@ -499,6 +546,9 @@ impl Wire {
             words[1].len() == 3 && words[1].bytes().all(|b| b.is_ascii_digit()),
             "invalid RTSP/HTTP status"
         );
+        if self.keys.is_none() {
+            super::diagnostics::response(text, self.auth_phase);
+        }
         ensure!(
             words[1] == "200",
             "receiver rejected request with status {} (no FairPlay/MFi/password/redirect fallback)",
@@ -948,5 +998,60 @@ mod worker_tests {
         }
         assert!(format!("{:#}", worker.check().unwrap_err()).contains("worker panicked"));
         drop(worker);
+    }
+}
+
+#[cfg(test)]
+mod auth_diagnostic_tests {
+    use super::*;
+    #[test]
+    fn rejection_timeout_and_peer_close_are_safe_and_do_not_retry() {
+        for scenario in ["403", "timeout", "close"] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut peer = listener.accept().unwrap().0;
+            let server = thread::spawn(move || {
+                peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut b = [0];
+                    peer.read_exact(&mut b).unwrap();
+                    request.push(b[0]);
+                }
+                assert!(request.starts_with(b"POST /pair-setup HTTP/1.1\r\n"));
+                let mut body = [0; 12];
+                peer.read_exact(&mut body).unwrap();
+                assert_eq!(&body, b"secret-proof");
+                if scenario == "403" {
+                    peer.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\nSet-Cookie: secret-cookie\r\nX-Unexpected: secret-token\r\n\r\n").unwrap();
+                }
+                if scenario != "close" {
+                    assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+                }
+            });
+            let output = super::super::diagnostics::tests::capture(tracing::Level::DEBUG, || {
+                let mut wire = Wire::mock_method(
+                    socket,
+                    Duration::from_millis(100),
+                    "test",
+                    Method::Transient,
+                );
+                wire.auth_phase("pair-setup M1/M2");
+                assert!(wire.post("/pair-setup", b"secret-proof").is_err());
+                assert!(wire.failed);
+            });
+            server.join().unwrap();
+            assert!(output.contains("authentication exchange completed"));
+            assert!(output.contains("elapsed_ms"));
+            assert!(!output.contains("secret"));
+            assert!(
+                output.contains(match scenario {
+                    "403" => "Forbidden",
+                    "timeout" => "connection read failed",
+                    _ => "peer closed connection",
+                }),
+                "{output}"
+            );
+        }
     }
 }

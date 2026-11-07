@@ -18,6 +18,7 @@ const CAPABILITIES: &[&str] = &[
     "am",
     "srcvers",
     "osvers",
+    "fv",
     "vv",
     "cn",
     "ch",
@@ -334,8 +335,10 @@ mod tests {
             ("model", Some(&b"\xff"[..])),
             ("sr", Some(&b"44\n100"[..])),
             ("pk", Some(&b"never retained"[..])),
+            ("fv", Some(&b"27.2"[..])),
         ]);
-        assert_eq!(txt.len(), 2);
+        assert_eq!(txt.len(), 3);
+        assert_eq!(txt["fv"], "27.2");
         assert!(device_id(&txt["deviceid"]).is_none());
         assert_eq!(txt["features"], "0x1,0x2");
     }
