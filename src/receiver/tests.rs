@@ -80,6 +80,8 @@ enum Fault {
     State,
     Tag,
     Fields,
+    OuterFields,
+    M2Fields,
 }
 fn setup_mock(socket: TcpStream, fault: Fault) {
     setup_mock_profile(socket, fault, Method::PinDisplay, "1234", PI)
@@ -109,6 +111,11 @@ fn setup_mock_profile(
     let mut fields = vec![(STATE, &[2][..]), (SALT, &salt[..]), (PUBLIC_KEY, &b[..])];
     if method == Method::SetupCode {
         fields.push((FLAGS, &[0, 0, 0, 0]));
+    }
+    if matches!(fault, Fault::M2Fields) {
+        fields.push((0, b"synthetic-secret-marker"));
+        reply(&mut socket, 1 + offset, &fields);
+        return;
     }
     reply(&mut socket, 1 + offset, &fields);
     let m3 = Tlv::parse(&request(&mut socket, "/pair-setup")).unwrap();
@@ -204,18 +211,21 @@ fn setup_mock_profile(
         (SIGNATURE, signature.as_slice()),
     ];
     if matches!(fault, Fault::Fields) {
-        fields.push((0, &[0]));
+        fields.push((0, b"synthetic-secret-marker"));
     }
     let sub = encode(&fields);
     let mut encrypted = seal(&encryption, &nonce(b"PS-Msg06"), &sub, &[]).unwrap();
     if matches!(fault, Fault::Tag) {
         encrypted[0] ^= 1;
     }
-    reply(
-        &mut socket,
-        3 + offset,
-        &[(STATE, &[6]), (ENCRYPTED, &encrypted)],
-    );
+    let mut outer = vec![(STATE, &[6][..]), (ENCRYPTED, encrypted.as_slice())];
+    if matches!(fault, Fault::OuterFields) {
+        outer.push((19, b"synthetic-secret-marker"));
+    }
+    reply(&mut socket, 3 + offset, &outer);
+    // Setup consumes the wire on error: no retry, cleanup, or playback request.
+    let mut byte = [0];
+    assert!(matches!(socket.read(&mut byte), Ok(0)));
 }
 #[test]
 fn persistent_pin_setup_verifies_both_proofs_and_identity() {
@@ -227,15 +237,29 @@ fn persistent_pin_setup_verifies_both_proofs_and_identity() {
     server.join().unwrap();
 }
 #[test]
-fn setup_rejects_wrong_pin_proof_signature_identity_state_and_aead() {
-    for fault in [
-        Fault::WrongPin,
-        Fault::Proof,
-        Fault::Signature,
-        Fault::Identity,
-        Fault::State,
-        Fault::Tag,
-        Fault::Fields,
+fn setup_failures_identify_stage_and_preserve_partial_enrollment_warning() {
+    for (fault, stage, partial) in [
+        (Fault::M2Fields, "/pair-setup M2 outer TLV exchange", false),
+        (Fault::WrongPin, "/pair-setup M4 outer TLV exchange", false),
+        (Fault::Proof, "pair-setup M4 SRP proof verification", false),
+        (
+            Fault::Signature,
+            "pair-setup M6 signature verification",
+            true,
+        ),
+        (
+            Fault::Identity,
+            "pair-setup M6 signature verification",
+            true,
+        ),
+        (Fault::State, "/pair-setup M4 outer TLV exchange", false),
+        (Fault::Tag, "pair-setup M6 decryption", true),
+        (Fault::Fields, "pair-setup M6 decrypted payload", true),
+        (
+            Fault::OuterFields,
+            "/pair-setup M6 outer TLV exchange",
+            true,
+        ),
     ] {
         let (wire, server) = local_mock(move |s| setup_mock(s, fault));
         let pin = if matches!(fault, Fault::WrongPin) {
@@ -243,7 +267,25 @@ fn setup_rejects_wrong_pin_proof_signature_identity_state_and_aead() {
         } else {
             "1234"
         };
-        assert!(pairing::setup(wire, ID, Some(PI), || Ok(Zeroizing::new(pin.into()))).is_err());
+        let error = pairing::setup(wire, ID, Some(PI), || Ok(Zeroizing::new(pin.into())))
+            .err()
+            .expect("setup must fail closed");
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains(stage), "missing fixed stage context");
+        assert_eq!(diagnostic.contains("enrollment may be partial"), partial);
+        if matches!(fault, Fault::Fields) {
+            assert!(diagnostic == "enrollment may be partial on the receiver; inspect receiver-side controller records before any explicit retry: pair-setup M6 decrypted payload: unexpected pairing TLV types: [0]");
+        }
+        if matches!(fault, Fault::OuterFields) {
+            assert!(diagnostic.ends_with("unexpected pairing TLV types: [19]"));
+        }
+        // Assertions intentionally never print the diagnostic or fixture values.
+        for forbidden in [pin, PI, ID, "CHANGED-ID", "synthetic-secret-marker"] {
+            assert!(
+                !diagnostic.contains(forbidden),
+                "diagnostic exposed fixture data"
+            );
+        }
         server.join().unwrap();
     }
 }

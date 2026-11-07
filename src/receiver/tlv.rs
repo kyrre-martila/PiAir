@@ -63,9 +63,16 @@ impl Tlv {
         Ok(Some(u32::from_le_bytes(padded)))
     }
     pub fn only(&self, allowed: &[u8]) -> Result<()> {
+        // Report type numbers only. Values may contain credentials or secrets.
+        let unexpected: Vec<u8> = self
+            .0
+            .keys()
+            .copied()
+            .filter(|kind| !allowed.contains(kind))
+            .collect();
         ensure!(
-            self.0.keys().all(|k| allowed.contains(k)),
-            "unexpected pairing fields or authentication method"
+            unexpected.is_empty(),
+            "unexpected pairing TLV types: {unexpected:?}"
         );
         Ok(())
     }
@@ -88,10 +95,9 @@ impl Tlv {
             };
             bail!("receiver rejected pairing/authentication: {reason}; no retry or fallback");
         }
-        ensure!(
-            self.0.keys().all(|k| allowed.contains(k) || *k == STATE),
-            "unsupported pairing fields or method"
-        );
+        let mut allowed = allowed.to_vec();
+        allowed.push(STATE);
+        self.only(&allowed)?;
         Ok(())
     }
 }
@@ -108,6 +114,53 @@ pub fn encode(fields: &[(u8, &[u8])]) -> Zeroizing<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn allowlist_diagnostics_contain_only_sorted_unexpected_type_numbers() {
+        let marker = b"synthetic-secret-marker";
+        let encoded = encode(&[
+            (IDENTIFIER, marker),
+            (PUBLIC_KEY, marker),
+            (SIGNATURE, marker),
+            (19, marker),
+            (0, marker),
+        ]);
+        let payload = Tlv::parse(&encoded).unwrap();
+        let diagnostic = format!(
+            "{:#}",
+            payload
+                .only(&[IDENTIFIER, PUBLIC_KEY, SIGNATURE])
+                .unwrap_err()
+        );
+        // Boolean assertion avoids printing either diagnostic or secret fixture data.
+        assert!(diagnostic == "unexpected pairing TLV types: [0, 19]");
+        let expected = encode(&[
+            (IDENTIFIER, marker),
+            (PUBLIC_KEY, marker),
+            (SIGNATURE, marker),
+        ]);
+        assert!(Tlv::parse(&expected)
+            .unwrap()
+            .only(&[IDENTIFIER, PUBLIC_KEY, SIGNATURE])
+            .is_ok());
+    }
+
+    #[test]
+    fn outer_response_uses_the_same_safe_allowlist_diagnostic() {
+        let encoded = encode(&[
+            (STATE, &[6]),
+            (ENCRYPTED, b"synthetic-secret-marker"),
+            (19, b"private"),
+        ]);
+        let diagnostic = format!(
+            "{:#}",
+            Tlv::parse(&encoded)
+                .unwrap()
+                .response(6, &[ENCRYPTED])
+                .unwrap_err()
+        );
+        assert!(diagnostic == "unexpected pairing TLV types: [19]");
+    }
+
     #[test]
     fn fragmented_and_malformed() {
         let value = [42; 384];
