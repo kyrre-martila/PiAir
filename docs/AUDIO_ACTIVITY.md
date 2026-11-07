@@ -1,7 +1,9 @@
-# Audio activity detector: binding future implementation specification
+# Audio activity detector: binding specification
 
-This document is normative for future detector and session work. Nothing here
-claims current audio capture, monitoring, calibration, or playback support.
+This document is normative for detector and future session work. Capture,
+monitoring, calibration and activity intent are implemented. Actual session
+requests/teardown below remain requirements for a later milestone; this PR emits
+Started/Stopped/Reset intent events only and has no receiver connections.
 
 ## Measurement and parameters
 
@@ -19,8 +21,7 @@ Configuration must expose separate start/stop thresholds and durations. Require
 durations, and validated buffer bounds. Provisional examples: start -45 dBFS,
 stop -55 dBFS, start duration 200 ms, stop duration 5 s, pre-roll 1 s. **Every
 threshold value is provisional until measured on real hardware**, including ADC,
-gain, grounding, cabling, and source volume. These settings are not in the current
-config schema because no detector is implemented yet.
+gain, grounding, cabling, and source volume. These settings now live in the validated `[audio]` TOML table.
 
 ## Finite-state machine
 
@@ -60,8 +61,8 @@ pause may be protocol-required, but are not a substitute for stopping playback.
 
 ## Calibration and monitor CLI
 
-A future `piair audio monitor` (name provisional) must be capture-only and never
-open a receiver connection. Show current per-channel/combined RMS, noise-floor
+`piair audio monitor` is capture-only and must never open a receiver
+connection. Show current per-channel/combined RMS, noise-floor
 summary, thresholds, state, timers, clipping, buffer health, and input errors.
 Tests must cover meter accuracy with known synthetic signals and silence.
 
@@ -108,3 +109,23 @@ calibration, approval on reconnect, bounded queues and retries, and cancellation
 on inactivity. Real hardware acceptance must measure idle noise, quiet music,
 leading-edge preservation, startup latency, and actual receiver playback ending
 within stop duration plus a documented bounded teardown budget.
+
+## Current implementation bounds
+
+See README for exact setting ranges and commands. At 48 kHz, the default one-second
+ring stores 48,000 timestamped stereo f32 frames (768,000 bytes); maximum validated
+retention is ten seconds at 192 kHz (30,720,000 bytes, below 32 MiB). Pre-roll must
+cover start qualification plus one window; actual receiver startup latency is
+unknown. Frame timestamps restart only in a new capture epoch after reset. Events
+and borrowed chronological pre-roll expose future controller inputs without any
+network setup. A future controller must consume Reset as a teardown request and
+track frame indices for a duplicate-free pre-roll/live handoff.
+
+Clipping counts samples at or within one S16 least significant bit of full scale;
+this conservative rule also covers f32 rounding of S32 full-scale values. Capture
+normalizes S16 by 32768 and S32 by 2147483648. Window frames and qualification
+frames round up at the actual negotiated rate; transitions occur only at complete
+window boundaries. Calibration rejects faults rather than bridging capture epochs.
+No session latency, network teardown or receiver playback tests apply until a
+session implementation exists. Hardware noise, USB recovery, shared-device access
+and quiet-music sensitivity remain target-hardware acceptance work.

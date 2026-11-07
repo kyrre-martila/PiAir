@@ -5,3 +5,17 @@ discovery_timeout_secs = 5
 # Example: ["device:aabbccddeeff"]. Advertised IDs are not authenticated identities.
 # Empty means deny every future connection. No receiver is selected by discovery.
 receiver_allowlist = []
+
+[audio]
+# Prefer a stable USB card identifier from 'audio devices' / 'arecord -l'.
+device = "default"
+sample_rate = 48000
+channels = 2
+window_ms = 20
+# Provisional: calibrate with the source stopped, then test quiet music.
+start_threshold_dbfs = -45.0
+stop_threshold_dbfs = -55.0
+start_duration_ms = 200
+stop_duration_ms = 5000
+pre_roll_ms = 1000
+calibration_duration_secs = 30

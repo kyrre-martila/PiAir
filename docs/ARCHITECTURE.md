@@ -2,7 +2,7 @@
 
 PiAir is an original Apache-2.0 implementation targeting Raspberry Pi OS 64-bit
 (Debian aarch64), with development on standard Linux. This milestone implements
-configuration and passive DNS-SD discovery only. AirPlay 2 playback does not work
+configuration, passive DNS-SD discovery and capture-only audio activity tools. AirPlay 2 playback does not work
 yet. No code is copied, translated, or imported from Autostream, OwnTone/OwnTone
 Mini, or airplay2-rs. Those projects may only inform publicly observable behavior
 and protocol understanding. No existing AirPlay sender is a dependency.
@@ -15,9 +15,15 @@ and protocol understanding. No existing AirPlay sender is a dependency.
 - `logging.rs`: JSON diagnostics on stderr, verbosity selected by CLI.
 - `discovery.rs`: mdns-sd browsing, sanitized TXT, snapshot aggregation.
 
-No placeholder audio or session implementations are provided. Future modules
-`audio/capture`, `audio/pcm`, `audio/activity`, and `session` should be introduced
-when they have real behavior and tests. Keep one `piair` executable and eventually
+- `audio/mod.rs`: validated capture/detector settings and capture-only dispatch.
+- `audio/capture.rs`: ALSA hints, signed S16/S32 interleaved negotiation,
+  normalization, nonblocking reads, monitor and bounded same-device recovery.
+- `audio/detector.rs`: pure stereo RMS windows, sample-clock FSM, intent events,
+  validated timestamp continuity and bounded ordered pre-roll.
+- `audio/calibration.rs`: bounded noise statistics/rejection, explicit prompts,
+  comment-preserving TOML threshold edits and temporary-file persistence.
+
+No session implementation is provided. Keep one `piair` executable and eventually
 one systemd service. No web UI, database, Bluetooth, Spotify, media library, or
 Docker requirement belongs in this architecture.
 
@@ -51,15 +57,48 @@ must never be contacted automatically. Pairing will require a later explicit flo
 
 ## Future audio and network lifecycles
 
-Planned data flow:
+Current data flow (no network consumer):
 
 ```text
-ALSA capture -> PCM normalization -> RMS/activity detector -> session/streaming
+ALSA capture -> PCM normalization -> RMS/activity detector -> intent events
                        |                                  ^
                        +---- bounded pre-roll ring --------+
 ```
 
 Capture owns the ALSA handle, sample clock, sample validity, and bounded buffers.
+It requests exact stereo, native S32 (preferred) or S16, and the nearest supported
+rate. Actual rate/format/channels/period/buffer are read back. Unsupported formats,
+non-stereo and rates outside 8..192 kHz fail. ALSA buffers over one second fail.
+Two 2048-sample stack arrays accommodate short reads without per-read allocation.
+The default ring is 768,000 bytes; maximum is 30,720,000 bytes, under 32 MiB.
+A ring entry contains a u64 epoch frame index and two f32 normalized samples.
+Oldest-frame eviction is expected and counted. Reset discards retained PCM and
+partial windows. A future consumer must use frame indices to avoid duplicate
+pre-roll/live handoff; startup latency/leading-edge preservation is unverified.
+
+The detector uses f64 sum-of-squares per channel, maximum-channel dBFS, and exact
+negative infinity for digital silence. Threshold comparisons are inclusive. All
+qualification uses complete contiguous sample windows, rounding frame counts up.
+Events Started/Stopped mean activity intent; Reset means discontinuity, not silence.
+The capture supervisor reports faults and drops the entire epoch, then retries
+at most three times with 250/500/750 ms interruptible backoff. Calibration rejects
+any capture fault rather than recovering into a mixed measurement. No-data waits
+poll every 10 ms and fail after two seconds; post-start scheduler gaps over one
+second also fail. Ctrl+C sets an atomic flag; the ALSA handle closes on return.
+Only the ctrlc crate's signal handler thread is needed; no capture worker/queue
+or async framework is introduced. Monitor statistic scratch buffers are reused.
+
+Calibration retains at most 60,002 window levels plus a sorting copy (under 1 MiB).
+Median/p95 use nearest-rank percentiles. Reject fewer than 50 windows, nonfinite
+or out-of-range levels, clipping, p95-p5 > 6 dB, max-median > 12 dB or p95 > -25
+dBFS. Require at least 90% of the requested duration. Propose p95+6 stop and
+p95+12 start. These conservative heuristics cannot prove a source is stopped;
+explicit stopped-source confirmation and subsequent quiet-music tests are required.
+Only confirmed threshold saves write configuration, preserving TOML decorations,
+checking concurrent edits, syncing a temporary file and renaming it. New files
+use create-if-absent linking. Concurrent replacement in the final check/rename
+interval is not a filesystem compare-and-swap; do not edit the file while saving.
+
 It can run while the network is idle, warming the detector and pre-roll. PCM
 processing defines sample format/channel handling before activity is measured.
 Use a bounded queue between capture and network; network backpressure must never
@@ -82,7 +121,9 @@ must be measured rather than assumed.
 ## Dependencies and diagnostics
 
 Use established crates for standard functions: clap (CLI), serde/toml (config),
-tracing/tracing-subscriber (structured diagnostics), mdns-sd (DNS-SD), anyhow
+tracing/tracing-subscriber (structured diagnostics), mdns-sd (DNS-SD), alsa
+(ALSA bindings), ctrlc (signals), toml_edit (comment-preserving edits), libc
+(errno constants only), anyhow
 (errors). The application forbids unsafe code; dependencies may contain it.
 Dependency metadata screening is recorded in DEPENDENCIES.md against the resolved
 Cargo.lock; review redistribution notices before release. The original repository

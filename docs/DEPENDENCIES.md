@@ -1,9 +1,12 @@
 # Dependency license screening
 
-Generated from `cargo metadata --format-version 1` on GitHub's Linux stable Rust
-runner (Rust 1.99.1), 2026-11-06, with mdns-sd default features disabled. This
-inventory covers the committed Cargo.lock, including target-specific packages
-that are not built on Linux. It records declared licenses, not a source audit.
+Generated from local Linux `cargo metadata --format-version 1 --locked`,
+Rust 1.99.1, 2026-11-07, with mdns-sd default features disabled. This inventory
+covers the committed Cargo.lock, including target-specific packages not built
+on Linux. It records declared licenses, not a source audit. ALSA also links to
+the system libasound library (LGPL-2.1-or-later); preserve applicable library
+license and relinking obligations when distributing it. PiAir adds no manual
+FFI bindings.
 
 The declared choices permit this Apache-2.0 original application to depend on
 these crates; no AirPlay sender implementation is included. Choose MIT or
@@ -21,18 +24,25 @@ screening whenever Cargo.lock changes.
 
 | Package | Version | Declared license |
 | --- | --- | --- |
+| alsa | 0.9.1 | Apache-2.0/MIT |
+| alsa-sys | 0.3.1 | MIT |
 | anstream | 1.0.0 | MIT OR Apache-2.0 |
 | anstyle | 1.0.14 | MIT OR Apache-2.0 |
 | anstyle-parse | 1.0.0 | MIT OR Apache-2.0 |
 | anstyle-query | 1.1.5 | MIT OR Apache-2.0 |
 | anstyle-wincon | 3.0.11 | MIT OR Apache-2.0 |
 | anyhow | 1.0.104 | MIT OR Apache-2.0 |
+| bitflags | 2.13.2 | MIT OR Apache-2.0 |
+| block2 | 0.6.2 | MIT |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 |
+| cfg_aliases | 0.2.2 | MIT |
 | clap | 4.6.7 | MIT OR Apache-2.0 |
 | clap_builder | 4.6.7 | MIT OR Apache-2.0 |
 | clap_derive | 4.6.7 | MIT OR Apache-2.0 |
 | clap_lex | 1.1.1 | MIT OR Apache-2.0 |
 | colorchoice | 1.0.5 | MIT OR Apache-2.0 |
+| ctrlc | 3.5.2 | MIT/Apache-2.0 |
+| dispatch2 | 0.3.1 | Zlib OR Apache-2.0 OR MIT |
 | equivalent | 1.0.3 | Apache-2.0 OR MIT |
 | fastrand | 2.5.0 | Apache-2.0 OR MIT |
 | flume | 0.11.1 | Apache-2.0/MIT |
@@ -49,11 +59,14 @@ screening whenever Cargo.lock changes.
 | mdns-sd | 0.13.11 | Apache-2.0 OR MIT |
 | memchr | 2.8.3 | Unlicense OR MIT |
 | mio | 1.2.4 | MIT |
+| nix | 0.31.3 | MIT |
 | nu-ansi-term | 0.50.3 | MIT |
+| objc2 | 0.6.5 | MIT |
+| objc2-encode | 4.1.0 | MIT |
 | once_cell | 1.21.4 | MIT OR Apache-2.0 |
 | once_cell_polyfill | 1.70.2 | MIT OR Apache-2.0 |
-| piair | 0.1.0 | Apache-2.0 |
 | pin-project-lite | 0.2.17 | Apache-2.0 OR MIT |
+| pkg-config | 0.3.34 | MIT OR Apache-2.0 |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 |
 | quote | 1.0.47 | MIT OR Apache-2.0 |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 |

@@ -5,6 +5,7 @@ use std::{collections::BTreeSet, env, fs, io::ErrorKind, path::PathBuf};
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub audio: crate::audio::Settings,
     pub discovery_timeout_secs: u64,
     pub receiver_allowlist: Vec<String>,
 }
@@ -12,6 +13,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            audio: crate::audio::Settings::default(),
             discovery_timeout_secs: 5,
             receiver_allowlist: Vec::new(),
         }
@@ -53,6 +55,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.audio.validate()?;
         if !(1..=60).contains(&self.discovery_timeout_secs) {
             bail!("discovery_timeout_secs must be between 1 and 60");
         }
