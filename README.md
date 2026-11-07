@@ -258,3 +258,5 @@ never initiate network connections; ALSA/silence/pre-roll integration is deferre
 
 For opt-in safe authentication logs and the HomePod 403 investigation, see
 [AirPlay authentication diagnostics](docs/AUTHENTICATION_DIAGNOSTICS.md).
+
+Controlled hardware diagnostic: [explicit pyatv transient preamble experiment](docs/PYATV_TRANSIENT_PREAMBLE.md), disabled by default; HomePod support remains unverified.

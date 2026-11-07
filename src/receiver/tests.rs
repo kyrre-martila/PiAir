@@ -1780,3 +1780,116 @@ fn transient_pins_authorization_preserves_credentials_and_uses_fresh_secrets() {
     }
     assert_ne!(secrets[0].as_slice(), secrets[1].as_slice());
 }
+
+fn pyatv_preamble_request(socket: &mut TcpStream) {
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut header = Vec::new();
+    while !header.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        socket.read_exact(&mut byte).unwrap();
+        header.push(byte[0]);
+    }
+    assert_eq!(header, b"POST /pair-pin-start HTTP/1.1\r\nUser-Agent: AirPlay/320.20\r\nConnection: keep-alive\r\nX-Apple-HKP: 4\r\nContent-Type: application/octet-stream\r\n\r\n");
+}
+
+#[test]
+fn pyatv_preamble_then_existing_transient_proof_and_encrypted_control() {
+    let (mut wire, server) = local_mock_method(Method::Transient, |mut socket| {
+        pyatv_preamble_request(&mut socket);
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        setup_mock_profile(socket, Fault::None, Method::Transient, "3939", PI);
+    });
+    let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
+        wire.pyatv_transient_preamble().unwrap();
+        let mut session = session::Session::new();
+        session.start_selected(|| Ok(wire), None).unwrap();
+        session.check_control().unwrap();
+        session.stop().unwrap();
+    });
+    server.join().unwrap();
+    assert!(output.contains("pyatv transient preamble"));
+    assert!(output.contains("pair-setup M1/M2"));
+    assert!(!output.contains("3939"));
+}
+
+#[test]
+fn pyatv_preamble_rejection_stops_without_m1_or_fallback_and_logs_safely() {
+    for status in [403, 470, 500] {
+        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
+            pyatv_preamble_request(&mut socket);
+            write!(socket, "HTTP/1.1 {status} secret-reason\r\nContent-Length: 12\r\nSet-Cookie: secret-cookie\r\n\r\nsecret-proof").unwrap();
+            assert_eof(&mut socket);
+        });
+        let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
+            assert!(wire.pyatv_transient_preamble().is_err());
+            assert!(wire.post("/pair-setup", &[]).is_err());
+        });
+        server.join().unwrap();
+        assert!(output.contains(&status.to_string()));
+        assert!(!output.contains("secret"));
+        assert!(!output.contains("pair-setup M1/M2"));
+    }
+}
+
+#[test]
+fn pyatv_preamble_rejects_non_transient_without_request() {
+    let (mut wire, server) = local_mock(|mut socket| assert_eof(&mut socket));
+    assert!(wire.pyatv_transient_preamble().is_err());
+    drop(wire);
+    server.join().unwrap();
+}
+
+#[test]
+fn pyatv_preamble_success_then_m1_rejection_is_safe_and_final() {
+    let (mut wire, server) = local_mock_method(Method::Transient, |mut socket| {
+        pyatv_preamble_request(&mut socket);
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        let m1 = Tlv::parse(&request_method(
+            &mut socket,
+            "/pair-setup",
+            Method::Transient,
+        ))
+        .unwrap();
+        assert_eq!(m1.get(STATE).unwrap(), [1]);
+        assert_eq!(m1.integer(FLAGS).unwrap(), Some(0x10));
+        socket.write_all(b"HTTP/1.1 403 secret-reason\r\nContent-Length: 12\r\nSet-Cookie: secret-cookie\r\n\r\nsecret-proof").unwrap();
+        assert_eof(&mut socket);
+    });
+    let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
+        let mut session = session::Session::new();
+        assert!(session
+            .start_selected(
+                || {
+                    wire.pyatv_transient_preamble()?;
+                    Ok(wire)
+                },
+                None
+            )
+            .is_err());
+        assert_eq!(session.state(), session::State::Failed);
+    });
+    server.join().unwrap();
+    assert!(output.contains("pyatv transient preamble"));
+    assert!(output.contains("pair-setup M1/M2"));
+    assert!(output.contains("403"));
+    assert!(!output.contains("secret"));
+}
+
+#[test]
+fn pyatv_option_rejects_persistent_selection_before_confirmation_or_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+    let store = store::Store::new(&config).unwrap();
+    store.select(&selection(7000)).unwrap();
+    let loaded = crate::config::load(Some(config)).unwrap();
+    let error = pair(&loaded, ID, true, false, true).unwrap_err();
+    assert!(error.to_string().contains("explicit transient selection"));
+    assert!(store.credential(ID).unwrap().is_none());
+}

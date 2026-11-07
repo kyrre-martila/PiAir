@@ -107,7 +107,8 @@ pyatv's preamble is a concrete difference worth a separately authorized experime
 The pinned implementation does not condition it on firmware 27.2 or explain a
 27.2-specific requirement. Neither source inspection nor a 403 establishes that
 adding it would work. PiAir's HKP 3 PIN-start rejection is not a test of pyatv's
-HKP 4 preamble. No alternative preamble is implemented or attempted here. Header,
+HKP 4 preamble. The separately opt-in [controlled preamble experiment](PYATV_TRANSIENT_PREAMBLE.md)
+now implements this exact HKP 4 preamble; the default path remains unchanged. Header,
 protocol and Home access-policy differences remain independent hypotheses.
 
 ## Discovery investigation

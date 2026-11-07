@@ -29,11 +29,20 @@ fn run_with_discovery(
             receiver_id,
             method,
         } => receiver::select(&loaded, &receiver_id, method)?,
-        Command::Pair { receiver_id } => receiver::pair(&loaded, &receiver_id, false, false)?,
+        Command::Pair { receiver_id } => {
+            receiver::pair(&loaded, &receiver_id, false, false, false)?
+        }
         Command::Authenticate {
             receiver_id,
             control_check,
-        } => receiver::pair(&loaded, &receiver_id, true, control_check)?,
+            experimental_pyatv_transient_preamble,
+        } => receiver::pair(
+            &loaded,
+            &receiver_id,
+            true,
+            control_check,
+            experimental_pyatv_transient_preamble,
+        )?,
         Command::StreamTest {
             receiver_id,
             seconds,

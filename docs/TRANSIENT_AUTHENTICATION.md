@@ -1,3 +1,6 @@
+> Optional controlled experiment: [pyatv transient preamble](PYATV_TRANSIENT_PREAMBLE.md).
+> The default flow described below remains unchanged.
+
 # Transient AirPlay authentication
 
 PiAir implements an explicitly selected, connection-scoped HomeKit SRP profile.
@@ -74,7 +77,8 @@ close the channel. No retry, profile cycling, or method fallback occurs.
 
 pyatv differs: it first sends `/pair-pin-start` with HKP 4, then M1/M3. Its pinned
 transient client does not inspect M4's receiver proof. PiAir adopts OwnTone's
-proof verification and does not send pyatv's additional PIN-start request.
+proof verification. The default path does not send pyatv's additional PIN-start request;
+the authenticate-only experiment linked above explicitly opts into it.
 OwnTone can switch to persistent PIN pairing on 470; PiAir deliberately does not.
 Receivers requiring another preamble are unsupported by this implementation.
 
