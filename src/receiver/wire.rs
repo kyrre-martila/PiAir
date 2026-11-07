@@ -17,6 +17,7 @@ pub struct Wire {
     deadline: Instant,
     budget: Duration,
     seq: u32,
+    pyatv_http: bool,
     auth_started: Instant,
     auth_phase: &'static str,
     client_instance: u64,
@@ -119,6 +120,7 @@ impl Wire {
             deadline: Instant::now() + budget,
             budget,
             seq: 0,
+            pyatv_http: false,
             auth_started: Instant::now(),
             auth_phase: "connect",
             client_instance: rand::random(),
@@ -488,7 +490,7 @@ impl Wire {
         Worker::events(event)
     }
     pub fn post(&mut self, path: &str, body: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        self.auth_post(path, body, false)
+        self.auth_post(path, body, self.pyatv_http)
     }
     pub(super) fn pyatv_transient_preamble(&mut self) -> Result<()> {
         ensure!(
@@ -497,13 +499,14 @@ impl Wire {
         );
         self.auth_phase("pyatv transient preamble");
         self.auth_post("/pair-pin-start", &[], true)?;
+        self.pyatv_http = true;
         Ok(())
     }
     fn auth_post(
         &mut self,
         path: &str,
         body: &[u8],
-        pyatv_preamble: bool,
+        pyatv_profile: bool,
     ) -> Result<Zeroizing<Vec<u8>>> {
         let started = Instant::now();
         let result = (|| {
@@ -511,7 +514,7 @@ impl Wire {
                 !self.failed && self.keys.is_none(),
                 "plaintext authentication transport unavailable"
             );
-            self.post_inner(path, body, pyatv_preamble)
+            self.post_inner(path, body, pyatv_profile)
         })();
         tracing::debug!(target: "piair::auth", phase = self.auth_phase, method = ?self.method,
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -526,24 +529,30 @@ impl Wire {
         &mut self,
         path: &str,
         body: &[u8],
-        pyatv_preamble: bool,
+        pyatv_profile: bool,
     ) -> Result<Zeroizing<Vec<u8>>> {
         ensure!(body.len() <= super::tlv::LIMIT, "request body too large");
         ensure!(
             ["/pair-pin-start", "/pair-setup", "/pair-verify"].contains(&path),
             "unsupported authentication endpoint"
         );
-        if !pyatv_preamble {
+        if path != "/pair-pin-start" || !pyatv_profile {
             self.seq = self
                 .seq
                 .checked_add(1)
                 .context("request sequence exhausted")?;
         }
         let header=format!("POST {path} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nCSeq: {}\r\nUser-Agent: PiAir/0.1\r\nContent-Type: application/octet-stream\r\nX-Apple-HKP: {}\r\nContent-Length: {}\r\n\r\n",self.socket.peer_addr()?,self.seq,if self.method == Method::Transient { 4 } else { 3 },body.len());
-        let header = if pyatv_preamble {
-            // Pinned pyatv format_request: no Host/CSeq or length for an absent body.
+        let header = if pyatv_profile {
+            // Pinned pyatv _format_message adds length before supplied headers,
+            // and does not synthesize Host or CSeq. Keep SRP/TLV bytes untouched.
             self.reauthorize()?;
-            "POST /pair-pin-start HTTP/1.1\r\nUser-Agent: AirPlay/320.20\r\nConnection: keep-alive\r\nX-Apple-HKP: 4\r\nContent-Type: application/octet-stream\r\n\r\n".to_owned()
+            let length = if body.is_empty() {
+                String::new()
+            } else {
+                format!("Content-Length: {}\r\n", body.len())
+            };
+            format!("POST {path} HTTP/1.1\r\n{length}user-agent: AirPlay/320.20\r\nconnection: keep-alive\r\nx-apple-hkp: 4\r\ncontent-type: application/octet-stream\r\n\r\n")
         } else {
             tracing::debug!(target: "piair::auth", host = %self.socket.peer_addr()?, "authentication numeric Host");
             header

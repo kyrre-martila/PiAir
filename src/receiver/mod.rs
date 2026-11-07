@@ -200,7 +200,7 @@ pub fn pair(
         "pair requires no existing credentials; authenticate requires stored credentials"
     );
     if pyatv_preamble {
-        println!("Controlled hardware experiment: pyatv transient preamble; no compatibility or HomePod support claim.");
+        println!("Controlled hardware experiment: pyatv transient HTTP profile (preamble, M1, M3); no compatibility or HomePod support claim.");
     }
     print!(
         "{} {id}? Type the exact receiver ID to continue: ",

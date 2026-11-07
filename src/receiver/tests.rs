@@ -33,6 +33,14 @@ fn request(socket: &mut TcpStream, expected: &str) -> Vec<u8> {
     request_method(socket, expected, Method::PinDisplay)
 }
 fn request_method(socket: &mut TcpStream, expected: &str, method: Method) -> Vec<u8> {
+    request_http_profile(socket, expected, method, false)
+}
+fn request_http_profile(
+    socket: &mut TcpStream,
+    expected: &str,
+    method: Method,
+    pyatv: bool,
+) -> Vec<u8> {
     socket
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -45,10 +53,13 @@ fn request_method(socket: &mut TcpStream, expected: &str, method: Method) -> Vec
     let text = String::from_utf8(header).unwrap();
     assert!(text.starts_with(&format!("POST {expected} HTTP/1.1\r\n")));
     assert!(text.contains(&format!(
-        "X-Apple-HKP: {}\r\n",
+        "{}: {}\r\n",
+        if pyatv { "x-apple-hkp" } else { "X-Apple-HKP" },
         if method == Method::Transient { 4 } else { 3 }
     )));
-    assert!(text.contains("Host: 127.0.0.1:"));
+    if !pyatv {
+        assert!(text.contains("Host: 127.0.0.1:"));
+    }
     let length = text
         .lines()
         .find_map(|l| l.strip_prefix("Content-Length: "))
@@ -56,6 +67,16 @@ fn request_method(socket: &mut TcpStream, expected: &str, method: Method) -> Vec
         .trim()
         .parse()
         .unwrap();
+    if pyatv {
+        assert_eq!(text, format!("POST {expected} HTTP/1.1\r\nContent-Length: {length}\r\nuser-agent: AirPlay/320.20\r\nconnection: keep-alive\r\nx-apple-hkp: 4\r\ncontent-type: application/octet-stream\r\n\r\n"));
+    }
+    if !pyatv {
+        let seq = text
+            .lines()
+            .find_map(|line| line.strip_prefix("CSeq: "))
+            .unwrap();
+        assert_eq!(text, format!("POST {expected} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nCSeq: {seq}\r\nUser-Agent: PiAir/0.1\r\nContent-Type: application/octet-stream\r\nX-Apple-HKP: {}\r\nContent-Length: {length}\r\n\r\n", socket.local_addr().unwrap(), if method == Method::Transient {4} else {3}));
+    }
     let mut body = vec![0; length];
     socket.read_exact(&mut body).unwrap();
     body
@@ -78,6 +99,7 @@ fn local_mock(f: impl FnOnce(TcpStream) + Send + 'static) -> (Wire, thread::Join
 }
 #[derive(Clone, Copy)]
 enum Fault {
+    HttpM3,
     None,
     WrongPin,
     Proof,
@@ -115,13 +137,39 @@ fn setup_mock_profile(socket: TcpStream, fault: Fault, method: Method, pin: &str
     });
 }
 fn setup_mock_with_transient(
-    mut socket: TcpStream,
+    socket: TcpStream,
     fault: Fault,
     method: Method,
     pin: &str,
     signed_id: &str,
     transient: impl FnOnce(TcpStream, Zeroizing<[u8; 64]>),
 ) {
+    setup_mock_http(socket, fault, method, pin, signed_id, false, transient)
+}
+#[allow(clippy::too_many_arguments)]
+fn setup_mock_http(
+    mut socket: TcpStream,
+    fault: Fault,
+    method: Method,
+    pin: &str,
+    signed_id: &str,
+    pyatv: bool,
+    transient: impl FnOnce(TcpStream, Zeroizing<[u8; 64]>),
+) {
+    let reply = |socket: &mut TcpStream, seq: u32, fields: &[(u8, &[u8])]| {
+        if pyatv {
+            let body = encode(fields);
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            socket.write_all(&body).unwrap();
+        } else {
+            reply(socket, seq, fields);
+        }
+    };
     let offset = if method.pin_start() {
         assert!(request(&mut socket, "/pair-pin-start").is_empty());
         reply(&mut socket, 1, &[]);
@@ -129,7 +177,13 @@ fn setup_mock_with_transient(
     } else {
         0
     };
-    let m1 = Tlv::parse(&request_method(&mut socket, "/pair-setup", method)).unwrap();
+    let m1 = Tlv::parse(&request_http_profile(
+        &mut socket,
+        "/pair-setup",
+        method,
+        pyatv,
+    ))
+    .unwrap();
     assert_eq!(m1.get(0).unwrap(), [0]);
     assert_eq!(m1.get(STATE).unwrap(), [1]);
     if method == Method::Transient {
@@ -156,7 +210,20 @@ fn setup_mock_with_transient(
         return;
     }
     reply(&mut socket, 1 + offset, &fields);
-    let m3 = Tlv::parse(&request_method(&mut socket, "/pair-setup", method)).unwrap();
+    let m3 = Tlv::parse(&request_http_profile(
+        &mut socket,
+        "/pair-setup",
+        method,
+        pyatv,
+    ))
+    .unwrap();
+    if matches!(fault, Fault::HttpM3) {
+        socket
+            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        assert_eof(&mut socket);
+        return;
+    }
     let a = m3.get(PUBLIC_KEY).unwrap();
     let u = BigUint::from_bytes_be(hash(&[a, &b]).as_ref());
     let shared = server.compute_premaster_secret(
@@ -1791,7 +1858,7 @@ fn pyatv_preamble_request(socket: &mut TcpStream) {
         socket.read_exact(&mut byte).unwrap();
         header.push(byte[0]);
     }
-    assert_eq!(header, b"POST /pair-pin-start HTTP/1.1\r\nUser-Agent: AirPlay/320.20\r\nConnection: keep-alive\r\nX-Apple-HKP: 4\r\nContent-Type: application/octet-stream\r\n\r\n");
+    assert_eq!(header, b"POST /pair-pin-start HTTP/1.1\r\nuser-agent: AirPlay/320.20\r\nconnection: keep-alive\r\nx-apple-hkp: 4\r\ncontent-type: application/octet-stream\r\n\r\n");
 }
 
 #[test]
@@ -1801,7 +1868,25 @@ fn pyatv_preamble_then_existing_transient_proof_and_encrypted_control() {
         socket
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
             .unwrap();
-        setup_mock_profile(socket, Fault::None, Method::Transient, "3939", PI);
+        setup_mock_http(
+            socket,
+            Fault::None,
+            Method::Transient,
+            "3939",
+            PI,
+            true,
+            |mut socket, key| {
+                let mut keys = ControlKeys::new(key.as_ref());
+                keys.swap_directions_for_test();
+                encrypted_request(&mut socket, &mut keys, 3);
+                encrypted_reply(
+                    &mut socket,
+                    &mut keys,
+                    b"RTSP/1.0 200 OK\r\nCSeq: 3\r\nContent-Length: 0\r\n\r\n",
+                );
+                assert_eof(&mut socket);
+            },
+        );
     });
     let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
         wire.pyatv_transient_preamble().unwrap();
@@ -1850,10 +1935,11 @@ fn pyatv_preamble_success_then_m1_rejection_is_safe_and_final() {
         socket
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
             .unwrap();
-        let m1 = Tlv::parse(&request_method(
+        let m1 = Tlv::parse(&request_http_profile(
             &mut socket,
             "/pair-setup",
             Method::Transient,
+            true,
         ))
         .unwrap();
         assert_eq!(m1.get(STATE).unwrap(), [1]);
@@ -1892,4 +1978,28 @@ fn pyatv_option_rejects_persistent_selection_before_confirmation_or_connection()
     let error = pair(&loaded, ID, true, false, true).unwrap_err();
     assert!(error.to_string().contains("explicit transient selection"));
     assert!(store.credential(ID).unwrap().is_none());
+}
+
+#[test]
+fn pyatv_m3_rejection_and_invalid_proof_are_final() {
+    for fault in [Fault::HttpM3, Fault::Proof] {
+        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
+            pyatv_preamble_request(&mut socket);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            setup_mock_http(
+                socket,
+                fault,
+                Method::Transient,
+                "3939",
+                PI,
+                true,
+                |_, _| panic!("rejection must stop"),
+            );
+        });
+        wire.pyatv_transient_preamble().unwrap();
+        assert!(pairing::transient(wire).is_err());
+        server.join().unwrap();
+    }
 }
