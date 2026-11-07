@@ -2289,6 +2289,39 @@ fn owntone_client_identity_is_stable_private_and_independent_of_credentials() {
 }
 
 #[test]
+fn full_width_selection_features_persist_and_legacy_selections_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let store = store::Store::new(&config).unwrap();
+    for features in [(i64::MAX as u64) + 1, u64::MAX] {
+        let mut selected = selection(7000);
+        selected.capabilities.features = features;
+        store.select(&selected).unwrap();
+        assert!(store.selection().unwrap().as_ref() == Some(&selected));
+        assert!(
+            store::Store::new(&config)
+                .unwrap()
+                .selection()
+                .unwrap()
+                .as_ref()
+                == Some(&selected)
+        );
+    }
+    let mut selected = selection(7000);
+    selected.capabilities.features = 1 << 46;
+    let text = toml::to_string(&selected).unwrap();
+    let legacy = text.replace(
+        "features = \"0000400000000000\"",
+        "features = 70368744177664",
+    );
+    assert_ne!(legacy, text);
+    let path = dir.path().join("receiver-state/selected.toml");
+    std::fs::write(&path, &legacy).unwrap();
+    assert!(store.selection().unwrap().as_ref() == Some(&selected));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), legacy);
+}
+
+#[test]
 fn owntone_profile_rejects_persistent_method_without_a_request() {
     let (mut wire, server) =
         local_mock_method(Method::SetupCode, |mut socket| assert_eof(&mut socket));

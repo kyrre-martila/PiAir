@@ -6,6 +6,25 @@ The explicit option is `--experimental-owntone-transient`. Default CLI/config,
 persistent HAP enrollment/pair-verify, and the labeled pyatv diagnostic remain
 unchanged. This profile is restricted to `authenticate`, never `stream-test`.
 
+## Local identity storage
+
+`receiver-state/client-identity.toml` stores the full random 64-bit `client` as
+exactly 16 uppercase hexadecimal digits in a TOML string; `remote` remains a
+nonzero 32-bit integer. Existing nonzero numeric client identities are read
+without rewriting or regenerating them. Invalid files fail closed and require
+explicit investigation; they are never silently replaced. The existing owned
+0700 directory, 0600 file checks and atomic no-clobber creation still apply.
+Wire `Client-Instance` and `DACP-ID` retain uppercase hexadecimal formatting
+without added leading zeroes, independently of the fixed-width storage format.
+
+Initialization audit: saved selection `capabilities.features` also spans all
+64 bits and uses the same lossless string format with legacy numeric reads.
+The remaining persisted unsigned values fit TOML integers: `remote` and status
+flags are at most 32 bits, configuration durations are validated with small
+bounds, and nonzero `acl`/`act` values are rejected before selection is saved.
+Credentials contain strings, a version byte and byte arrays. Session counters,
+random wire identifiers and binary-plist integers are not serialized to TOML.
+
 ## Verified reference
 
 All references below are to OwnTone commit
