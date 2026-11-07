@@ -16,6 +16,7 @@ pub struct Credential {
     pub version: u8,
     pub receiver_id: String,
     pub pairing_id: String,
+    pub advertised_pi: Option<String>,
     pub controller_id: String,
     pub seed: [u8; 32],
     pub receiver_key: [u8; 32],
@@ -24,11 +25,15 @@ impl Credential {
     pub fn validate(&self, id: &str) -> Result<()> {
         super::exact_id(id)?;
         ensure!(
-            self.version == 1 && self.receiver_id == id,
-            "credential version/receiver mismatch"
+            self.version == 2 && self.receiver_id == id,
+            "credential version/receiver mismatch; old PR #3 credentials require explicit unpair and re-enrollment"
         );
         ensure!(
             super::valid_pairing_id(&self.pairing_id)
+                && self
+                    .advertised_pi
+                    .as_deref()
+                    .is_none_or(super::valid_pairing_id)
                 && uuid::Uuid::parse_str(&self.controller_id).is_ok(),
             "invalid credential identifiers"
         );

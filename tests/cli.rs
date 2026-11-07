@@ -215,3 +215,19 @@ fn approved_pairing_refuses_piped_input_and_local_commands_do_not_connect() {
     }
     assert!(!dir.path().join("receiver-state").exists());
 }
+
+#[test]
+fn pairing_profile_is_explicit_and_never_auto_negotiated() {
+    for method in ["pin-display", "setup-code", "transient"] {
+        let output = run(&["select", "device:aabbccddeeff", "--method", method]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unapproved"));
+    }
+    assert_eq!(
+        run(&["select", "device:aabbccddeeff", "--method", "auto"])
+            .status
+            .code(),
+        Some(2)
+    );
+    assert!(String::from_utf8_lossy(&run(&["select", "--help"]).stdout).contains("setup-code"));
+}

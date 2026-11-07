@@ -1,117 +1,186 @@
-# Receiver identity and authentication foundation
+# Receiver pairing, identity and compatibility
 
-This is independently written protocol composition, not an AirPlay sender library.
-No source from OwnTone, Autostream, airplay2-rs, or any other AirPlay sender was
-copied, translated or incorporated. Research used protocol documentation and
-published numerical test vectors; discovery and audio code were inspected before
-implementation. No real receiver was contacted during development.
+PR #3 implements independently written persistent HAP pairing and pair-verify,
+not AirPlay audio transport. No sender implementation source from OwnTone,
+Autostream, airplay2-rs or other projects is copied, translated or incorporated.
+Protocol documentation, public wire observations and numerical test vectors are
+used as evidence. **No real receiver has been contacted or validated by PiAir.**
 
-## Research and evidence
+## Evidence ledger
 
-Sources consulted 2026-11-07:
+Research reviewed 2026-11-07. These evidence levels must not be conflated.
 
-- [Apple HomeKit Accessory Protocol specification, non-commercial R2,
-  2019-07-26 (public mirror)](https://forum.iobroker.net/assets/uploads/files/1634848447889-apple-spezifikation-homekit.pdf),
-  sections 5.5–5.10: SRP profile/test vectors, setup, verify, TLV8 and session
-  security. This describes HAP, **not a universal AirPlay interoperability promise**.
-- [Independently documented AirPlay discovery](https://openairplay.github.io/airplay-spec/service_discovery.html):
-  device ID, low/high feature words, pairing identifier `pi`, and authentication
-  advertisements. [Feature assignments](https://openairplay.github.io/airplay-spec/features.html)
-  distinguish buffered audio, PTP, system/HK/transient pairing and MFi.
-- [HomeKit-based AirPlay pairing and control encryption](https://openairplay.github.io/airplay-spec/pairing/hkp.html):
-  distinguishes persistent and transient paths. This is an incomplete unofficial
-  description; it does not establish firmware-specific endpoint/header behavior.
-- [Apple Platform Security overview](https://help.apple.com/pdf/security/en_US/apple-platform-security-guide.pdf):
-  cryptographic background, not an AirPlay endpoint specification.
-- [RFC 5054](https://www.rfc-editor.org/rfc/rfc5054) (3072-bit group),
-  [RFC 5869](https://www.rfc-editor.org/rfc/rfc5869) (HKDF),
-  [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439) (ChaCha20-Poly1305),
-  [RFC 7748](https://www.rfc-editor.org/rfc/rfc7748) (X25519),
-  [RFC 8032](https://www.rfc-editor.org/rfc/rfc8032) (Ed25519).
+### Public specifications: verified protocol definitions
 
-The HAP numerical fixture in `tests/fixtures/hap-srp.toml` contains test data from
-section 5.5.2, not implementation source. It checks public A and session K against
-Apple's values independently of the mock. The `srp` crate's convenience proof is
-not HAP-compatible: PiAir uses its arithmetic API, padded A/B scrambling parameter,
-SHA-512(S), and the HAP identity-bound proof composition. SHA-512, HKDF, signatures,
-DH, AEAD, random generation and constant-time comparison use established crates.
-No custom hash, cipher, curve or modular exponentiation primitive is implemented.
+- **[HAP R2, 2019-07-26, public mirror](https://forum.iobroker.net/assets/uploads/files/1634848447889-apple-spezifikation-homekit.pdf)**:
+  §5.5 defines SRP-6a 3072/SHA-512 and numerical vectors; §5.6 defines persistent
+  setup including a displayed or existing setup code, and transient completion at
+  M4; §5.7 defines pair-verify; §5.9 defines AEAD; §5.15 tables 5-3/5-6/5-7 define
+  methods, TLVs, and transient/split flags. §5.6.6 authenticates the identifier
+  delivered inside M6, then saves it with the receiver public key. It does **not**
+  specify equality with AirPlay mDNS `pi`. HAP specifies HTTP endpoints; it is not
+  a specification of every Apple TV/HomePod AirPlay firmware behavior.
+- [RFC 5054](https://www.rfc-editor.org/rfc/rfc5054),
+  [RFC 5869](https://www.rfc-editor.org/rfc/rfc5869),
+  [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439),
+  [RFC 7748](https://www.rfc-editor.org/rfc/rfc7748), and
+  [RFC 8032](https://www.rfc-editor.org/rfc/rfc8032) specify the standard group,
+  HKDF, AEAD and curve/signature primitives. Rust crates supply those primitives.
+- [Apple's HomePod access documentation](https://support.apple.com/en-gb/guide/homepod/apdb68d3dec5/homepod)
+  documents network/Home membership restrictions and optional speaker passwords.
+  An AirPlay password, Home membership and a HAP setup code are different concepts;
+  this guide does not specify their on-wire implementation.
 
-## Implemented profile and exact gaps
+### Independently documented behavior and implementation reports
 
-Implemented: one deliberately narrow persistent HAP profile: explicitly requested
-PIN display, method 0 (Pair Setup), SRP-6a 3072/SHA-512 M1–M4, AEAD and mutually
-signed identity exchange M5–M6, then a separately invoked X25519/Ed25519 pair-verify
-M1–M4. Control read/write key derivation and 1..1024-byte authenticated framing
-are implemented/tested but not connected to an application request transport.
-No audio session, GET /info, SETUP, RECORD, media keys, timing or streaming exists.
+- [AirPlay discovery fields](https://openairplay.github.io/airplay-spec/service_discovery.html),
+  [feature assignments](https://openairplay.github.io/airplay-spec/features.html),
+  and [status flags](https://openairplay.github.io/airplay-spec/status_flags.html)
+  describe bit 38 (CoreUtils), 43 (system), 46 (HK/access control), 48 (transient)
+  and 51 (unified pairing/MFi), plus PIN/password/access-control metadata. These
+  are unofficial mappings, not cryptographically authenticated negotiation.
+- [HomeKit-based AirPlay pairing](https://openairplay.github.io/airplay-spec/pairing/hkp.html)
+  documents persistent versus transient key sources and MFi material. Bit 51
+  advertises a capability: it does not establish that every operation must use
+  MFi, nor that method 0 is always safe/accepted. PiAir conservatively blocks that
+  unresolved policy rather than silently bypassing attestation.
+- [Public AirPlay pairing wire transcript](https://github.com/openairplay/ap2-sender/blob/master/pairing.txt)
+  records PIN-start, setup and verify with HKP 3 and HTTP responses. Only protocol
+  observations were consulted; no implementation or transcript payloads are
+  incorporated. The capture is evidence for that exchange, not all firmware.
+- [pyatv protocol documentation, AirPlay 2 authentication](https://pyatv.dev/documentation/protocols/#airplay-2)
+  describes multiple HAP-based paths and labels parts of its AirPlay description
+  incomplete. Its account is not a device/version conformance specification.
+- [cidermill-airplay 0.1.5 pairing documentation](https://docs.rs/cidermill-airplay/0.1.5/cidermill_airplay/pairing/index.html)
+  reports transient rejection by tested Apple TVs, a HomePod mini success with an
+  iPhone-shaped request, and hardware pair-verify using a Companion-derived
+  credential. These are the author's reports, not PiAir hardware validation.
+  [Its documented wire-profile comparison](https://docs.rs/cidermill-airplay/0.1.5/cidermill_airplay/pairing/enum.TransientStyle.html)
+  describes differing HKP values, content types, flags and preliminary abandoned
+  verifies. No source implementation was inspected or copied.
+- [UxPlay's receiver-side crypto account](https://github.com/FDH2/UxPlay/wiki/crypto)
+  documents a different legacy path, including AES-CTR. A similarly named
+  `/pair-setup` endpoint does not make legacy and HAP interchangeable.
 
-The selected profile requires an `_airplay._tcp` advertisement with well-formed
-features, HK pairing/access-control bit 46, no MFi bit 51, and a printable `pi`.
-Bit 40 is reported only as an **advertised buffered-audio capability**. Model names,
-AirPlay version strings and feature flags never establish verified compatibility.
+### Unresolved assumptions and blockers
 
-The wire profile sends POSTs using RTSP/1.0, CSeq, `X-Apple-HKP: 3`, and
-`application/octet-stream`. It accepts bounded HTTP/1.1 or RTSP/1.0 200 responses
-with explicit Content-Length (RTSP requires matching CSeq). These AirPlay-specific
-header/PIN-start choices are an interoperability assumption pending hardware
-captures; local mocks verify this profile, not that Apple firmware accepts it.
-Unexpected TLV fields, alternate methods and protocol variants are rejected,
-including a receiver attempting to add MFi material during setup.
+There is no basis for selecting an authentication method solely from “Apple TV”,
+“HomePod”, “HomePod mini”, model/version text, name or IP. Modern Apple TVs are
+candidates for persistent HAP/verify, but firmware and receiver policy may require
+other enrollment. Companion-derived credentials in a report do not establish
+AirPlay PIN enrollment. Companion enrollment/import is not implemented here.
 
-| Intended receiver path | Evidence and remaining gap |
-| --- | --- |
-| Apple TV advertising persistent HK pairing | Candidate for this PIN profile. Requires controlled tests of `/pair-pin-start`, HKP header, method 0, framing and signed pairing ID equal to selected `pi`. Some firmware may use a MAC identifier instead, require MFi/method 1, or implement legacy device verification. Those variants fail closed. No Apple TV model or tvOS version is verified. |
-| HomePod advertising persistent HK pairing and providing a usable PIN | Same candidate profile, unverified. HomePod has no screen; PiAir cannot assume that PIN display or this enrollment path is available. |
-| HomePod exposing only system/transient pairing | Unsupported. Transient setup ends after SRP M4, commonly using a fixed code; it does not exchange durable signed receiver identity/credentials. Treating its shared secret as persistent authenticated identity would violate this milestone's identity binding. A separate explicitly authorized transient session design, firmware evidence and accurate trust semantics are needed. No fixed PIN is silently attempted. |
-| MFi, legacy Apple TV verification, FairPlay, RSA/Digest/password-only auth | Unsupported. No MFi certificate-chain validation, legacy plist/SRP profile, `/fp-setup` or `/auth-setup` implementation. No downgrade or unauthenticated fallback. |
+HomePod/mini commonly motivate transient pairing, but there is no sufficiently
+validated single AirPlay transient wire profile in PiAir. HAP defines its SRP
+semantics; it does not define AirPlay's HKP/header/probe variants. This is the
+reason transient remains unsupported, **not** a claim that SRP is unimplementable
+or that transient sessions inherently require persistent identity. PiAir does not
+send speculative abandoned verifies, try fixed codes, or cycle variants.
+The comparison specifically distinguishes classic HKP 1 from an observed HKP 4
+profile preceded by abandoned HKP 6/3 verifies. These are wire-mode choices,
+not HAP specification revision numbers.
 
-Split pairing, TLV transport fragmentation/lists, group/stereo HomePod enrollment,
-pairing administration and encrypted control I/O are also unimplemented. The
-precise gap is firmware-specific method negotiation and identity mapping, not
-missing placeholder success responses. Do not infer these variants from a display
-name or keep trying endpoints until something responds.
+The setup-code profile below is a valid HAP enrollment mechanism, not a claim
+that HomePod supplies a usable printed code or permits that enrollment. Home
+access restrictions, MFi policy, and password-to-protocol mapping remain blockers.
+No protocol-model mapping or hardware compatibility is claimed from mock success.
+MFi attestation and FairPlay sender/media setup are distinct from HAP enrollment;
+passing HAP alone does not prove that a future encrypted audio setup can proceed.
+Neither MFi nor FairPlay is implemented.
 
-## Approval and identity rules
+## Compatibility matrix
 
-1. `devices`/`receivers` perform only bounded passive DNS-SD browsing. The Samsung
-   TV and all other unapproved devices receive **no direct connection**. No active
-   receiver probing is performed by any discovery/status/config/audio command.
-2. Independently verify the physical receiver and its canonical
-   `device:<12 lowercase hex digits>`, then explicitly edit `receiver_allowlist`.
-   An empty list denies everything. No CLI name/IP/hostname substitution exists.
-3. `select <id>` requires that allowlist entry. It pins the exact discovered
-   address set, port, pairing ID and feature bits in local selection state.
-   It does not connect, authenticate, play, or grant allowlist approval.
-4. Pair/authenticate require an interactive terminal and typing the exact selected
-   ID. Pair additionally prompts for a hidden PIN from the physical receiver.
-   EOF/piped input cannot approve pairing. PINs are never accepted as CLI arguments.
-5. Immediately before a socket, `Wire::connect` reloads the exact config file,
-   verifies current approval and stored selection, compares the fresh passive
-   snapshot, and rejects conflicting identities sharing an address. It accepts
-   literal pinned addresses only; there is **no hostname/DNS resolution path**.
-6. Choose a deterministic IPv4 address when available, otherwise the first IPv6
-   address. Make one connection attempt. No address fallback, redirects or retries.
-   IPv6 link-local addresses needing a scope ID are currently unsupported.
-7. PIN-authenticated setup verifies the signed identifier equals the selected
-   pairing ID before returning credentials. Pair-verify uses the stored receiver
-   public key and exact pairing ID. A new key/identity cannot silently replace it.
+All categories below require real hardware validation before compatibility claims.
 
-Advertisements remain untrusted. Approval is user intent; PIN enrollment is the
-initial cryptographic binding, not a manufacturer attestation. A spoofed ad can
-cause denial of service or direct the **user-approved** enrollment endpoint to an
-attacker, but cannot finish without the PIN proof and matching signed ID. Verify
-the physical PIN source. A repeated forged stable ID on another endpoint is
-rejected when ambiguous; an endpoint change requires explicit reselection.
+| Receiver / protocol category | Requested method | Implementation | Authentication guarantee | Persistent credentials | Hardware validation |
+| --- | --- | --- | --- | --- | --- |
+| HK bit 46, no bit 51, usable displayed PIN; Apple TV candidate | `pin-display` | Implemented: PIN-start + persistent method 0 M1–M6 | Physical PIN-authenticated signed ID/key enrollment | Yes, after verified M6 | Required; no tvOS/model verified |
+| Same HK category with an independently obtained existing HAP code | `setup-code` | Implemented: method 0 M1–M6 without PIN-start | Code-authenticated signed ID/key enrollment | Yes, after verified M6 | Required; usable HomePod code not established |
+| Previously enrolled receiver passing the current capability policy | Same selected persistent profile; `authenticate` | Implemented: pair-verify M1–M4 | Stored receiver ID/key, fresh X25519 and mutual signatures | Reads existing; never replaces on verify | Required; no live session retained |
+| System/transient bits 43/48; HomePod/mini candidate | `transient` | Recognized, rejected before connection | None in PiAir; generic SRP would prove a code, not durable identity | Never from transient | Required; wire-profile blocker above |
+| Bit 51, with or without bit 46 | Unified/MFi or policy-specific | Unsupported; no inference that MFi is universally mandatory | No MFi chain/attestation validation | No new enrollment | Required |
+| CoreUtils 38 only, legacy bit 27, unknown combinations, password/Home access restrictions | Unresolved / legacy / FairPlay | Unsupported; no fallback | None | No new enrollment | Required |
 
-Current approval is checked before **each** connection, including authenticate.
-There are no background retries/reconnections. Revocation is observed at connection
-and before saving enrollment, not by a background watcher; an already open short
-handshake is not instantly terminated by editing TOML. Future streaming must own
-an authorized `Wire`, add live session revocation policy as needed, and never open
-an arbitrary receiver socket. The private socket cannot be extracted from Wire.
+Bit 40 (buffered audio) is reported only as an advertised playback-related feature;
+it is not a pairing decision, verified compatibility, or successful audio session.
+HKP 3 is an AirPlay header choice, HAP R2 is the referenced specification revision,
+and advertised `protovers` is another field. They are not interchangeable versions.
 
-## Sequences and state
+## Explicit method decision and wire behavior
+
+`compatibility::Capabilities` parses feature aliases numerically, bounded status
+flags, exact password booleans, decimal ACL and protocol version. Malformed fields
+cannot disappear into permissive defaults. Contradictory aliases or password
+signals fail closed. Unknown non-pairing feature bits remain uninterpreted data.
+Missing/unsupported pairing evidence never becomes a default successful method.
+
+`Capabilities::decide(requested)` is a pure, tested local policy. It never searches
+for another method. Both persistent profiles require bit 46 without bit 51.
+Bit 38/43/48 alone is insufficient evidence for persistent enrollment. Password
+requirements, nonzero ACL and unknown protocol versions are refused; missing
+optional metadata is retained as unknown, not proof of unrestricted access.
+`protovers` 1.0/1.1 or absent is permitted for this candidate profile only.
+These conservative restrictions are PiAir policy, not invented protocol mandates.
+
+Selection persists the requested method, full parsed capability snapshot,
+optional advertised `pi`, stable ID, exact address set and port. The live boundary
+rechecks that policy and snapshot immediately before every connection. A selected
+method cannot change silently. `receivers` displays decisions/rejection reasons
+without probing. `select --method transient` is an explicit unsupported-method
+error, not an automatic fallback option. There is no `auto` method.
+
+Authentication POSTs use HTTP/1.1, numeric pinned Host, persistent connection,
+CSeq, HKP 3 and octet-stream TLV8. Responses accept the existing bounded HTTP/RTSP
+200 framing, with matching CSeq when supplied (mandatory for RTSP). No HTTP/RTSP
+request retry or header-version negotiation occurs. This corrects the earlier
+RTSP-only request assumption; firmware acceptance still needs controlled tests.
+HAP's URL table does not define `/pair-pin-start`; the AirPlay capture does not
+make that request mandatory for every HAP accessory. Encrypted application
+control I/O is not implemented.
+
+`pin-display` requests `/pair-pin-start`, then asks for 4..8 digits after M2.
+`setup-code` goes directly to `/pair-setup`, then asks for an existing
+`XXX-XX-XXX` code, preserving the dashes in SRP. It never tries PIN-start after a
+failure. Both send method 0 and require full M6. Optional zero flags in M2 are
+accepted; transient/split/unknown flags, extra MFi material, bad states/proofs,
+and unexpected nested fields are rejected. No M4-only exchange returns credentials.
+
+## Identity and approval boundary
+
+The authorization identity is still the exact canonical
+`device:<12 lowercase hex digits>`. Display names, hosts, IPs and unverified
+service IDs cannot replace it. Approval is explicit `receiver_allowlist` editing;
+selection does not grant approval. All network operations require interactive
+exact-ID confirmation and currently approved selection. No status/config/audio
+command opens receiver connections. Discovery is passive DNS-SD, with no probing.
+**Samsung The Frame and every other unapproved receiver are never contacted.**
+
+The private `Wire` owns the sole production TCP connect, taking literal pinned
+addresses only (no hostname/DNS path). It reloads current approval and persisted
+selection, rejects changed/ambiguous IDs and endpoints, and makes one bounded
+connection attempt. No redirects, retries, alternate addresses or unauthenticated
+fallback. IPv6 link-local scope handling is unsupported. Shared-address conflicting
+advertisements cause rejection. Full status/capability changes can also require
+explicit reselection; that strict policy may cause false refusals.
+
+Advertised `pi` is optional, untrusted discovery metadata, pinned for change
+detection. It is **not** used as an authenticated identifier or mandatory expected
+M6 value. After verifying SRP, M6 AEAD and the receiver signature, PiAir enrolls the
+actual case-sensitive signed identifier/key under the approved stable device ID.
+Its bounded identifier policy currently accepts ASCII letters/digits/colon/dash;
+other HAP UTF-8 identifier forms remain unsupported. Pair-verify requires that
+exact enrolled identifier and public key, independent of advertised `pi`. A
+changed signed identifier or key is an error, never credential replacement.
+
+The initial physical PIN/code proves knowledge at the approved endpoint; it does
+not cryptographically prove an mDNS MAC address or manufacturer identity. If mDNS
+is spoofed during initial enrollment, user approval and the independently obtained
+physical code are the trust anchor. After enrollment, stored key verification
+protects against endpoint impersonation. A changed advertised `pi` requires
+investigation and explicit local unpair/re-enrollment; endpoint reselection alone
+cannot change the enrolled identity. Do not paste a code from an unverified host.
+
+## Sequences, timeouts and secret lifetime
 
 ```mermaid
 sequenceDiagram
@@ -119,123 +188,126 @@ sequenceDiagram
     participant CLI
     participant Boundary as Approval boundary
     participant R as Selected receiver
-    User->>CLI: allowlist exact ID; select ID (passive only)
+    User->>CLI: approve stable ID; select explicit persistent method
     User->>CLI: pair ID; type exact ID
-    CLI->>Boundary: current config + selection + fresh snapshot
-    Boundary->>R: one bounded TCP connect
-    CLI->>R: POST /pair-pin-start
-    CLI->>R: /pair-setup M1 (method 0)
-    R-->>CLI: M2 salt + SRP public B
-    User->>CLI: hidden physical PIN
-    CLI->>R: M3 public A + client proof
-    R-->>CLI: M4 server proof
-    Note over CLI: verify SRP proof
-    CLI->>R: M5 encrypted controller ID/key/signature
-    R-->>CLI: M6 encrypted receiver ID/key/signature
-    Note over CLI: verify AEAD, expected ID, Ed25519 signature
-    CLI->>CLI: recheck approval; atomically save credentials
-    Note over CLI,R: socket closes; no audio session
+    CLI->>Boundary: reload approval, selection and passive snapshot
+    Boundary->>R: one bounded TCP connection
+    opt selected pin-display only
+        CLI->>R: POST /pair-pin-start
+    end
+    CLI->>R: /pair-setup M1 method 0
+    R-->>CLI: M2 salt, B, optional zero flags
+    User->>CLI: hidden physical PIN or existing setup code
+    CLI->>R: M3 A + proof
+    R-->>CLI: M4 receiver proof
+    Note over CLI: verify proof; never treat M4 as persistent success
+    CLI->>R: M5 AEAD(controller ID, key, signature)
+    R-->>CLI: M6 AEAD(actual receiver ID, key, signature)
+    Note over CLI: verify AEAD + signature; enroll actual signed ID, not pi
+    CLI->>CLI: recheck approval/selection; save version 2 credentials
+    Note over CLI,R: close socket; no audio session
 ```
 
 ```mermaid
 sequenceDiagram
     actor User
     participant CLI
-    participant Boundary as Approval boundary
-    participant R as Selected receiver
+    participant R as Currently approved receiver
     User->>CLI: authenticate ID; type exact ID
-    CLI->>Boundary: reload approval, selection and passive snapshot
-    Boundary->>R: one bounded TCP connect
-    CLI->>R: /pair-verify M1 fresh X25519 public key
-    R-->>CLI: M2 ephemeral key + AEAD(receiver ID/signature)
-    Note over CLI: reject zero DH; verify stored ID/key and signature
+    Note over CLI: current boundary, capability and discovery checks
+    CLI->>R: pair-verify M1 fresh X25519 key
+    R-->>CLI: M2 ephemeral key + AEAD(signed receiver ID)
+    Note over CLI: require stored ID/key; reject zero DH, signature/tag failures
     CLI->>R: M3 AEAD(controller ID/signature)
     R-->>CLI: M4 success
-    Note over CLI: authenticated exchange succeeded; derive control keys
-    Note over CLI,R: socket closes and session keys drop; no playback
+    Note over CLI: derive directional control keys; close socket and drop keys
 ```
 
-`discovered`, `approved`, `selected` and `paired` are independent local facts.
-`paired` means validated stored enrollment material, not current liveness or
-successful authentication. `receivers` always reports authenticated=false and
-connected=false for that invocation. `authenticate` reports success only after
-pair-verify M4 and immediately closes. There is no retained connected state.
+`discovered`, `approved`, `selected`, and `paired` are separate facts. `paired`
+means valid stored enrollment, not current authentication/liveness. Read-only
+commands never claim authenticated/connected. Only completed pair-verify reports
+an authenticated exchange, then closes immediately. Playback remains unimplemented.
 
-Every I/O operation has a 3-second limit and the automated handshake has a
-15-second deadline per automated phase, recalculated between partial reads/writes to defeat trickle
-traffic. Interactive user think time is excluded; the deadline restarts after PIN
-entry. Connect has a 3-second timeout. State functions execute linearly, reject
-wrong state/error TLVs, and own the socket, closing it on success and failure.
-Messages/headers cap at 8 KiB. Empty/duplicate/invalid TLV fields, invalid SRP and
-X25519 keys, bad signatures/tags and unsupported response framing fail closed.
-Control framing poisons and wipes its keys on any failure; no reuse after errors.
+Connect and each I/O are limited to 3 seconds; automated phases have 15-second
+absolute deadlines, recalculated for partial I/O. User PIN think time is excluded.
+Messages/headers are bounded at 8 KiB. Owning handshake APIs close the socket on
+success/error. Failed wire/control framing is poisoned; no retry/reuse after
+failure. Owned secret storage is zeroized; the PIN drops immediately after SRP
+calculation. No payload/private-key/PIN logs or secret Debug implementations.
+Complete process-memory erasure is not guaranteed: serde/bigint/allocator copies
+can remain, and num-bigint SRP arithmetic is not constant-time. Proof comparisons,
+AEAD and signature verification use established library verification. No security
+audit or protection against hostile same-user local processes is claimed.
 
-Owned PINs, keys, proofs, TLVs, decrypted messages and serialization buffers use
-zeroizing storage; dalek secret types wipe on drop. **No complete process-memory
-scrubbing guarantee** is claimed: serde/TOML and SRP big-integer dependency
-intermediates/allocators may retain copies, and num-bigint arithmetic is not
-constant-time. This is not hardened against a hostile local process/timing
-observer. SRP proof/tag/signature verification uses established constant-time or
-strict library verification. There are no secret Debug implementations, raw
-payload logs, or credential-printing commands.
+## Credentials, migration and partial enrollment
 
-## Credential storage and recovery
+`receiver-state/` is separate from ordinary configuration, next to its resolved
+path. Linux requires owned nonsymlink 0700 directory and regular single-link
+0600 files. Reads use O_NOFOLLOW, strict parsing and a 16 KiB bound. Same-directory
+temporary writes are synced; credentials use no-clobber persistence. Selection
+uses atomic replacement. Parent config paths and same-user processes are trusted.
+The parent directory must exist. Multiple config files in one directory share state.
 
-Storage is `receiver-state/` next to the resolved config path. The parent config
-directory must exist before writes. Selection is `selected.toml`; each credential
-is `<12hex>.toml`. This is a separate, versioned secret format, not ordinary
-configuration. Paths are derived only from validated IDs. Multiple config files
-in one directory intentionally share receiver state; use separate directories for
-independent controllers.
+Version 2 credentials distinguish the actual authenticated `pairing_id` from
+optional untrusted `advertised_pi`, and bind both to the approved stable ID.
+Old PR #3 version 1 credentials are rejected with explicit recovery instructions;
+there is no silent reinterpretation or reset. Old selection files require
+reselection. Use `unpair <id>` to remove old/corrupt local credentials, inspect
+receiver-side records, then select and enroll explicitly again. This pre-merge
+schema change does not silently migrate a trust decision.
 
-Linux requires owned nonsymlink directory mode 0700, regular single-link owned
-files mode 0600, O_NOFOLLOW opens, strict parsing, validated key/ID/version and a
-16 KiB bound. Same-directory temporary files are synced; credential creation uses
-no-clobber persistence, while selection uses atomic replacement. Corrupt or
-permissive state is rejected, never used for authentication or silently reset.
-Files and directory are synced after saves/removal. Parent directories are trusted
-local configuration paths; a malicious process running as the same user can replace
-state and is outside this filesystem-permission protection model.
+**Filesystem permissions are the primary local protection; no encryption at rest.**
+Do not commit or expose backups of receiver-state. Corruption/permissive state
+fails closed. Inspect and repair ownership/permissions manually where appropriate.
+Unpair never contacts the receiver, clears selection, or revokes the allowlist;
+also remove the allowlist entry to forbid future connections.
 
-**Filesystem permissions are the primary local protection. There is no encryption
-at rest or OS keyring.** Protect backups and do not commit receiver-state. Unpair
-removes only the local credential, even when corrupt; it does not revoke remote
-controller records, clear selection, or remove allowlist approval. Also remove the
-allowlist entry to prohibit future contact. Inspect hardware changes before
-unpair/re-enroll. A receiver may retain its controller record if its M6 was sent
-but local verification/write failed; remove that stale pairing on the receiver.
-A full receiver pairing table may require receiver-side reset/removal.
+Once M5 is attempted, the receiver may enroll the controller even if M6 is lost,
+invalid or local persistence fails. Errors explain that possible partial enrollment.
+Nothing is saved before successful M6 verification. Approval/selection changes
+before persistence prevent saving; no automatic enrollment retry or remote cleanup
+occurs. Inspect local state and remove stale controller records using receiver
+controls before another attempt. File sync failure can leave an installed file;
+check state rather than assuming rollback. Revocation is checked before connections
+and enrollment persistence, without an instant background revocation watcher.
 
-## Controlled commands (future hardware validation)
+## Controlled commands and the PR #4 boundary
 
-Use only an independently identified receiver you intend to contact:
+Only use a physically verified, intentionally allowlisted receiver. IDs are examples:
 
 ```sh
 piair --config config.toml receivers
-# Edit receiver_allowlist in config.toml with the exact verified ID; never a name.
-piair --config config.toml select device:aabbccddeeff
+# Independently verify the physical ID and explicitly edit receiver_allowlist.
+piair --config config.toml select device:aabbccddeeff --method pin-display
 piair --config config.toml pair device:aabbccddeeff
 piair --config config.toml authenticate device:aabbccddeeff
+# Alternative ONLY when a real HAP setup code has independently been obtained:
+piair --config config.toml select device:aabbccddeeff --method setup-code
+# Removal is local; remote cleanup and allowlist revocation are separate:
 piair --config config.toml unpair device:aabbccddeeff
 ```
 
-The ID above is a documentation example, not authorization for any device.
-Record model/firmware, advertised capabilities and sanitized error/state only.
-Do not save PINs, credential files, authentication bodies or session keys in test
-reports. Stop on unsupported behavior; no repeated probes or downgrades. No
-Samsung/unapproved receiver testing, playback, service installation or changes to
-Autostream/OwnTone are part of this milestone.
+PR #4 may build on the exact-ID boundary, explicit capability decision, persistent
+HAP setup/verify compositions, schema-2 identity binding, bounded TLV/HTTP parsing,
+control-key derivation/framing and local tests. Current APIs intentionally close
+connections; they do **not** hand PR #4 an authenticated live audio channel.
+Retaining one will require a session owner binding its socket and keys to that
+same approved identity, live revocation policy, and controlled hardware evidence.
 
-## Local validation
+PR #4 must not assume Apple TV/HomePod compatibility, automatic reconnection,
+transient credentials, Home/Companion authorization, MFi/FairPlay, encrypted control
+I/O, timing, media-key negotiation or playback. Those are unresolved or absent;
+streaming must not hide them behind an authentication fallback. Report model and
+firmware with sanitized errors only; never publish authentication bodies or keys.
 
-Run `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, and
-`cargo test --locked`. Mocks use loopback, fixed receiver-side key material and
-synthetic discovery snapshots; client cryptographic randomness stays OS-generated.
-Tests cover successful PIN setup/verify, wrong PIN/proof/signature/identity/tag,
-state failures, bounded/truncated framing, timeout, credential persistence and
-permissions, endpoint changes and revocation before socket contact, and
-noninteractive CLI rejection. Existing audio/config tests remain intact.
+## Validation
 
-Mocks are **not proof of Apple TV or HomePod compatibility**. No ARM64/hardware
-validation, manufacturer attestation, external security audit or real encrypted
-audio session is claimed. Actions remains manual-only (`workflow_dispatch`).
+`cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, and
+`cargo test --locked` run locally. Tests use loopback mocks and synthetic snapshots,
+never real receivers. Both persistent code sources, actual-ID versus pi handling,
+wrong codes/proofs/tags/signatures, state/downgrade errors, malformed capabilities,
+unsupported transient/MFi paths, current authorization, cleanup, storage/migration
+and read-only dispatch are covered. Apple's HAP R2 §5.5.2 numerical vector checks
+A/K independently of the mock; fixture data is not implementation source.
+GitHub Actions stays manual-only (`workflow_dispatch`). Mock success is not
+Apple TV/HomePod interoperability evidence or ARM64/hardware validation.

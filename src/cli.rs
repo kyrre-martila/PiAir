@@ -31,7 +31,12 @@ pub enum Command {
     /// Passive receiver snapshot with local approval/pairing state.
     Receivers,
     /// Pin an already allowlisted receiver's discovered endpoint; no connection.
-    Select { receiver_id: String },
+    Select {
+        receiver_id: String,
+        /// Explicit protocol profile, never inferred or automatically changed.
+        #[arg(long, value_enum, default_value = "pin-display")]
+        method: crate::receiver::compatibility::Method,
+    },
     /// Interactively request a receiver PIN and establish persistent credentials.
     Pair { receiver_id: String },
     /// Interactively verify stored credentials; close without an audio session.

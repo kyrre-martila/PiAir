@@ -20,9 +20,10 @@ const ID: &str = "device:aabbccddeeff";
 const PI: &str = "12345678-1234-1234-1234-123456789ABC";
 fn credential() -> Credential {
     Credential {
-        version: 1,
+        version: 2,
         receiver_id: ID.into(),
         pairing_id: PI.into(),
+        advertised_pi: Some(PI.into()),
         controller_id: "00000000-0000-4000-8000-000000000001".into(),
         seed: [11; 32],
         receiver_key: SigningKey::from_bytes(&[22; 32]).verifying_key().to_bytes(),
@@ -39,8 +40,9 @@ fn request(socket: &mut TcpStream, expected: &str) -> Vec<u8> {
         header.push(b[0]);
     }
     let text = String::from_utf8(header).unwrap();
-    assert!(text.starts_with(&format!("POST {expected} RTSP/1.0\r\n")));
+    assert!(text.starts_with(&format!("POST {expected} HTTP/1.1\r\n")));
     assert!(text.contains("X-Apple-HKP: 3\r\n"));
+    assert!(text.contains("Host: 127.0.0.1:"));
     let length = text
         .lines()
         .find_map(|l| l.strip_prefix("Content-Length: "))
@@ -77,23 +79,38 @@ enum Fault {
     Identity,
     State,
     Tag,
+    Fields,
 }
-fn setup_mock(mut socket: TcpStream, fault: Fault) {
-    assert!(request(&mut socket, "/pair-pin-start").is_empty());
-    reply(&mut socket, 1, &[]);
+fn setup_mock(socket: TcpStream, fault: Fault) {
+    setup_mock_profile(socket, fault, Method::PinDisplay, "1234", PI)
+}
+fn setup_mock_profile(
+    mut socket: TcpStream,
+    fault: Fault,
+    method: Method,
+    pin: &str,
+    signed_id: &str,
+) {
+    let offset = if method.pin_start() {
+        assert!(request(&mut socket, "/pair-pin-start").is_empty());
+        reply(&mut socket, 1, &[]);
+        1
+    } else {
+        0
+    };
     let m1 = Tlv::parse(&request(&mut socket, "/pair-setup")).unwrap();
     assert_eq!(m1.get(0).unwrap(), [0]);
     let salt = [7; 16];
     let private = [9; 32];
     let verifier =
-        SrpClient::<Sha512>::new(&G_3072).compute_verifier(b"Pair-Setup", b"1234", &salt);
+        SrpClient::<Sha512>::new(&G_3072).compute_verifier(b"Pair-Setup", pin.as_bytes(), &salt);
     let server = SrpServer::<Sha512>::new(&G_3072);
     let b = srp::pad(&server.compute_public_ephemeral(&private, &verifier)).unwrap();
-    reply(
-        &mut socket,
-        2,
-        &[(STATE, &[2]), (SALT, &salt), (PUBLIC_KEY, &b)],
-    );
+    let mut fields = vec![(STATE, &[2][..]), (SALT, &salt[..]), (PUBLIC_KEY, &b[..])];
+    if method == Method::SetupCode {
+        fields.push((FLAGS, &[0, 0, 0, 0]));
+    }
+    reply(&mut socket, 1 + offset, &fields);
     let m3 = Tlv::parse(&request(&mut socket, "/pair-setup")).unwrap();
     let a = m3.get(PUBLIC_KEY).unwrap();
     let u = BigUint::from_bytes_be(hash(&[a, &b]).as_ref());
@@ -107,19 +124,27 @@ fn setup_mock(mut socket: TcpStream, fault: Fault) {
     let (m1, m2) = srp::proofs(a, &b, &salt, key.as_ref());
     if matches!(fault, Fault::WrongPin) {
         assert!(!bool::from(m1.as_ref().ct_eq(m3.get(PROOF).unwrap())));
-        reply(&mut socket, 3, &[(STATE, &[4]), (7, &[2])]);
+        reply(&mut socket, 2 + offset, &[(STATE, &[4]), (7, &[2])]);
         return;
     }
     assert_eq!(m3.get(PROOF).unwrap(), m1.as_ref());
     if matches!(fault, Fault::Proof) {
-        reply(&mut socket, 3, &[(STATE, &[4]), (PROOF, &[0; 64])]);
+        reply(&mut socket, 2 + offset, &[(STATE, &[4]), (PROOF, &[0; 64])]);
         return;
     }
     if matches!(fault, Fault::State) {
-        reply(&mut socket, 3, &[(STATE, &[6]), (PROOF, m2.as_ref())]);
+        reply(
+            &mut socket,
+            2 + offset,
+            &[(STATE, &[6]), (PROOF, m2.as_ref())],
+        );
         return;
     }
-    reply(&mut socket, 3, &[(STATE, &[4]), (PROOF, m2.as_ref())]);
+    reply(
+        &mut socket,
+        2 + offset,
+        &[(STATE, &[4]), (PROOF, m2.as_ref())],
+    );
     let m5 = Tlv::parse(&request(&mut socket, "/pair-setup")).unwrap();
     let encryption = derive(
         key.as_ref(),
@@ -154,35 +179,48 @@ fn setup_mock(mut socket: TcpStream, fault: Fault) {
     let signing = SigningKey::from_bytes(&[22; 32]);
     let public = signing.verifying_key().to_bytes();
     let id = if matches!(fault, Fault::Identity) {
-        "OTHER-IDENTITY"
+        "CHANGED-ID"
     } else {
-        PI
+        signed_id
     };
     let x = derive(
         key.as_ref(),
         "Pair-Setup-Accessory-Sign-Salt",
         "Pair-Setup-Accessory-Sign-Info",
     );
-    let info = [x.as_ref(), id.as_bytes(), &public].concat();
+    let signature_id = if matches!(fault, Fault::Identity) {
+        signed_id
+    } else {
+        id
+    };
+    let info = [x.as_ref(), signature_id.as_bytes(), &public].concat();
     let mut signature = signing.sign(&info).to_bytes();
     if matches!(fault, Fault::Signature) {
         signature[0] ^= 1;
     }
-    let sub = encode(&[
+    let mut fields = vec![
         (IDENTIFIER, id.as_bytes()),
-        (PUBLIC_KEY, &public),
-        (SIGNATURE, &signature),
-    ]);
+        (PUBLIC_KEY, public.as_slice()),
+        (SIGNATURE, signature.as_slice()),
+    ];
+    if matches!(fault, Fault::Fields) {
+        fields.push((0, &[0]));
+    }
+    let sub = encode(&fields);
     let mut encrypted = seal(&encryption, &nonce(b"PS-Msg06"), &sub, &[]).unwrap();
     if matches!(fault, Fault::Tag) {
         encrypted[0] ^= 1;
     }
-    reply(&mut socket, 4, &[(STATE, &[6]), (ENCRYPTED, &encrypted)]);
+    reply(
+        &mut socket,
+        3 + offset,
+        &[(STATE, &[6]), (ENCRYPTED, &encrypted)],
+    );
 }
 #[test]
 fn persistent_pin_setup_verifies_both_proofs_and_identity() {
     let (wire, server) = local_mock(|s| setup_mock(s, Fault::None));
-    let c = pairing::setup(wire, ID, PI, || Ok(Zeroizing::new("1234".into()))).unwrap();
+    let c = pairing::setup(wire, ID, Some(PI), || Ok(Zeroizing::new("1234".into()))).unwrap();
     assert_eq!(c.receiver_id, ID);
     assert_eq!(c.receiver_key, credential().receiver_key);
     c.validate(ID).unwrap();
@@ -197,6 +235,7 @@ fn setup_rejects_wrong_pin_proof_signature_identity_state_and_aead() {
         Fault::Identity,
         Fault::State,
         Fault::Tag,
+        Fault::Fields,
     ] {
         let (wire, server) = local_mock(move |s| setup_mock(s, fault));
         let pin = if matches!(fault, Fault::WrongPin) {
@@ -204,11 +243,14 @@ fn setup_rejects_wrong_pin_proof_signature_identity_state_and_aead() {
         } else {
             "1234"
         };
-        assert!(pairing::setup(wire, ID, PI, || Ok(Zeroizing::new(pin.into()))).is_err());
+        assert!(pairing::setup(wire, ID, Some(PI), || Ok(Zeroizing::new(pin.into()))).is_err());
         server.join().unwrap();
     }
 }
-fn verify_mock(mut socket: TcpStream, fault: Fault) {
+fn verify_mock(socket: TcpStream, fault: Fault) {
+    verify_mock_with_id(socket, fault, PI)
+}
+fn verify_mock_with_id(mut socket: TcpStream, fault: Fault, signed_id: &str) {
     let m1 = Tlv::parse(&request(&mut socket, "/pair-verify")).unwrap();
     let controller_public: [u8; 32] = m1.array(PUBLIC_KEY).unwrap();
     let private = StaticSecret::from([33; 32]);
@@ -222,7 +264,7 @@ fn verify_mock(mut socket: TcpStream, fault: Fault) {
     let id = if matches!(fault, Fault::Identity) {
         "CHANGED-ID"
     } else {
-        PI
+        signed_id
     };
     let info = [&public[..], id.as_bytes(), &controller_public].concat();
     let signing = SigningKey::from_bytes(&[22; 32]);
@@ -230,7 +272,14 @@ fn verify_mock(mut socket: TcpStream, fault: Fault) {
     if matches!(fault, Fault::Signature) {
         signature[0] ^= 1;
     }
-    let sub = encode(&[(IDENTIFIER, id.as_bytes()), (SIGNATURE, &signature)]);
+    let mut fields = vec![
+        (IDENTIFIER, id.as_bytes()),
+        (SIGNATURE, signature.as_slice()),
+    ];
+    if matches!(fault, Fault::Fields) {
+        fields.push((0, &[0]));
+    }
+    let sub = encode(&fields);
     let mut encrypted = seal(&encryption, &nonce(b"PV-Msg02"), &sub, &[]).unwrap();
     if matches!(fault, Fault::Tag) {
         encrypted[0] ^= 1;
@@ -244,7 +293,10 @@ fn verify_mock(mut socket: TcpStream, fault: Fault) {
             (ENCRYPTED, &encrypted),
         ],
     );
-    if matches!(fault, Fault::Identity | Fault::Signature | Fault::Tag) {
+    if matches!(
+        fault,
+        Fault::Identity | Fault::Signature | Fault::Tag | Fault::Fields
+    ) {
         return;
     }
     let m3 = Tlv::parse(&request(&mut socket, "/pair-verify")).unwrap();
@@ -341,10 +393,17 @@ fn strict_response_parser_and_handshake_deadline() {
 fn selection(port: u16) -> Selection {
     Selection {
         id: ID.into(),
-        pairing_id: PI.into(),
+        advertised_pi: Some(PI.into()),
+        method: Method::PinDisplay,
         addresses: ["127.0.0.1".parse().unwrap()].into(),
         port,
-        features: 1 << 46,
+        capabilities: Capabilities {
+            features: 1 << 46,
+            flags: None,
+            password: None,
+            access_control: None,
+            protocol_version: None,
+        },
     }
 }
 fn snapshot(port: u16) -> Vec<Receiver> {
@@ -502,7 +561,7 @@ fn protocol_failure_closes_socket_without_retry_or_fallback() {
         let mut byte = [0];
         assert_eq!(socket.read(&mut byte).unwrap(), 0);
     });
-    assert!(pairing::setup(wire, ID, PI, || panic!(
+    assert!(pairing::setup(wire, ID, Some(PI), || panic!(
         "PIN must not be requested after rejection"
     ))
     .is_err());
@@ -520,4 +579,302 @@ fn credential_cannot_be_used_with_a_different_authorized_receiver() {
     c.receiver_id = "device:112233445566".into();
     assert!(pairing::verify(wire, &c).is_err());
     server.join().unwrap();
+}
+
+fn local_mock_method(
+    method: Method,
+    f: impl FnOnce(TcpStream) + Send + 'static,
+) -> (Wire, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let handle = thread::spawn(move || f(listener.accept().unwrap().0));
+    (
+        Wire::mock_method(socket, Duration::from_secs(5), ID, method),
+        handle,
+    )
+}
+#[test]
+fn setup_code_profile_skips_pin_start_and_enrolls_actual_signed_identity() {
+    for advertised_pi in [Some(PI), None] {
+        let (wire, server) = local_mock_method(Method::SetupCode, |s| {
+            setup_mock_profile(
+                s,
+                Fault::None,
+                Method::SetupCode,
+                "123-45-678",
+                "AA:BB:CC:DD:EE:FF",
+            )
+        });
+        let c = pairing::setup(wire, ID, advertised_pi, || {
+            Ok(Zeroizing::new("123-45-678".into()))
+        })
+        .unwrap();
+        assert_eq!(c.pairing_id, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(c.advertised_pi.as_deref(), advertised_pi);
+        let dir = tempfile::tempdir().unwrap();
+        let store = store::Store::new(&dir.path().join("config.toml")).unwrap();
+        store.save(&c).unwrap();
+        assert_eq!(
+            store.credential(ID).unwrap().unwrap().pairing_id,
+            "AA:BB:CC:DD:EE:FF"
+        );
+        server.join().unwrap();
+    }
+}
+#[test]
+fn setup_code_profile_rejects_incorrect_code_and_bad_proofs_without_persistence() {
+    for fault in [
+        Fault::WrongPin,
+        Fault::Proof,
+        Fault::Signature,
+        Fault::Identity,
+        Fault::State,
+        Fault::Tag,
+        Fault::Fields,
+    ] {
+        let (wire, server) = local_mock_method(Method::SetupCode, move |s| {
+            setup_mock_profile(s, fault, Method::SetupCode, "123-45-678", PI)
+        });
+        let code = if matches!(fault, Fault::WrongPin) {
+            "999-99-999"
+        } else {
+            "123-45-678"
+        };
+        let result = pairing::setup(wire, ID, Some(PI), || Ok(Zeroizing::new(code.into())));
+        assert!(result.is_err());
+        if matches!(fault, Fault::Signature | Fault::Identity | Fault::Tag) {
+            assert!(result.err().unwrap().to_string().contains("partial"));
+        }
+        server.join().unwrap();
+    }
+}
+#[test]
+fn persistent_exchange_rejects_transient_split_and_unknown_flags_before_pin() {
+    for flags in [vec![16], vec![16, 0, 0, 1], vec![1], vec![0; 5]] {
+        let (wire, server) = local_mock(move |mut s| {
+            request(&mut s, "/pair-pin-start");
+            reply(&mut s, 1, &[]);
+            request(&mut s, "/pair-setup");
+            reply(
+                &mut s,
+                2,
+                &[
+                    (STATE, &[2]),
+                    (SALT, &[7; 16]),
+                    (PUBLIC_KEY, &[9; 384]),
+                    (FLAGS, &flags),
+                ],
+            );
+            let mut byte = [0];
+            assert_eq!(s.read(&mut byte).unwrap(), 0); // no M3 or fallback
+        });
+        assert!(pairing::setup(wire, ID, Some(PI), || panic!(
+            "downgrade must fail before PIN"
+        ))
+        .is_err());
+        server.join().unwrap();
+    }
+}
+#[test]
+fn unsupported_transient_never_returns_credentials_or_contacts_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut selected = selection(port);
+    selected.method = Method::Transient;
+    selected.capabilities.features |= 1 << 48;
+    let store = store::Store::new(&config).unwrap();
+    store.select(&selected).unwrap();
+    let mut observed = snapshot(port);
+    observed[0].services[0]
+        .capabilities
+        .insert("features".into(), "0x0,0x14000".into());
+    assert!(Wire::connect(&config, ID, &selected, &observed).is_err());
+    assert!(listener.accept().is_err());
+    assert!(store.credential(ID).unwrap().is_none());
+    // Even a future caller cannot bypass method rejection by directly invoking setup.
+    let (wire, server) = local_mock_method(Method::Transient, |mut s| {
+        let mut byte = [0];
+        assert_eq!(s.read(&mut byte).unwrap(), 0);
+    });
+    assert!(pairing::setup(wire, ID, None, || panic!("no transient PIN prompt")).is_err());
+    server.join().unwrap();
+}
+#[test]
+fn capability_and_method_changes_are_rejected_before_network_contact() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let selected = selection(port);
+    let store = store::Store::new(&config).unwrap();
+    store.select(&selected).unwrap();
+    for (key, value) in [
+        ("flags", "0x80"),
+        ("pw", "true"),
+        ("acl", "2"),
+        ("protovers", "99"),
+        ("features", "0x0,0x10000"),
+    ] {
+        let mut observed = snapshot(port);
+        observed[0].services[0]
+            .capabilities
+            .insert(key.into(), value.into());
+        assert!(Wire::connect(&config, ID, &selected, &observed).is_err());
+    }
+    let mut changed = selection(port);
+    changed.method = Method::SetupCode;
+    store.select(&changed).unwrap();
+    assert!(Wire::connect(&config, ID, &selected, &snapshot(port)).is_err());
+    assert!(listener.accept().is_err());
+}
+
+#[test]
+fn actual_signed_id_is_used_for_verify_while_pi_remains_a_discovery_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let store = store::Store::new(&config).unwrap();
+    store.select(&selection(port)).unwrap();
+    let mut c = credential();
+    c.pairing_id = "AA:BB:CC:DD:EE:FF".into();
+    store.save(&c).unwrap();
+    let server = thread::spawn(move || {
+        verify_mock_with_id(
+            listener.accept().unwrap().0,
+            Fault::None,
+            "AA:BB:CC:DD:EE:FF",
+        )
+    });
+    let wire = Wire::connect(&config, ID, &selection(port), &snapshot(port)).unwrap();
+    let loaded = store.credential(ID).unwrap().unwrap();
+    assert_ne!(
+        loaded.advertised_pi.as_deref(),
+        Some(loaded.pairing_id.as_str())
+    );
+    pairing::verify(wire, &loaded).unwrap();
+    server.join().unwrap();
+}
+#[test]
+fn approval_revocation_and_reselection_after_verified_setup_prevent_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let store = store::Store::new(&config).unwrap();
+    let selected = selection(7000);
+    store.select(&selected).unwrap();
+    std::fs::write(&config, "").unwrap();
+    assert!(save_verified_enrollment(&config, &selected, &credential()).is_err());
+    assert!(store.credential(ID).unwrap().is_none());
+    std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+    let mut changed = selection(7001);
+    changed.method = Method::SetupCode;
+    store.select(&changed).unwrap();
+    assert!(save_verified_enrollment(&config, &selected, &credential()).is_err());
+    assert!(store.credential(ID).unwrap().is_none());
+    store.select(&selected).unwrap();
+    save_verified_enrollment(&config, &selected, &credential()).unwrap();
+}
+#[test]
+fn malformed_and_conflicting_capabilities_do_not_become_an_implicit_method() {
+    for (key, value) in [
+        ("pw", "1"),
+        ("pw", "False"),
+        ("flags", "0x100000000"),
+        ("flags", ""),
+        ("acl", "-1"),
+        ("acl", "garbage"),
+        ("protovers", "garbage"),
+    ] {
+        let mut observed = snapshot(7000);
+        observed[0].services[0]
+            .capabilities
+            .insert(key.into(), value.into());
+        assert!(Selection::from_receiver(&observed[0], Method::PinDisplay).is_err());
+    }
+    let mut observed = snapshot(7000);
+    observed[0].services[0]
+        .capabilities
+        .insert("flags".into(), "0x80".into());
+    observed[0].services[0]
+        .capabilities
+        .insert("sf".into(), "0x0".into());
+    assert!(Selection::from_receiver(&observed[0], Method::PinDisplay).is_err());
+    observed[0].services[0]
+        .capabilities
+        .insert("flags".into(), "0x0".into());
+    observed[0].services[0]
+        .capabilities
+        .insert("sf".into(), "0X00".into());
+    observed[0].services[0]
+        .capabilities
+        .insert("ft".into(), "0X0,0X00004000".into());
+    assert!(Selection::from_receiver(&observed[0], Method::SetupCode).is_ok());
+    observed[0].services[0]
+        .capabilities
+        .insert("ft".into(), "0x0,0x80000".into());
+    assert!(Selection::from_receiver(&observed[0], Method::PinDisplay).is_err());
+}
+#[test]
+fn old_credentials_require_explicit_recovery_and_are_not_silently_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::Store::new(&dir.path().join("config.toml")).unwrap();
+    store.save(&credential()).unwrap();
+    let path = dir.path().join("receiver-state/aabbccddeeff.toml");
+    let mut old = credential();
+    old.version = 1;
+    std::fs::write(&path, toml::to_string(&old).unwrap()).unwrap();
+    let error = store.credential(ID).err().unwrap().to_string();
+    assert!(error.contains("unpair"));
+    assert!(path.exists());
+    store.remove(ID).unwrap();
+    assert!(store.credential(ID).unwrap().is_none());
+}
+
+#[test]
+fn malformed_authenticated_identifiers_are_not_enrolled() {
+    let (wire, server) = local_mock_method(Method::SetupCode, |s| {
+        setup_mock_profile(
+            s,
+            Fault::None,
+            Method::SetupCode,
+            "123-45-678",
+            "invalid\nidentity",
+        )
+    });
+    assert!(pairing::setup(wire, ID, None, || Ok(Zeroizing::new("123-45-678".into()))).is_err());
+    server.join().unwrap();
+}
+#[test]
+fn extra_mfi_or_method_fields_fail_before_pin_instead_of_negotiating() {
+    for kind in [0, 9, ENCRYPTED] {
+        let (wire, server) = local_mock(move |mut s| {
+            request(&mut s, "/pair-pin-start");
+            reply(&mut s, 1, &[]);
+            request(&mut s, "/pair-setup");
+            reply(
+                &mut s,
+                2,
+                &[
+                    (STATE, &[2]),
+                    (SALT, &[7; 16]),
+                    (PUBLIC_KEY, &[9; 384]),
+                    (kind, &[1]),
+                ],
+            );
+            let mut byte = [0];
+            assert_eq!(s.read(&mut byte).unwrap(), 0);
+        });
+        assert!(pairing::setup(wire, ID, None, || panic!(
+            "no method negotiation/PIN on unexpected fields"
+        ))
+        .is_err());
+        server.join().unwrap();
+    }
 }

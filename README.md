@@ -161,7 +161,7 @@ To approve a physically verified receiver, explicitly add its exact
 The empty list denies every direct receiver connection. Then:
 
 ```sh
-piair --config config.toml select device:aabbccddeeff
+piair --config config.toml select device:aabbccddeeff --method pin-display
 piair --config config.toml pair device:aabbccddeeff
 piair --config config.toml authenticate device:aabbccddeeff
 piair --config config.toml unpair device:aabbccddeeff
@@ -174,16 +174,27 @@ approval and pinned discovery evidence, with no retries, redirects or fallback.
 No Samsung or other unapproved receiver is contacted. Read-only/config/audio
 commands never open a receiver session.
 
-Supported profile: persistent HAP method 0, SRP-6a/SHA-512, verified Ed25519 identity
-exchange, and X25519 pair-verify. Requires advertised HK access-control support
-and a signed identity matching selected `pi`. **Transient-only HomePods, MFi and
-legacy authentication are unsupported**, and no Apple hardware/firmware is verified.
-Mock success is protocol-test evidence only. Authentication immediately closes its
-connection; no audio session or background reconnection exists.
+Persistent HAP method 0 has two explicit profiles: `--method pin-display`
+requests a receiver PIN; `--method setup-code` skips PIN-start and requires an
+independently obtained `XXX-XX-XXX` HAP setup code. Both verify the complete SRP
+and signed M5/M6 exchange before saving. The authenticated receiver identifier
+comes from verified M6, independently of optional, untrusted advertised `pi`.
+Pair-verify uses that stored identifier/key and immediately closes its connection.
+
+A tested capability decision rejects unsupported combinations before connection,
+including transient/system-only, unresolved MFi, password and Home-access paths.
+No method is inferred from model/name and no fallback occurs. **Transient remains
+unsupported because AirPlay wire-profile variants need reliable validation.**
+No Apple TV/HomePod hardware/firmware is verified, and a usable HomePod HAP setup
+code is not assumed. See the [compatibility matrix and evidence ledger](docs/PAIRING.md#compatibility-matrix).
+Mock success proves only the implemented local exchanges; no audio session exists.
 
 Credentials live separately in `receiver-state/` next to config, with owned 0700
 directory/0600 files on Linux. Filesystem permissions are the primary protection;
 there is **no encryption at rest**. Corrupt/permissive state fails closed.
+Version 2 separates authenticated identity from discovery metadata; older PR #3
+credentials require explicit local unpair and re-enrollment, and old selection
+files require reselection. Partial receiver-side enrollment may require cleanup.
 `unpair` removes local credentials without contacting the receiver; also remove
 its allowlist entry to revoke contact approval. Remote pairing cleanup may require
 receiver controls. See [protocol research, sequence diagrams, security boundaries,

@@ -66,7 +66,19 @@ fn parse_txt<'a>(
             .and_then(|b| std::str::from_utf8(b).ok())
             .filter(|v| !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control));
         let Some(value) = value else {
-            if ["deviceid", "pi", "features", "ft"].contains(&key.as_str()) {
+            if [
+                "deviceid",
+                "pi",
+                "features",
+                "ft",
+                "flags",
+                "sf",
+                "pw",
+                "acl",
+                "protovers",
+            ]
+            .contains(&key.as_str())
+            {
                 values.insert("deviceid".into(), "invalid".into());
             }
             continue;
@@ -92,38 +104,40 @@ impl Advertisement {
     }
     /// DNS-SD encodes low then optional high 32-bit hex words. No truncation.
     pub fn features(&self) -> Option<u64> {
-        if let (Some(a), Some(b)) = (
-            self.capabilities.get("features"),
-            self.capabilities.get("ft"),
-        ) {
-            if a != b {
+        let parse = |value: &str| {
+            let mut words = value.split(',');
+            let word = |s: &str| {
+                let s = s
+                    .strip_prefix("0x")
+                    .or_else(|| s.strip_prefix("0X"))
+                    .unwrap_or(s);
+                if s.is_empty() || s.len() > 8 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return None;
+                }
+                u32::from_str_radix(s, 16).ok()
+            };
+            let low = word(words.next()?)? as u64;
+            let high = match words.next() {
+                Some(s) => word(s)?,
+                None => 0,
+            };
+            if words.next().is_some() {
                 return None;
             }
-        }
-        let value = self
-            .capabilities
-            .get("features")
-            .or_else(|| self.capabilities.get("ft"))?;
-        let mut words = value.split(',');
-        let word = |s: &str| {
-            let s = s
-                .strip_prefix("0x")
-                .or_else(|| s.strip_prefix("0X"))
-                .unwrap_or(s);
-            if s.is_empty() || s.len() > 8 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return None;
-            }
-            u32::from_str_radix(s, 16).ok()
+            Some(low | (high as u64) << 32)
         };
-        let low = word(words.next()?)? as u64;
-        let high = match words.next() {
-            Some(s) => word(s)?,
-            None => 0,
+        let features = match self.capabilities.get("features") {
+            Some(v) => Some(parse(v)?),
+            None => None,
         };
-        if words.next().is_some() {
-            return None;
+        let ft = match self.capabilities.get("ft") {
+            Some(v) => Some(parse(v)?),
+            None => None,
+        };
+        match (features, ft) {
+            (Some(a), Some(b)) if a != b => None,
+            (a, b) => a.or(b),
         }
-        Some(low | (high as u64) << 32)
     }
 
     fn from_info(info: &ServiceInfo) -> Option<Self> {
@@ -319,7 +333,8 @@ mod tests {
             ("sr", Some(&b"44\n100"[..])),
             ("pk", Some(&b"never retained"[..])),
         ]);
-        assert_eq!(txt.len(), 1);
+        assert_eq!(txt.len(), 2);
+        assert!(device_id(&txt["deviceid"]).is_none());
         assert_eq!(txt["features"], "0x1,0x2");
     }
 
@@ -427,5 +442,32 @@ mod tests {
         assert!(ad("AABBCCDDEEFF@Room", RAOP, Some("malformed"))
             .id
             .is_none());
+    }
+    #[test]
+    fn invalid_security_txt_poisons_identity_instead_of_disappearing() {
+        for key in [
+            "pw",
+            "flags",
+            "sf",
+            "acl",
+            "protovers",
+            "pi",
+            "features",
+            "ft",
+        ] {
+            let txt = parse_txt([
+                ("deviceid", Some(&b"aabbccddeeff"[..])),
+                (key, Some(&b"\xff"[..])),
+            ]);
+            let ad = Advertisement::new(
+                "Room._airplay._tcp.local.",
+                AIRPLAY,
+                7000,
+                ["127.0.0.1".parse().unwrap()].into(),
+                txt,
+            )
+            .unwrap();
+            assert!(ad.id.is_none(), "{key}");
+        }
     }
 }

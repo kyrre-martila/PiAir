@@ -25,7 +25,10 @@ fn run_with_discovery(
         Command::Receivers => {
             receiver::list(&loaded, &discover(loaded.config.discovery_timeout_secs)?)?
         }
-        Command::Select { receiver_id } => receiver::select(&loaded, &receiver_id)?,
+        Command::Select {
+            receiver_id,
+            method,
+        } => receiver::select(&loaded, &receiver_id, method)?,
         Command::Pair { receiver_id } => receiver::pair(&loaded, &receiver_id, false)?,
         Command::Authenticate { receiver_id } => receiver::pair(&loaded, &receiver_id, true)?,
         Command::Unpair { receiver_id } => receiver::unpair(&loaded, &receiver_id)?,

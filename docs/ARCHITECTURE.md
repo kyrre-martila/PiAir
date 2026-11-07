@@ -24,11 +24,16 @@ and protocol understanding. No existing AirPlay sender is a dependency.
 - `audio/calibration.rs`: bounded noise statistics/rejection, explicit prompts,
   comment-preserving TOML threshold edits and temporary-file persistence.
 
-- `receiver/mod.rs`: exact identity operations and local endpoint selection.
+- `receiver/mod.rs`: exact identity operations, explicit method selection and
+  approval/selection revalidation before enrollment persistence.
+- `receiver/compatibility.rs`: pure requested-method decision over defensively
+  parsed, untrusted capability evidence. Pairing evidence never proves playback.
 - `receiver/wire.rs`: single current-approval TCP boundary and bounded RTSP/HTTP framing.
-- `receiver/pairing.rs`: socket-owning persistent HAP setup/verify state transitions.
+- `receiver/pairing.rs`: socket-owning persistent HAP setup/verify; displayed-PIN and
+  existing-setup-code profiles, with no method fallback.
 - `receiver/srp.rs`, `crypto.rs`, `tlv.rs`: HAP protocol composition and bounded messages.
-- `receiver/store.rs`: separate versioned secret storage, owned 0700/0600 permissions.
+- `receiver/store.rs`: separate version-2 secret storage, owned 0700/0600 permissions;
+  actual signed receiver ID/key is distinct from optional advertised `pi`.
 - `receiver/tests.rs`: loopback receiver, negative exchanges and authorization tests.
 
 See [PAIRING.md](PAIRING.md) for protocol research, sequence diagrams, exact
@@ -62,8 +67,26 @@ receivers explicitly and never selects a receiver. **All connection code uses `r
 allowlist and exact selected endpoint at the connection boundary**, before opening any socket,
 pairing, authentication, reconnect, or playback operation. Check again after
 configuration changes; authenticated credentials are bound to the authorized
-stable receiver ID and the signed pairing ID. Hiding devices in a CLI is insufficient. Unknown receivers
+stable receiver ID and the actual signed pairing ID. Advertised `pi` is only an
+untrusted change-detection pin, never an authenticated identity assertion. Hiding devices in a CLI is insufficient. Unknown receivers
 must never be contacted automatically. Pairing is now an explicit interactive flow; read-only discovery never invokes it.
+
+## Compatibility and the next milestone
+
+The [evidence ledger and compatibility matrix](PAIRING.md#compatibility-matrix)
+separate specification facts, independent behavior reports and unresolved firmware
+assumptions. Both persistent profiles share HKP-3 HTTP/1.1 setup/verify; a setup
+code source is explicit and never discovered by trying methods. Transient,
+MFi/legacy, Home-membership and password paths remain unsupported. Capability
+bit 51 is not misrepresented as a universal MFi requirement: the policy is blocked
+because PiAir cannot safely determine/validate that enrollment policy.
+
+PR #4 may reuse the current identity/authorization boundary, pure capability
+policy, HAP cryptographic exchanges, schema-2 credentials and control framing.
+It must add a live session owner and validate hardware behavior before claiming
+receiver playback. The current handshake APIs close their sockets and drop keys;
+there is no live authenticated channel, transient session, or audio transport.
+Do not open raw sockets or add automatic authentication fallback to bridge these gaps.
 
 ## Future audio and network lifecycles
 

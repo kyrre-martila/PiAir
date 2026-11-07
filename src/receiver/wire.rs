@@ -1,6 +1,6 @@
 //! The ONLY production TCP connect is here, after live authorization. No DNS,
 //! redirects, retries or endpoint fallback. A Wire never exposes its socket.
-use super::{exact_id, Selection};
+use super::{compatibility::Method, exact_id, Selection};
 use crate::{config, discovery::Receiver};
 use anyhow::{bail, ensure, Context, Result};
 use std::{
@@ -18,6 +18,7 @@ pub struct Wire {
     seq: u32,
     failed: bool,
     receiver_id: String,
+    method: Method,
 }
 impl Wire {
     pub fn connect(
@@ -38,7 +39,7 @@ impl Wire {
             .iter()
             .find(|r| r.id == id)
             .context("receiver not discovered")?;
-        let observed = Selection::from_receiver(receiver)?;
+        let observed = Selection::from_receiver(receiver, selected.method)?;
         ensure!(
             &observed == selected,
             "receiver identity/capability/endpoint changed; review and select again"
@@ -73,20 +74,38 @@ impl Wire {
             Duration::from_secs(3),
         )
         .context("approved receiver connection failed (no retry)")?;
-        Ok(Self::new(socket, Duration::from_secs(15), id.to_owned()))
+        Ok(Self::new(
+            socket,
+            Duration::from_secs(15),
+            id.to_owned(),
+            selected.method,
+        ))
     }
-    fn new(socket: TcpStream, budget: Duration, receiver_id: String) -> Self {
+    fn new(socket: TcpStream, budget: Duration, receiver_id: String, method: Method) -> Self {
         Self {
             socket,
             deadline: Instant::now() + budget,
             seq: 0,
             failed: false,
             receiver_id,
+            method,
         }
     }
     #[cfg(test)]
     pub(super) fn mock(socket: TcpStream, budget: Duration, id: &str) -> Self {
-        Self::new(socket, budget, id.to_owned())
+        Self::new(socket, budget, id.to_owned(), Method::PinDisplay)
+    }
+    #[cfg(test)]
+    pub(super) fn mock_method(
+        socket: TcpStream,
+        budget: Duration,
+        id: &str,
+        method: Method,
+    ) -> Self {
+        Self::new(socket, budget, id.to_owned(), method)
+    }
+    pub fn method(&self) -> Method {
+        self.method
     }
     pub fn receiver_id(&self) -> &str {
         &self.receiver_id
@@ -138,7 +157,7 @@ impl Wire {
             .seq
             .checked_add(1)
             .context("request sequence exhausted")?;
-        let header=format!("POST {path} RTSP/1.0\r\nCSeq: {}\r\nUser-Agent: PiAir/0.1\r\nContent-Type: application/octet-stream\r\nX-Apple-HKP: 3\r\nContent-Length: {}\r\n\r\n",self.seq,body.len());
+        let header=format!("POST {path} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nCSeq: {}\r\nUser-Agent: PiAir/0.1\r\nContent-Type: application/octet-stream\r\nX-Apple-HKP: 3\r\nContent-Length: {}\r\n\r\n",self.socket.peer_addr()?,self.seq,body.len());
         for bytes in [header.as_bytes(), body] {
             let mut offset = 0;
             while offset < bytes.len() {

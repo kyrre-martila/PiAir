@@ -10,6 +10,7 @@ pub const PROOF: u8 = 4;
 pub const ENCRYPTED: u8 = 5;
 pub const STATE: u8 = 6;
 pub const SIGNATURE: u8 = 10;
+pub const FLAGS: u8 = 19;
 pub const LIMIT: usize = 8192;
 pub struct Tlv(BTreeMap<u8, Zeroizing<Vec<u8>>>);
 impl Tlv {
@@ -49,10 +50,43 @@ impl Tlv {
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid pairing field length"))
     }
+    pub fn integer(&self, kind: u8) -> Result<Option<u32>> {
+        let Some(bytes) = self.0.get(&kind) else {
+            return Ok(None);
+        };
+        ensure!(
+            (1..=4).contains(&bytes.len()),
+            "invalid pairing integer length"
+        );
+        let mut padded = [0; 4];
+        padded[..bytes.len()].copy_from_slice(bytes);
+        Ok(Some(u32::from_le_bytes(padded)))
+    }
+    pub fn only(&self, allowed: &[u8]) -> Result<()> {
+        ensure!(
+            self.0.keys().all(|k| allowed.contains(k)),
+            "unexpected pairing fields or authentication method"
+        );
+        Ok(())
+    }
     pub fn response(&self, state: u8, allowed: &[u8]) -> Result<()> {
         ensure!(self.get(STATE)? == [state], "unexpected pairing state");
-        if self.0.contains_key(&7) {
-            bail!("receiver rejected pairing/authentication; no retry or fallback");
+        if let Some(error) = self.0.get(&7) {
+            ensure!(
+                error.len() == 1 && error[0] != 0,
+                "malformed pairing error code"
+            );
+            let reason = match error[0] {
+                1 => "unspecified error",
+                2 => "incorrect setup code, signature or proof",
+                3 => "backoff requested; do not retry automatically",
+                4 => "pairing table full; inspect receiver-side records",
+                5 => "maximum attempts reached; inspect receiver policy",
+                6 => "method unavailable or already paired",
+                7 => "receiver busy",
+                _ => "unknown receiver authentication error",
+            };
+            bail!("receiver rejected pairing/authentication: {reason}; no retry or fallback");
         }
         ensure!(
             self.0.keys().all(|k| allowed.contains(k) || *k == STATE),
