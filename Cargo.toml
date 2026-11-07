@@ -18,3 +18,17 @@ toml = "0.8"
 toml_edit = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+hkdf = "0.12"
+rand = "0.8"
+sha2 = "0.10"
+srp = "0.6"
+num-bigint = "0.4"
+subtle = "2"
+uuid = { version = "1", features = ["v4"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+zeroize = { version = "1", features = ["derive"] }
+rpassword = "7"
+tempfile = "3"
+rustix = { version = "1", features = ["process"] }

@@ -159,3 +159,75 @@ fn alsa_file_fixture_preserves_right_channel_and_sample_time_transitions() {
     assert!(text.contains("event=Some(Stopped)"));
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn receiver_identity_operations_fail_closed_without_interaction_or_discovery() {
+    for command in ["pair", "authenticate", "select"] {
+        for id in [
+            "Living Room",
+            "192.0.2.1",
+            "room.local",
+            "device:AABBCCDDEEFF",
+            "device:000000000000",
+            "device:aabbccddeeff",
+        ] {
+            let output = run(&[command, id]);
+            assert_eq!(output.status.code(), Some(1));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!stderr.contains("mDNS"));
+            assert!(!stderr.contains("connection failed"));
+        }
+    }
+}
+
+#[test]
+fn approved_pairing_refuses_piped_input_and_local_commands_do_not_connect() {
+    use std::{fs, net::TcpListener};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    fs::write(&path, "receiver_allowlist=['device:aabbccddeeff']\n").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    for args in [
+        vec!["status"],
+        vec!["config", "show"],
+        vec!["config", "check"],
+        vec!["unpair", "device:aabbccddeeff"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_piair"))
+            .arg("--config")
+            .arg(&path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(listener.accept().is_err());
+    }
+    for command in ["pair", "authenticate"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_piair"))
+            .arg("--config")
+            .arg(&path)
+            .args([command, "device:aabbccddeeff"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
+    }
+    assert!(!dir.path().join("receiver-state").exists());
+}
+
+#[test]
+fn pairing_profile_is_explicit_and_never_auto_negotiated() {
+    for method in ["pin-display", "setup-code", "transient"] {
+        let output = run(&["select", "device:aabbccddeeff", "--method", method]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unapproved"));
+    }
+    assert_eq!(
+        run(&["select", "device:aabbccddeeff", "--method", "auto"])
+            .status
+            .code(),
+        Some(2)
+    );
+    assert!(String::from_utf8_lossy(&run(&["select", "--help"]).stdout).contains("setup-code"));
+}
