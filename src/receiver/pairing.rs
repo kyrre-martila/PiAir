@@ -31,6 +31,23 @@ fn decrypted_payload(plaintext: &[u8], allowed: &[u8]) -> Result<Tlv> {
     payload.only(allowed)?;
     Ok(payload)
 }
+// Type 0x11 has no established M6 schema in our evidence ledger. Keep it
+// rejected; expose only its reassembled length after AEAD and TLV validation.
+// This context must not be used for outer messages or pair-verify payloads.
+fn setup_m6_payload(plaintext: &[u8]) -> Result<Tlv> {
+    let payload = Tlv::parse(plaintext)?;
+    if let Err(error) = payload.only(&[IDENTIFIER, PUBLIC_KEY, SIGNATURE]) {
+        return Err(if let Ok(value) = payload.get(0x11) {
+            error.context(format!(
+                "unrecognized decrypted M6 TLV type 17 present; length={} bytes; semantics unverified",
+                value.len()
+            ))
+        } else {
+            error
+        });
+    }
+    Ok(payload)
+}
 /// Consuming, linear exchange: any error drops the socket and all owned secrets.
 /// Credentials are returned only after M6's AEAD AND signed identity verification.
 pub fn setup(
@@ -140,8 +157,7 @@ fn setup_inner(
             &[],
         )
         .context("pair-setup M6 decryption")?;
-        let receiver = decrypted_payload(&plaintext, &[IDENTIFIER, PUBLIC_KEY, SIGNATURE])
-            .context("pair-setup M6 decrypted payload")?;
+        let receiver = setup_m6_payload(&plaintext).context("pair-setup M6 decrypted payload")?;
         let credential = (|| -> Result<Credential> {
             let pairing_id = std::str::from_utf8(receiver.get(IDENTIFIER)?)
                 .context("invalid authenticated receiver identifier")?;
@@ -257,4 +273,31 @@ fn verify_inner(wire: &mut Wire, credential: &Credential) -> Result<(ControlKeys
         ControlKeys::new(shared.as_bytes()),
         ControlKeys::events(shared.as_bytes()),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn m6_type17_diagnostic_requires_well_formed_bounded_tlv() {
+        // These are structural TLV failures, not proposed metadata format rules.
+        for malformed in [
+            vec![17],
+            vec![17, 0],
+            vec![17, 2, 0xa5],
+            vec![17, 1, 0xa5, 17, 1, 0xa5],
+            vec![0; LIMIT + 1],
+        ] {
+            let diagnostic = format!("{:#}", setup_m6_payload(&malformed).err().unwrap());
+            assert!(!diagnostic.contains("length="));
+            assert!(!diagnostic.contains("semantics unverified"));
+        }
+        let encoded = encode(&[(17, b"synthetic-secret-marker"), (18, b"private")]);
+        let diagnostic = format!("{:#}", setup_m6_payload(&encoded).err().unwrap());
+        assert!(diagnostic.contains("length=23 bytes"));
+        assert!(diagnostic.ends_with("unexpected pairing TLV types: [17, 18]"));
+        assert!(!diagnostic.contains("synthetic-secret-marker"));
+        assert!(!diagnostic.contains("private"));
+    }
 }
