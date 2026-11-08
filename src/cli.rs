@@ -28,7 +28,7 @@ pub enum Command {
     Status,
     /// Discover advertisements only; never select or connect to a receiver.
     Devices,
-    /// Passive receiver snapshot with local approval/pairing state.
+    /// Full passive receiver details: IDs, addresses, services and local approval/pairing state.
     Receivers,
     /// Discover and interactively pair an approved receiver; q/EOF/Ctrl+C cancels.
     Pairing,

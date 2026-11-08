@@ -288,9 +288,15 @@ piair stream-test device:xxxxxxxxxxxx --seconds 3 --volume-db -15
 ```
 
 `xxxxxxxxxxxx` is a placeholder for your receiver's 12 lowercase hex digits.
-The wizard lists friendly names, stable IDs, addresses and separate approval,
-selection and local pairing states. Names may be duplicated; compare IDs and
-endpoints. Discovery is untrusted and never proves receiver identity. Unknown
+The wizard shows one numbered line per receiver with a short status:
+`[Not approved]`, `[Not paired]`, `[Selected]`, `[Paired]` or `[Paired, selected]`.
+Not approved takes priority over local selection and pairing. Long names are
+shortened; duplicate names include full stable IDs. Names are never identities.
+Run `piair receivers` for full names, stable IDs, IPv4/IPv6 addresses, advertised
+service types and ports, separate approval/selection/local pairing states and
+compatibility diagnostics. This command is passive and does not change state.
+Compare the full ID in the operation summary before confirming. Discovery is
+untrusted and never proves receiver identity. Unknown
 receivers are never automatically approved: independently verify the device,
 edit `receiver_allowlist` in your configuration, then run `piair config check`
 (with the same `--config` if used). The wizard deliberately does not edit config;

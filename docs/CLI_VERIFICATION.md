@@ -80,19 +80,14 @@ Illustrative sessions (not hardware results):
 
 ```text
 $ piair pairing
-Available AirPlay receivers (unverified advertisements; discovery does not prove identity):
-1. "Living Room" [Approved; Not selected; Not paired; authentication required]
-   Device ID: device:aabbccddeeff
-   Address: {192.168.1.20}:7000 ("_airplay._tcp.local.")
-Select receiver (or q to cancel): 1
-Receiver: "Living Room"
-Device ID: device:aabbccddeeff
-Address: {192.168.1.20}:7000
+Available AirPlay receivers:
+
+  1. Living Room  [Not paired]
+Select receiver (1-1, q to cancel): 1
 Choose an explicit method: 1. PIN-display; 2. Existing HAP setup code; no fallback. Selection is provisional until final confirmation.
-Select receiver (or q to cancel): 1
-Receiver: "Living Room"
+Select method (1-2, q to cancel): 1
+Receiver: Living Room
 Device ID: device:aabbccddeeff
-Address: {192.168.1.20}:7000
 Operation: Pair and save verified credentials (no audio).
 Confirming saves device:aabbccddeeff with method PinDisplay and its pinned endpoint as the active receiver selection. It remains selected if the subsequent operation fails.
 Continue? [y/N]: n
@@ -100,10 +95,20 @@ Continue? [y/N]: n
 
 $ piair stream-test --seconds 3 --volume-db -15
 [choose an approved receiver; existing selection and credentials checked]
-AirPlay 2 realtime UDP / ALAC 44100 stereo / NTP diagnostic: 3s signal plus 2s latency drain. Receiver volume will be set to -15 dB and may remain there. Hardware playback is unverified.
-Receiver: "Living Room"
+The test includes a 2-second latency drain. Volume may persist after playback. Audible playback is unverified.
+Receiver: Living Room
 Device ID: device:aabbccddeeff
-Address: {192.168.1.20}:7000
+Operation: Playback test
+Duration: 3 seconds
+Volume: -15 dB
 Start playback test? [y/N]: n
 [receiver operation cancelled; no playback performed]
 ```
+
+Use `piair receivers` for full technical details: full friendly name and stable
+ID, IPv4/IPv6 addresses, advertised service types and ports, approval, selection
+and local pairing. Compact rows use `[Not approved]` before any other status;
+approved receivers use `[Paired, selected]`, `[Paired]`, `[Selected]` or
+`[Not paired]`. Stored credentials never imply current authentication or audible
+playback. Duplicate names include stable IDs, and long names are shortened only
+in the compact rows. Verify identity independently before approval or contact.

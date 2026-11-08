@@ -110,16 +110,10 @@ impl Selection {
     }
 }
 pub fn list(loaded: &Loaded, receivers: &[Receiver]) -> Result<()> {
-    let store = store::Store::new(&loaded.path)?;
-    let selected = store.selection()?;
-    println!("Passive advertisements; compatibility unverified. No direct receiver connection.");
+    interactive::render_listing(loaded, receivers, &mut io::stdout().lock(), true)?;
+    println!("Passive advertisements; identity, compatibility and playback unverified. Local credentials do not establish current authentication.");
     for r in receivers {
-        let paired = if r.id.starts_with("device:") {
-            store.credential(&r.id)?.is_some()
-        } else {
-            false
-        };
-        println!("{} {:?} discovered=true approved={} selected={} paired={} authenticated=false connected=false",r.id,r.name,loaded.config.allows(&r.id),selected.as_ref().is_some_and(|s|s.id==r.id),paired);
+        println!("Compatibility candidates for {}:", r.id);
         for method in [Method::PinDisplay, Method::SetupCode, Method::Transient] {
             match Selection::from_receiver(r, method) {
                 Ok(s) => println!("  {method:?}: implemented candidate; advertised buffered audio={}; playback unverified",s.capabilities.buffered_audio_advertised()),
@@ -404,7 +398,7 @@ pub fn stream_test(
     if setup_check {
         println!("Initial NTP SETUP check: validate response and tear down; no RECORD or audio transmission. Receiver volume unchanged (--volume-db is playback-only).");
     } else {
-        println!("AirPlay 2 realtime UDP / ALAC 44100 stereo / NTP diagnostic: {seconds}s signal plus 2s latency drain. Receiver volume will be set to {volume_db} dB and may remain there. Hardware playback is unverified.");
+        println!("The test includes a 2-second latency drain. Volume may persist after playback. Audible playback is unverified.");
     }
     ensure!(
         (-60..=-10).contains(&volume_db),
@@ -412,6 +406,11 @@ pub fn stream_test(
     );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
     interactive::describe(&snapshot, id)?;
+    if setup_check {
+        println!("Operation: Setup-only check");
+    } else {
+        println!("Operation: Playback test\nDuration: {seconds} seconds\nVolume: {volume_db} dB");
+    }
     let mut session = session::Session::new();
     interactive::confirm_operation(
         loaded,
