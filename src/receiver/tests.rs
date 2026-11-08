@@ -2559,3 +2559,24 @@ fn owntone_control_check_failures_close_without_retry_or_audio() {
         server.join().unwrap();
     }
 }
+
+#[test]
+fn wizard_preserves_existing_pairing_and_rejects_unapproved_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut loaded = crate::config::Loaded {
+        path: dir.path().join("config.toml"),
+        config: crate::config::Config::default(),
+        source: "test",
+    };
+    let store = store::Store::new(&loaded.path).unwrap();
+    store.save(&credential()).unwrap();
+    assert!(interactive::already_paired(&loaded, ID).is_err());
+    loaded.config.receiver_allowlist.push(ID.into());
+    assert!(interactive::already_paired(&loaded, ID).unwrap());
+    assert_eq!(
+        store.credential(ID).unwrap().unwrap().receiver_key,
+        credential().receiver_key
+    );
+    assert!(store.save(&credential()).is_err());
+    assert!(store.selection().unwrap().is_none());
+}

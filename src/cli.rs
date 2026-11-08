@@ -30,6 +30,8 @@ pub enum Command {
     Devices,
     /// Passive receiver snapshot with local approval/pairing state.
     Receivers,
+    /// Discover and interactively pair an approved receiver; q/EOF/Ctrl+C cancels.
+    Pairing,
     /// Pin an already allowlisted receiver's discovered endpoint; no connection.
     Select {
         receiver_id: String,
@@ -52,9 +54,13 @@ pub enum Command {
         #[arg(long, conflicts_with = "experimental_pyatv_transient_preamble")]
         experimental_owntone_transient: bool,
     },
-    /// Explicit short AirPlay 2 realtime ALAC/44100/NTP test; interactive approval.
+    /// Short AirPlay 2 realtime test; choose a receiver if ID omitted. Requires terminal and y/yes approval.
     StreamTest {
-        receiver_id: String,
+        /// Omit to choose interactively; explicit IDs retain the advanced workflow.
+        receiver_id: Option<String>,
+        /// Receiver volume in integer dB (-60..=-10); may persist after playback.
+        #[arg(long, default_value_t = -30, allow_hyphen_values = true, value_parser = clap::value_parser!(i32).range(-60..=-10))]
+        volume_db: i32,
         #[arg(long, default_value_t=1, value_parser=clap::value_parser!(u32).range(1..=3))]
         seconds: u32,
         /// Validate initial SETUP and tear down before RECORD or audio transmission.
@@ -161,6 +167,52 @@ mod tests {
                 panic!("authenticate expected")
             };
             assert_eq!(experimental_pyatv_transient_preamble, expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod interactive_tests {
+    use super::*;
+    #[test]
+    fn pairing_and_stream_volume_syntax() {
+        assert!(matches!(
+            Cli::try_parse_from(["piair", "pairing"]).unwrap().command,
+            Command::Pairing
+        ));
+        for id in [None, Some("device:aabbccddeeff")] {
+            for value in [None, Some("-15"), Some("-60"), Some("-10")] {
+                let mut args = vec!["piair", "stream-test"];
+                args.extend(id);
+                if let Some(v) = value {
+                    args.extend(["--volume-db", v]);
+                }
+                let Command::StreamTest {
+                    receiver_id,
+                    volume_db,
+                    ..
+                } = Cli::try_parse_from(args).unwrap().command
+                else {
+                    panic!()
+                };
+                assert_eq!(receiver_id.as_deref(), id);
+                assert_eq!(
+                    volume_db,
+                    value.map(|v| v.parse::<i32>().unwrap()).unwrap_or(-30)
+                );
+            }
+        }
+        for v in [
+            "-61",
+            "-9",
+            "NaN",
+            "inf",
+            "-inf",
+            "-15.5",
+            "oops",
+            "999999999999",
+        ] {
+            assert!(Cli::try_parse_from(["piair", "stream-test", "--volume-db", v]).is_err());
         }
     }
 }

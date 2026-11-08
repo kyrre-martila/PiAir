@@ -38,6 +38,7 @@ pub enum State {
 
 pub struct Session {
     state: State,
+    volume_db: i32,
     setup_profile: SetupProfile,
     control: Option<Wire>,
     failure: Option<String>,
@@ -61,6 +62,7 @@ impl Session {
     pub fn new() -> Self {
         Self {
             state: State::Disconnected,
+            volume_db: -30,
             setup_profile: SetupProfile::A,
             control: None,
             failure: None,
@@ -266,11 +268,20 @@ impl Session {
         profile::select_ntp(&info)
     }
     /// Explicit concrete profile: HAP, ALAC/44100/16/2, realtime UDP, NTP.
+    #[cfg(test)]
     pub fn negotiate_realtime(&mut self) -> Result<()> {
+        self.negotiate_realtime_at_volume(-30)
+    }
+    pub fn negotiate_realtime_at_volume(&mut self, volume_db: i32) -> Result<()> {
+        ensure!(
+            (-60..=-10).contains(&volume_db),
+            "volume must be -60..=-10 dB"
+        );
         ensure!(
             self.setup_profile == SetupProfile::A,
             "diagnostic profile is setup-only"
         );
+        self.volume_db = volume_db;
         self.negotiate(false, None)
     }
     /// Validate the initial NTP SETUP only, then release the receiver session.
@@ -395,7 +406,7 @@ impl Session {
             let volume = self.call(
                 "SET_PARAMETER",
                 None,
-                b"volume: -30.000000\r\n",
+                format!("volume: {}.000000\r\n", self.volume_db).as_bytes(),
                 &[("Content-Type", "text/parameters".into())],
             )?;
             status = Some(200);
@@ -484,7 +495,7 @@ impl Session {
         Ok(())
     }
     /// Test input only. The transport, codec, crypto, sockets and timing are real.
-    /// Signal amplitude <= -18 dBFS and receiver volume is explicitly set to -30dB.
+    /// Signal amplitude <= -18 dBFS and receiver volume uses the explicitly authorized test setting.
     pub fn transmit_test(&mut self, seconds: u32) -> Result<()> {
         let result = (|| {
             ensure!(

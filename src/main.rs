@@ -25,6 +25,7 @@ fn run_with_discovery(
         Command::Receivers => {
             receiver::list(&loaded, &discover(loaded.config.discovery_timeout_secs)?)?
         }
+        Command::Pairing => receiver::interactive::pairing(&loaded)?,
         Command::Select {
             receiver_id,
             method,
@@ -57,13 +58,18 @@ fn run_with_discovery(
         Command::StreamTest {
             receiver_id,
             seconds,
+            volume_db,
             setup_check,
             setup_timeout_seconds,
             setup_profile,
         } => receiver::stream_test(
             &loaded,
-            &receiver_id,
+            &match receiver_id {
+                Some(id) => id,
+                None => receiver::interactive::choose_for_stream(&loaded)?,
+            },
             seconds,
+            volume_db,
             setup_check,
             setup_timeout_seconds,
             setup_profile,

@@ -3,6 +3,7 @@ pub(crate) mod compatibility;
 mod crypto;
 mod diagnostics;
 mod hex_u64;
+pub(crate) mod interactive;
 // Sans-I/O components only; blocked by the documented unresolved transport profile.
 #[allow(dead_code)]
 mod media;
@@ -28,7 +29,7 @@ use compatibility::{Capabilities, Method};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
-    io::{self, IsTerminal, Write},
+    io::{self, IsTerminal},
     net::IpAddr,
 };
 use zeroize::Zeroizing;
@@ -211,21 +212,23 @@ pub fn pair(
         AuthProfile::OwnToneTransient => println!("Controlled hardware experiment: OwnTone-reference RTSP transient authentication; HomePod compatibility unverified. No playback."),
         AuthProfile::PyatvDiagnostic => println!("Controlled hardware experiment: pyatv transient HTTP profile (preamble, M1, M3); no compatibility or HomePod support claim."),
     }
-    print!(
-        "{} {id}? Type the exact receiver ID to continue: ",
-        if authenticate { "Authenticate" } else { "Pair" }
+    let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    interactive::describe(&snapshot, id)?;
+    println!(
+        "Operation: {} (no audio).",
+        if authenticate {
+            "Authenticate"
+        } else {
+            "Pair and save verified credentials"
+        }
     );
-    io::stdout().flush()?;
-    let mut confirmation = String::new();
-    io::stdin().read_line(&mut confirmation)?;
-    ensure!(confirmation.trim() == id, "receiver operation cancelled");
+    interactive::confirm_terminal("Continue? [y/N]: ")?;
     if let Some(c) = &existing {
         ensure!(
             c.advertised_pi == selected.advertised_pi,
             "credential discovery binding differs from selection"
         );
     }
-    let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
     if authenticate {
         let mut session = session::Session::new();
         session.start_selected(
@@ -310,6 +313,7 @@ pub fn stream_test(
     loaded: &Loaded,
     id: &str,
     seconds: u32,
+    volume_db: i32,
     setup_check: bool,
     setup_timeout_seconds: Option<u64>,
     setup_profile: Option<SetupProfile>,
@@ -355,16 +359,21 @@ pub fn stream_test(
         Some(credential)
     };
     if setup_check {
-        println!("Initial NTP SETUP check: validate response and tear down; no RECORD or audio transmission.");
+        println!("Initial NTP SETUP check: validate response and tear down; no RECORD or audio transmission. Receiver volume unchanged (--volume-db is playback-only).");
     } else {
-        println!("AirPlay 2 realtime UDP / ALAC 44100 stereo / NTP diagnostic: {seconds}s signal plus 2s latency drain. Receiver volume will be set to -30 dB and may remain there. Hardware playback is unverified.");
+        println!("AirPlay 2 realtime UDP / ALAC 44100 stereo / NTP diagnostic: {seconds}s signal plus 2s latency drain. Receiver volume will be set to {volume_db} dB and may remain there. Hardware playback is unverified.");
     }
-    print!("Confirm receiver operation for {id}. Type the exact receiver ID: ");
-    io::stdout().flush()?;
-    let mut confirmation = String::new();
-    io::stdin().read_line(&mut confirmation)?;
-    ensure!(confirmation.trim() == id, "receiver operation cancelled");
+    ensure!(
+        (-60..=-10).contains(&volume_db),
+        "volume must be -60..=-10 dB"
+    );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    interactive::describe(&snapshot, id)?;
+    interactive::confirm_terminal(if setup_check {
+        "Start setup-only check? [y/N]: "
+    } else {
+        "Start playback test? [y/N]: "
+    })?;
     let mut session = session::Session::new();
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
@@ -390,7 +399,7 @@ pub fn stream_test(
         println!("Initial SETUP: validated NTP response and ports; TEARDOWN acknowledged; audio packets transmitted: 0.");
         return Ok(());
     }
-    if let Err(error) = session.negotiate_realtime() {
+    if let Err(error) = session.negotiate_realtime_at_volume(volume_db) {
         println!("Negotiation: FAILED; audio packets transmitted: 0; partial setup cleanup attempted; audible playback: unverified");
         return Err(error);
     }

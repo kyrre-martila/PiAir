@@ -120,7 +120,7 @@ enum Mode {
 fn receiver(s: TcpStream, mode: Mode, seen: Arc<AtomicU64>) {
     let mut shared = [0; 32];
     let (socket, keys) = verify_mock_core(s, Fault::None, PI, |key| shared = *key).unwrap();
-    receiver_authenticated(socket, keys, shared.to_vec(), mode, seen);
+    receiver_authenticated(socket, keys, shared.to_vec(), mode, seen, -30);
 }
 fn receiver_authenticated(
     mut socket: TcpStream,
@@ -128,6 +128,7 @@ fn receiver_authenticated(
     shared: Vec<u8>,
     mode: Mode,
     seen: Arc<AtomicU64>,
+    volume_db: i32,
 ) {
     socket
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -562,7 +563,7 @@ fn receiver_authenticated(
         match r.method.as_str() {
             "SET_PARAMETER" => {
                 assert_eq!(r.headers["content-type"], "text/parameters");
-                assert_eq!(r.body, b"volume: -30.000000\r\n");
+                assert_eq!(r.body, format!("volume: {volume_db}.000000\r\n").as_bytes());
                 send_reply(&mut socket, &mut keys, &r, None, "");
             }
             "POST" => {
@@ -996,7 +997,7 @@ fn transient_session_negotiates_encrypted_audio_and_acknowledges_teardown() {
             |socket, shared| {
                 let mut keys = ControlKeys::new(shared.as_ref());
                 keys.swap_directions_for_test();
-                receiver_authenticated(socket, keys, shared.to_vec(), Mode::Good, count);
+                receiver_authenticated(socket, keys, shared.to_vec(), Mode::Good, count, -30);
             },
         );
     });
@@ -1333,4 +1334,28 @@ fn preverify_info_cannot_bypass_pinned_identity_verification() {
     assert_eq!(session.state(), State::Failed);
     assert_eq!(session.packets_sent, 0);
     server.join().unwrap();
+}
+
+#[test]
+fn configured_volume_uses_existing_parameter_and_cleanup() {
+    for volume in [-60, -15, -10] {
+        let (wire, server) = local_mock(move |s| {
+            let mut shared = [0; 32];
+            let (socket, keys) = verify_mock_core(s, Fault::None, PI, |key| shared = *key).unwrap();
+            receiver_authenticated(
+                socket,
+                keys,
+                shared.to_vec(),
+                Mode::Good,
+                Arc::new(AtomicU64::new(0)),
+                volume,
+            );
+        });
+        let mut session = Session::new();
+        session.start(|| Ok(wire), &credential()).unwrap();
+        session.negotiate_realtime_at_volume(volume).unwrap();
+        assert_eq!(session.packets_sent, 0);
+        session.stop().unwrap();
+        server.join().unwrap();
+    }
 }
