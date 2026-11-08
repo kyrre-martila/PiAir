@@ -106,6 +106,8 @@ enum Mode {
     BadPort,
     NoTiming,
     NoEvent,
+    RemoteCommand,
+    UnknownEvent,
     BadTiming,
     SilentTeardown,
     EventRefused,
@@ -298,8 +300,25 @@ fn receiver_authenticated(
         keys.swap_directions_for_test();
         let mut body = Vec::new();
         profile::dict([
-            ("type", Value::String("updateInfo".into())),
-            ("value", profile::dict([])),
+            (
+                "type",
+                Value::String(
+                    match mode {
+                        Mode::RemoteCommand => "sendMediaRemoteCommand",
+                        Mode::UnknownEvent => "unsupportedPlaybackCommand",
+                        _ => "updateInfo",
+                    }
+                    .into(),
+                ),
+            ),
+            (
+                "value",
+                if matches!(mode, Mode::RemoteCommand | Mode::UnknownEvent) {
+                    Value::String("paus".into())
+                } else {
+                    profile::dict([])
+                },
+            ),
         ])
         .to_writer_binary(&mut body)
         .unwrap();
@@ -609,7 +628,13 @@ fn nonce_with_zero_prefix(nonce: &[u8; 8]) -> [u8; 12] {
 }
 #[test]
 fn full_authenticated_realtime_session_encodes_encrypts_synchronizes_and_tears_down() {
-    for mode in [Mode::Good, Mode::NoRemoteTiming] {
+    for mode in [
+        Mode::Good,
+        Mode::NoRemoteTiming,
+        Mode::NoEvent,
+        Mode::RemoteCommand,
+        Mode::UnknownEvent,
+    ] {
         let seen = Arc::new(AtomicU64::new(0));
         let count = seen.clone();
         let (wire, server) = local_mock(move |s| receiver(s, mode, count));
@@ -617,6 +642,7 @@ fn full_authenticated_realtime_session_encodes_encrypts_synchronizes_and_tears_d
         session.start(|| Ok(wire), &credential()).unwrap();
         session.negotiate_realtime().unwrap();
         assert_eq!(session.state(), State::Ready);
+        assert_eq!(session.packets_sent, 0);
         session.transmit_test(1).unwrap();
         assert_eq!(session.state(), State::Streaming);
         assert!(session.packets_sent > 350);
@@ -663,7 +689,6 @@ fn unsupported_codec_and_partial_setup_errors_fail_and_cleanup() {
         Mode::UnsupportedTiming,
         Mode::BadPort,
         Mode::NoTiming,
-        Mode::NoEvent,
         Mode::BadTiming,
         Mode::SilentTeardown,
         Mode::EventRefused,
@@ -682,16 +707,11 @@ fn unsupported_codec_and_partial_setup_errors_fail_and_cleanup() {
             Mode::UnsupportedTiming => {
                 assert!(diagnostic.contains("unsupported PTP/timing profile"))
             }
-            Mode::NoTiming | Mode::SilentTeardown | Mode::BadTiming => assert!(
-                diagnostic.contains("ntp_ready=false event_ready=true"),
-                "{diagnostic}"
-            ),
+            Mode::NoTiming | Mode::SilentTeardown | Mode::BadTiming => {
+                assert!(diagnostic.contains("ntp_ready=false"), "{diagnostic}")
+            }
             Mode::EventRefused => assert!(
                 diagnostic.contains("stage=event connection"),
-                "{diagnostic}"
-            ),
-            Mode::NoEvent => assert!(
-                diagnostic.contains("ntp_ready=true event_ready=false"),
                 "{diagnostic}"
             ),
             Mode::BadEventTag => assert!(diagnostic.contains("event worker"), "{diagnostic}"),
