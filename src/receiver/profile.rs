@@ -312,6 +312,38 @@ pub fn transient_info(bytes: &[u8], selected: &super::compatibility::Capabilitie
 mod tests {
     use super::*;
     #[test]
+    fn generated_ntp_offer_has_exact_typed_semantics_for_full_sender_identity() {
+        let uuid = uuid::Uuid::parse_str("00112233-4455-4677-8899-aabbccddeeff").unwrap();
+        for port in [1, 7010, u16::MAX] {
+            let offer = ntp_offer("12:34:56:78:9A:BC:DE:F0", uuid, port).unwrap();
+            // Decode using the general plist reader, independently of our bounded parser.
+            let value = Value::from_reader(Cursor::new(&*offer)).unwrap();
+            let fields = value.as_dictionary().unwrap();
+            assert_eq!(fields.len(), 4);
+            assert_eq!(
+                fields["deviceID"].as_string(),
+                Some("12:34:56:78:9A:BC:DE:F0")
+            );
+            assert_eq!(
+                fields["sessionUUID"].as_string(),
+                Some("00112233-4455-4677-8899-AABBCCDDEEFF")
+            );
+            assert_eq!(fields["timingProtocol"].as_string(), Some("NTP"));
+            assert!(matches!(fields["timingPort"], Value::Integer(_)));
+            assert_eq!(
+                fields["timingPort"].as_unsigned_integer(),
+                Some(u64::from(port))
+            );
+            if port == 7010 {
+                let independent = Value::from_reader(Cursor::new(include_bytes!(
+                    "../../tests/fixtures/sequence-setup.plist"
+                )))
+                .unwrap();
+                assert_eq!(value, independent); // Semantic equality, not serialization equality.
+            }
+        }
+    }
+    #[test]
     fn ntp_offer_matches_independent_fixture_and_keeps_uuid_v4() {
         let uuid = uuid::Uuid::parse_str("00112233-4455-4677-8899-AABBCCDDEEFF").unwrap();
         let offer = ntp_offer("02:01:02:03:04:05", uuid, 7010).unwrap();

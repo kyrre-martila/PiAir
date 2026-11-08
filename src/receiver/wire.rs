@@ -1185,6 +1185,110 @@ mod worker_tests {
     use super::*;
 
     #[test]
+    fn independent_get_then_setup_preserves_directional_frame_state() {
+        // Python cryptography/plistlib oracle; no mock use of ControlKeys.
+        // These are synthetic protocol fixtures, not receiver acceptance evidence.
+        for (reply, failure) in [
+            (
+                include_bytes!("../../tests/fixtures/sequence-setup.rx").as_slice(),
+                None,
+            ),
+            (
+                include_bytes!("../../tests/fixtures/sequence-reset.rx").as_slice(),
+                Some("authentication tag invalid"),
+            ),
+            (
+                include_bytes!("../../tests/fixtures/sequence-wrong-cseq.rx").as_slice(),
+                Some("unexpected receiver CSeq"),
+            ),
+            (
+                include_bytes!("../../tests/fixtures/sequence-duplicate-length.rx").as_slice(),
+                Some("duplicate receiver header"),
+            ),
+            (
+                include_bytes!("../../tests/fixtures/sequence-extra.rx").as_slice(),
+                Some("unsolicited control data"),
+            ),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut peer = listener.accept().unwrap().0;
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let server = thread::spawn(move || {
+                for (expected, response) in [
+                    (
+                        include_bytes!("../../tests/fixtures/sequence-get.tx").as_slice(),
+                        include_bytes!("../../tests/fixtures/sequence-info.rx").as_slice(),
+                    ),
+                    (
+                        include_bytes!("../../tests/fixtures/sequence-setup.tx").as_slice(),
+                        reply,
+                    ),
+                ] {
+                    let mut actual = vec![0; expected.len()];
+                    peer.read_exact(&mut actual).unwrap();
+                    assert_eq!(actual, expected);
+                    // Split length prefixes, ciphertext, tags, headers and body.
+                    for fragment in response.chunks(7) {
+                        peer.write_all(fragment).unwrap();
+                    }
+                }
+            });
+            let mut wire = Wire::mock(socket, Duration::from_secs(3), "fixture");
+            wire.seq = 2; // Completed plaintext pair-verify, no encrypted frames yet.
+            wire.client_instance = 0x123456789ABCDEF0;
+            wire.active_remote = 123456789;
+            let secret: Vec<u8> = (0..32).collect();
+            let mut wire = wire
+                .secure(
+                    super::super::crypto::ControlKeys::new(&secret),
+                    super::super::crypto::ControlKeys::events(&secret),
+                )
+                .unwrap();
+            let info = wire.request("GET", "/info", &[], &[]).unwrap();
+            assert_eq!(
+                info.body.as_slice(),
+                include_bytes!("../../tests/fixtures/sequence-info.plist")
+            );
+            assert_eq!(wire.response_frames, 2);
+            assert_eq!(wire.pending_start, wire.pending_end);
+            let result = wire.request(
+                "SETUP",
+                "rtsp://127.0.0.1/305419896",
+                &[("Content-Type", "application/x-apple-binary-plist".into())],
+                include_bytes!("../../tests/fixtures/sequence-setup.plist"),
+            );
+            if let Some(message) = failure {
+                assert!(format!("{:#}", result.err().unwrap()).contains(message));
+                assert!(wire.failed && wire.keys.is_none());
+            } else {
+                assert!(result.unwrap().body.is_empty());
+                assert_eq!(wire.response_frames, 1); // Metric resets; RX nonce continues at 2.
+                assert_eq!(wire.seq, 4);
+                assert!(!wire.failed);
+            }
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn independent_outbound_three_frame_message() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let mut peer = listener.accept().unwrap().0;
+        peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut wire = Wire::mock(socket, Duration::from_secs(3), "fixture");
+        let secret: Vec<u8> = (0..32).collect();
+        wire.keys = Some(super::super::crypto::ControlKeys::new(&secret));
+        let plain: Vec<u8> = (0..=255).cycle().take(2304).collect();
+        wire.write_message(&plain).unwrap();
+        let expected = include_bytes!("../../tests/fixtures/sequence-bulk.tx");
+        let mut actual = vec![0; expected.len()];
+        peer.read_exact(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn diagnostic_setup_wait_has_one_deadline_for_silence_and_partial_frames() {
         for partial in [false, true] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
