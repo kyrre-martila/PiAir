@@ -532,7 +532,7 @@ impl Wire {
         }
         result
     }
-    pub(super) fn start_early_timing(
+    pub(super) fn start_timing(
         &self,
         ports: &mut Ports,
         clock: Arc<super::realtime::Clock>,
@@ -542,6 +542,7 @@ impl Wire {
             self.keys.is_some(),
             "authenticated control required for timing"
         );
+        ensure!(ports.timing_worker.is_none(), "NTP service already started");
         let socket = ports.timing.take().context("timing socket absent")?;
         ports.timing_worker = Some(Worker::timing_for_peer(
             socket,
@@ -586,42 +587,28 @@ impl Wire {
             timing_worker: None,
         })
     }
-    pub(super) fn start_timing(
-        &self,
-        ports: &mut Ports,
-        port: u16,
-        clock: Arc<super::realtime::Clock>,
-    ) -> Result<()> {
-        self.reauthorize()?;
-        ensure!(
-            self.keys.is_some() && port > 0,
-            "invalid authenticated timing port"
-        );
-        let socket = ports.timing.take().context("timing socket absent")?;
-        socket.connect(SocketAddr::new(self.socket.peer_addr()?.ip(), port))?;
-        ports.timing_worker = Some(Worker::timing(socket, self.lease(), clock)?);
-        Ok(())
-    }
     pub(super) fn media(
         &self,
-        ports: Ports,
+        pending: &mut Option<Ports>,
         data: u16,
         control: u16,
-        timing: u16,
     ) -> Result<MediaIo> {
         self.reauthorize()?;
         ensure!(
-            self.keys.is_some() && data > 0 && control > 0 && timing > 0,
+            self.keys.is_some() && data > 0 && control > 0,
             "invalid authenticated ports"
         );
+        let ports = pending.as_ref().context("media sockets absent")?;
+        ports.check_timing()?;
         let peer = self.socket.peer_addr()?.ip();
         ports.data.connect(SocketAddr::new(peer, data))?;
         ports.control.connect(SocketAddr::new(peer, control))?;
 
         ports.control.set_nonblocking(true)?;
         let lease = self.lease();
-        let timing = ports.timing_worker.context("NTP service not started")?;
         self.reauthorize()?;
+        let ports = pending.take().context("media sockets absent")?;
+        let timing = ports.timing_worker.context("NTP service not started")?;
         Ok(MediaIo {
             data: ports.data,
             control: ports.control,
@@ -986,6 +973,9 @@ pub(super) struct Ports {
     timing_worker: Option<Worker>,
 }
 impl Ports {
+    pub fn has_timing_worker(&self) -> bool {
+        self.timing_worker.is_some()
+    }
     pub fn check_timing(&self) -> Result<()> {
         self.timing_worker
             .as_ref()
@@ -1108,10 +1098,6 @@ impl Worker {
     pub fn age(&self) -> Duration {
         self.health.last.lock().unwrap().elapsed()
     }
-    fn timing(socket: UdpSocket, lease: Lease, clock: Arc<super::realtime::Clock>) -> Result<Self> {
-        let peer = socket.peer_addr()?.ip();
-        Self::timing_for_peer(socket, lease, clock, peer)
-    }
     fn timing_for_peer(
         socket: UdpSocket,
         lease: Lease,
@@ -1120,7 +1106,6 @@ impl Worker {
     ) -> Result<Self> {
         socket.set_read_timeout(Some(Duration::from_millis(100)))?;
         socket.set_write_timeout(Some(Duration::from_millis(100)))?;
-        let connected = socket.peer_addr().is_ok();
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let worker = Self::spawn(None, move |health| {
             lease.check()?;
@@ -1131,16 +1116,14 @@ impl Worker {
             while !health.stop.load(Ordering::Relaxed) {
                 match socket.recv_from(&mut b) {
                     Ok((n, peer)) => {
-                        // Before SETUP there is no negotiated remote port. OwnTone
-                        // replies to recvfrom's source. Restrict this to our verified IP.
+                        // OwnTone replies to recvfrom's source throughout the session.
+                        // Restrict unauthenticated UDP probes to our verified peer IP.
                         if peer.ip() != peer_ip {
                             continue;
                         }
                         let recv = clock.now();
                         let reply = super::realtime::timing_reply(&b[..n], recv, clock.now());
-                        let out = if connected {
-                            reply?
-                        } else if let Ok(out) = reply {
+                        let out = if let Ok(out) = reply {
                             out
                         } else {
                             continue;
@@ -1272,6 +1255,50 @@ impl Drop for Worker {
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+
+    #[test]
+    fn timing_worker_transfer_rejects_duplicates_and_retains_failed_initialization() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _peer = listener.accept().unwrap();
+        let mut wire = Wire::mock(client, Duration::from_secs(1), "test");
+        wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
+        let mut ports = wire.bind_media().unwrap();
+        let addr = ports.timing.as_ref().unwrap().local_addr().unwrap();
+        let clock = Arc::new(super::super::realtime::Clock::new().unwrap());
+        wire.start_timing(&mut ports, clock.clone()).unwrap();
+        assert!(wire.start_timing(&mut ports, clock).is_err());
+        ports.check_timing().unwrap();
+        let mut pending = Some(ports);
+        // Invalid media initialization must not consume the live responder.
+        assert!(wire.media(&mut pending, 0, 7001).is_err());
+        pending.as_ref().unwrap().check_timing().unwrap();
+        let media = wire.media(&mut pending, 7000, 7001).unwrap();
+        assert!(pending.is_none());
+        media.timing.check().unwrap();
+        drop(media);
+        drop(UdpSocket::bind(addr).unwrap());
+        // Exercise the same health propagation with a failed socket owner.
+        let mut ports = wire.bind_media().unwrap();
+        let socket = ports.timing.take().unwrap();
+        let addr = socket.local_addr().unwrap();
+        ports.timing_worker = Some(Worker::spawn(None, move |_| {
+            let _socket = socket;
+            bail!("injected timing failure")
+        }));
+        let worker = ports.timing_worker.as_ref().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !worker.join.as_ref().unwrap().is_finished() {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        let mut pending = Some(ports);
+        let error = wire.media(&mut pending, 7000, 7001).err().unwrap();
+        assert!(format!("{error:#}").contains("injected timing failure"));
+        assert!(pending.is_some());
+        drop(pending);
+        UdpSocket::bind(addr).unwrap();
+    }
 
     #[test]
     fn early_timing_ready_filters_packets_and_joins_exactly_one_worker() {

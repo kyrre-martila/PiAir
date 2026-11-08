@@ -192,6 +192,9 @@ encrypted events/media, NTP sync, feedback/retransmit and FLUSH/TEARDOWN.
 OwnTone's inspected sender does not implement buffered TCP type 103. PiAir's
 older 48 kHz buffered packet components remain separate and disabled.
 
+Normal realtime playback now uses the [early NTP responder lifecycle](docs/REALTIME_NTP_LIFECYCLE.md)
+verified for setup-only profile B. Hardware playback remains unverified.
+
 After reviewing the physical receiver and existing approval/selection/pairing,
 the explicit diagnostic is:
 

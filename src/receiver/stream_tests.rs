@@ -82,9 +82,24 @@ fn send_reply(
 fn plist(r: &Request) -> Value {
     Value::from_reader(std::io::Cursor::new(&r.body)).unwrap()
 }
+fn timing_probe(destination: u16) {
+    let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    let mut query = [0; 32];
+    query[..4].copy_from_slice(&[0x80, 0xd2, 0x12, 0x34]);
+    query[24..].copy_from_slice(&123_u64.to_be_bytes());
+    peer.send_to(&query, ("127.0.0.1", destination)).unwrap();
+    let mut reply = [0; 33];
+    let (n, source) = peer.recv_from(&mut reply).unwrap();
+    assert_eq!(source.port(), destination);
+    assert_eq!(n, 32);
+    assert_eq!(&reply[..4], &[0x80, 0xd3, 0x12, 0x34]);
+    assert_eq!(&reply[8..16], &query[24..]);
+}
 #[derive(Clone, Copy)]
 enum Mode {
     Good,
+    NoRemoteTiming,
     BadCodec,
     UnsupportedTiming,
     BadPort,
@@ -192,6 +207,10 @@ fn receiver_authenticated(
     let event_port = event.local_addr().unwrap().port();
     let timing = UdpSocket::bind("127.0.0.1:0").unwrap();
     let timing_port = timing.local_addr().unwrap().port();
+    if matches!(mode, Mode::Good | Mode::NoRemoteTiming) {
+        // Withhold the initial response until the advertised responder answers.
+        timing_probe(destination);
+    }
     let data = UdpSocket::bind("127.0.0.1:0").unwrap();
     let data_port = data.local_addr().unwrap().port();
     let control = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
@@ -242,16 +261,14 @@ fn receiver_authenticated(
     } else {
         Some(event)
     };
-    send_reply(
-        &mut socket,
-        &mut keys,
-        &base,
-        Some(profile::dict([
-            ("eventPort", profile::uint(u64::from(event_port))),
-            ("timingPort", profile::uint(u64::from(timing_port))),
-        ])),
-        "",
-    );
+    let mut response = profile::dict([("eventPort", profile::uint(u64::from(event_port)))]);
+    if !matches!(mode, Mode::NoRemoteTiming) {
+        response
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("timingPort".into(), profile::uint(u64::from(timing_port)));
+    }
+    send_reply(&mut socket, &mut keys, &base, Some(response), "");
     if matches!(mode, Mode::EventRefused) {
         let end = read_message(&mut socket, &mut keys);
         assert_eq!(end.method, "TEARDOWN");
@@ -305,6 +322,9 @@ fn receiver_authenticated(
     });
     let record = read_message(&mut socket, &mut keys);
     assert_eq!(record.method, "RECORD");
+    if matches!(mode, Mode::Good | Mode::NoRemoteTiming) {
+        timing_probe(destination);
+    }
     assert!(record.body.is_empty());
     assert_eq!(record.uri, base.uri);
     send_reply(
@@ -316,6 +336,9 @@ fn receiver_authenticated(
     );
     let stream = read_message(&mut socket, &mut keys);
     assert_eq!(stream.method, "SETUP");
+    if matches!(mode, Mode::Good | Mode::NoRemoteTiming) {
+        timing_probe(destination);
+    }
     let offer = plist(&stream);
     let stream_d = offer.as_dictionary().unwrap()["streams"]
         .as_array()
@@ -542,6 +565,12 @@ fn receiver_authenticated(
                 send_reply(&mut socket, &mut keys, &r, None, "");
             }
             "TEARDOWN" => {
+                if !matches!(
+                    mode,
+                    Mode::NoTiming | Mode::BadTiming | Mode::SilentTeardown | Mode::Revoke
+                ) {
+                    timing_probe(destination);
+                }
                 assert!(plist(&r).as_dictionary().unwrap().is_empty());
                 if !matches!(mode, Mode::SilentTeardown) {
                     send_reply(&mut socket, &mut keys, &r, None, "");
@@ -556,11 +585,15 @@ fn receiver_authenticated(
     events.join().unwrap();
     data_thread.join().unwrap();
     sync_thread.join().unwrap();
-    if matches!(mode, Mode::Good) && seen.load(Ordering::Relaxed) > 0 {
+    if matches!(mode, Mode::Good | Mode::NoRemoteTiming) && seen.load(Ordering::Relaxed) > 0 {
         assert!(sync_count.load(Ordering::Relaxed) >= 3);
     }
     if !matches!(mode, Mode::Disconnect) {
         assert_eof(&mut socket);
+        if matches!(mode, Mode::Good | Mode::NoRemoteTiming) {
+            let rebound = UdpSocket::bind(("127.0.0.1", destination)).unwrap();
+            drop(rebound);
+        }
     }
 }
 fn nonce_with_zero_prefix(nonce: &[u8; 8]) -> [u8; 12] {
@@ -570,24 +603,26 @@ fn nonce_with_zero_prefix(nonce: &[u8; 8]) -> [u8; 12] {
 }
 #[test]
 fn full_authenticated_realtime_session_encodes_encrypts_synchronizes_and_tears_down() {
-    let seen = Arc::new(AtomicU64::new(0));
-    let count = seen.clone();
-    let (wire, server) = local_mock(move |s| receiver(s, Mode::Good, count));
-    let mut session = Session::new();
-    session.start(|| Ok(wire), &credential()).unwrap();
-    session.negotiate_realtime().unwrap();
-    assert_eq!(session.state(), State::Ready);
-    session.transmit_test(1).unwrap();
-    assert_eq!(session.state(), State::Streaming);
-    assert!(session.packets_sent > 350);
-    assert!(session.resends > 0);
-    assert!(session.timing_exchanges > 0);
-    let sent = session.packets_sent;
-    session.stop().unwrap();
-    session.stop().unwrap();
-    assert_eq!(session.state(), State::Disconnected);
-    server.join().unwrap();
-    assert_eq!(seen.load(Ordering::Relaxed), sent);
+    for mode in [Mode::Good, Mode::NoRemoteTiming] {
+        let seen = Arc::new(AtomicU64::new(0));
+        let count = seen.clone();
+        let (wire, server) = local_mock(move |s| receiver(s, mode, count));
+        let mut session = Session::new();
+        session.start(|| Ok(wire), &credential()).unwrap();
+        session.negotiate_realtime().unwrap();
+        assert_eq!(session.state(), State::Ready);
+        session.transmit_test(1).unwrap();
+        assert_eq!(session.state(), State::Streaming);
+        assert!(session.packets_sent > 350);
+        assert!(session.resends > 0);
+        assert!(session.timing_exchanges > 0);
+        let sent = session.packets_sent;
+        session.stop().unwrap();
+        session.stop().unwrap();
+        assert_eq!(session.state(), State::Disconnected);
+        server.join().unwrap();
+        assert_eq!(seen.load(Ordering::Relaxed), sent);
+    }
 }
 #[test]
 fn unsupported_codec_and_partial_setup_errors_fail_and_cleanup() {
@@ -615,7 +650,7 @@ fn unsupported_codec_and_partial_setup_errors_fail_and_cleanup() {
             Mode::UnsupportedTiming => {
                 assert!(diagnostic.contains("unsupported PTP/timing profile"))
             }
-            Mode::NoTiming | Mode::SilentTeardown => assert!(
+            Mode::NoTiming | Mode::SilentTeardown | Mode::BadTiming => assert!(
                 diagnostic.contains("ntp_ready=false event_ready=true"),
                 "{diagnostic}"
             ),
@@ -628,7 +663,6 @@ fn unsupported_codec_and_partial_setup_errors_fail_and_cleanup() {
                 "{diagnostic}"
             ),
             Mode::BadEventTag => assert!(diagnostic.contains("event worker"), "{diagnostic}"),
-            Mode::BadTiming => assert!(diagnostic.contains("NTP worker"), "{diagnostic}"),
             Mode::BadPort | Mode::BadSession => assert!(
                 diagnostic.contains("stage=stream SETUP") && diagnostic.contains("status=200"),
                 "{diagnostic}"
@@ -935,23 +969,17 @@ fn initial_setup_check_validates_then_tears_down_without_record_or_audio() {
                 ("eventPort", profile::uint(7001)),
                 ("timingPort", profile::uint(7002)),
             ]),
-            false,
             None,
         );
     }
 }
 
 #[test]
-fn initial_ntp_response_contract_and_playback_limit() {
+fn initial_ntp_response_contract() {
     let valid = profile::dict([("eventPort", profile::uint(7001))]);
-    initial_setup_check(None, valid.clone(), false, None);
-    initial_setup_check(
-        None,
-        valid,
-        true,
-        Some("full playback requires receiver timingPort"),
-    );
-    initial_setup_check(None, profile::dict([]), false, Some("eventPort"));
+    initial_setup_check(None, valid, None);
+
+    initial_setup_check(None, profile::dict([]), Some("eventPort"));
     for value in [
         profile::uint(0),
         profile::uint(65536),
@@ -963,13 +991,11 @@ fn initial_ntp_response_contract_and_playback_limit() {
         initial_setup_check(
             None,
             profile::dict([("eventPort", value.clone())]),
-            false,
             Some("eventPort"),
         );
         initial_setup_check(
             None,
             profile::dict([("eventPort", profile::uint(7001)), ("timingPort", value)]),
-            false,
             Some("timingPort"),
         );
     }
@@ -984,18 +1010,12 @@ fn initial_ntp_response_contract_and_playback_limit() {
                 ("eventPort", profile::uint(7001)),
                 ("timingProtocol", protocol),
             ]),
-            false,
             Some("unsupported PTP/timing profile"),
         );
     }
 }
 
-fn initial_setup_check(
-    timeout: Option<Duration>,
-    response: Value,
-    playback: bool,
-    error: Option<&str>,
-) {
+fn initial_setup_check(timeout: Option<Duration>, response: Value, error: Option<&str>) {
     let (wire, server) = local_mock(move |s| {
         let (mut socket, mut keys) = verify_mock_core(s, Fault::None, PI, |_| {}).unwrap();
         let info = read_message(&mut socket, &mut keys);
@@ -1037,11 +1057,7 @@ fn initial_setup_check(
     });
     let mut session = Session::new();
     session.start(|| Ok(wire), &credential()).unwrap();
-    let result = if playback {
-        session.negotiate_realtime()
-    } else {
-        session.check_initial_setup_with_timeout(timeout)
-    };
+    let result = session.check_initial_setup_with_timeout(timeout);
     if let Some(expected) = error {
         let error = format!("{:#}", result.unwrap_err());
         assert!(error.contains(expected), "{error}");
@@ -1159,8 +1175,16 @@ fn preverify_info_mock(socket: &mut TcpStream) {
 #[test]
 fn setup_profiles_cancel_timeout_and_failure_release_timing_socket() {
     let _ = super::diagnostics::tests::capture(tracing::Level::DEBUG, || {
-        for selected in [SetupProfile::A, SetupProfile::B, SetupProfile::C] {
+        for (selected, playback) in [
+            (SetupProfile::A, false),
+            (SetupProfile::B, false),
+            (SetupProfile::C, false),
+            (SetupProfile::A, true),
+        ] {
             for fault in ["cancel", "timeout", "invalid"] {
+                if playback && fault == "cancel" {
+                    continue;
+                }
                 let mut session = Session::new();
                 let cancel = session.cancel.clone();
                 let (cleaned_tx, cleaned_rx) = std::sync::mpsc::sync_channel(1);
@@ -1190,6 +1214,9 @@ fn setup_profiles_cancel_timeout_and_failure_release_timing_socket() {
                     socket
                         .set_read_timeout(Some(Duration::from_secs(6)))
                         .unwrap();
+                    if playback {
+                        timing_probe(port);
+                    }
                     match fault {
                         "cancel" => cancel.store(true, Ordering::Relaxed),
                         "invalid" => {
@@ -1198,6 +1225,9 @@ fn setup_profiles_cancel_timeout_and_failure_release_timing_socket() {
                             send_reply(&mut socket, &mut keys, &setup, Some(profile::dict([])), "");
                             let teardown = read_message(&mut socket, &mut keys);
                             assert_eq!(teardown.method, "TEARDOWN");
+                            if playback {
+                                timing_probe(port);
+                            }
                             send_reply(&mut socket, &mut keys, &teardown, None, "");
                         }
                         _ => (),
@@ -1212,9 +1242,13 @@ fn setup_profiles_cancel_timeout_and_failure_release_timing_socket() {
                     .start_setup_selected(|| Ok(wire), Some(&credential()), selected)
                     .unwrap();
                 let started = std::time::Instant::now();
-                let result = session.check_initial_setup_with_timeout(
-                    (fault == "cancel").then_some(Duration::from_secs(15)),
-                );
+                let result = if playback {
+                    session.negotiate_realtime()
+                } else {
+                    session.check_initial_setup_with_timeout(
+                        (fault == "cancel").then_some(Duration::from_secs(15)),
+                    )
+                };
                 assert!(result.is_err());
                 let error = format!("{:#}", result.unwrap_err());
                 if fault == "cancel" {

@@ -86,18 +86,19 @@ Startup uses production encoders/decoders and this fixed sequence:
 1. Fresh HAP pair-verify, then encrypted `GET /info`. Require audio/ALAC feature
    evidence and reject an advertised supportedFormats.audioStream mask excluding
    ALAC 44100/16/stereo. No codec guessing or fallback.
-2. Bind local UDP timing/control/data sockets. Send session SETUP binary plist:
-   deviceID, fresh sessionUUID, timingPort and timingProtocol=NTP. The sender
-   deviceID is a fresh locally administered identifier; no iOS/model impersonation.
+2. Bind local UDP timing/control/data sockets. For playback, start the existing
+   peer-IP-filtered NTP responder and confirm worker readiness before initial
+   SETUP. Advertise its actual bound local timingPort in the four-field NTP
+   offer, together with the persistent sender deviceID and fresh sessionUUID.
 3. Validate nonzero eventPort and, when present, timingPort (integer 1..65535)
    from the authenticated initial NTP response. Reject explicit PTP/None timing.
-   Setup-only checks allow timingPort to be absent and proceed to TEARDOWN.
-   Full playback still requires timingPort before starting its connected NTP
-   worker or event connection; otherwise it fails explicitly before RECORD.
-   OwnTone instead replies to each timing probe's source port. PiAir's B/C
-   setup-only workers already use this model, restricted to the verified peer IP;
-   migrating full playback to that lifecycle remains separate work. See
-   [initial NTP response contract](INITIAL_NTP_RESPONSE.md).
+   Connect the encrypted event channel. No receiver timingPort is required or
+   substituted: valid NTP probes from the verified receiver IP receive replies
+   at their UDP source port throughout negotiation, playback and TEARDOWN.
+   Session owns pending sockets/worker until transfer into MediaIo; failed
+   negotiation retains them until best-effort TEARDOWN and joined cleanup.
+   Setup-only A retains deferred timing, B/C retain early timing and C's
+   pre-verify info order. See [playback lifecycle migration](REALTIME_NTP_LIFECYCLE.md).
 4. Send RECORD and validate any Audio-Latency header within 11025..88200 samples.
    Absent latency uses the explicitly offered minimum 11025; zero is rejected.
 5. SETUP one stream: type=96, audioFormat=0x40000, ct=2, spf=352, sr=44100,
