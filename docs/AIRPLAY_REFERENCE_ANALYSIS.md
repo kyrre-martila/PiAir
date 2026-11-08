@@ -120,10 +120,9 @@ audio and synthetic plist/AEAD/event-key fixtures. No hardware playback is
 claimed. Current exact implementation, limits and state transitions are in
 AIRPLAY_SESSION.md.
 
-Concrete differences/limits remain explicit: require an authenticated positive
-NTP timingPort for full playback only (setup-only accepts its absence; OwnTone
-replies to the timing probe source endpoint); require an
-initial encrypted updateInfo and NTP exchange before READY; refuse zero/out-of-
+Playback now follows OwnTone's early NTP service and probe-source replies; see
+[the lifecycle migration](REALTIME_NTP_LIFECYCLE.md). Concrete differences/limits
+remain explicit: require an initial encrypted updateInfo and NTP exchange before READY; refuse zero/out-of-
 window Audio-Latency; do not implement OwnTone's PTP/libairptp branch, automatic
 transient fallback, password digest, metadata resurrection or long sessions.
 These are deliberate bounded profile choices, not missing undocumented constants.

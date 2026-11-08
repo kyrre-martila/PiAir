@@ -2,7 +2,7 @@
 use super::{
     pairing, profile, realtime,
     store::Credential,
-    wire::{MediaIo, Reply, Wire, Worker},
+    wire::{MediaIo, Ports, Reply, Wire, Worker},
 };
 use anyhow::{bail, ensure, Context, Result};
 use plist::Value;
@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Setup-only comparisons; production playback retains the control lifecycle.
+/// Setup-only comparisons; playback always uses the early NTP responder.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum SetupProfile {
     #[default]
@@ -46,6 +46,9 @@ pub struct Session {
     stream_id: Option<u32>,
     remote_attempted: bool,
     media: Option<MediaIo>,
+    // Own sockets and the early worker through failed negotiation/TEARDOWN.
+    // Successful media initialization moves them together into MediaIo.
+    ports: Option<Ports>,
     events: Option<Worker>,
     encoder: Option<realtime::Encoder>,
     clock: Option<Arc<realtime::Clock>>,
@@ -67,6 +70,7 @@ impl Session {
             stream_id: None,
             remote_attempted: false,
             media: None,
+            ports: None,
             events: None,
             encoder: None,
             clock: None,
@@ -189,6 +193,13 @@ impl Session {
             !self.cancel.load(Ordering::Relaxed) || ["TEARDOWN", "FLUSH"].contains(&method),
             "diagnostic interrupted"
         );
+        if !["TEARDOWN", "FLUSH"].contains(&method) {
+            if let Some(ports) = &self.ports {
+                if ports.has_timing_worker() {
+                    ports.check_timing()?;
+                }
+            }
+        }
         let uri = path.unwrap_or(&self.uri).to_owned();
         let mut headers = extra.to_vec();
         if !body.is_empty()
@@ -296,13 +307,15 @@ impl Session {
             }
             status = None;
             stage = "media socket binding";
-            let mut ports = self.control.as_ref().unwrap().bind_media()?;
+            self.ports = Some(self.control.as_ref().unwrap().bind_media()?);
+            let ports = self.ports.as_mut().unwrap();
             let control_port = ports.control()?;
             let timing_port = ports.timing()?;
-            if self.setup_profile != SetupProfile::A {
+            let early_timing = !initial_only || self.setup_profile != SetupProfile::A;
+            if early_timing {
                 stage = "early NTP worker startup";
-                self.control.as_ref().unwrap().start_early_timing(
-                    &mut ports, self.clock.as_ref().unwrap().clone(),
+                self.control.as_ref().unwrap().start_timing(
+                    ports, self.clock.as_ref().unwrap().clone(),
                 )?;
                 tracing::info!(target: "piair::rtsp", timing_port, ready = true,
                     "NTP responder ready before initial SETUP");
@@ -319,8 +332,8 @@ impl Session {
                 body_length = body.len(), timing_port,
                 plist_fields = "deviceID:string,sessionUUID:string,timingProtocol:string,timingPort:unsigned-integer",
                 sender_identity = "persistent client identity", "initial SETUP start");
-            if self.setup_profile != SetupProfile::A {
-                ports.check_timing()?;
+            if early_timing {
+                self.ports.as_ref().unwrap().check_timing()?;
             }
             self.remote_attempted = true;
             if let Some(timeout) = setup_timeout {
@@ -344,29 +357,18 @@ impl Session {
             let event_port = profile::port(d, "eventPort")?;
             // OwnTone 29.3's initial NTP response requires only eventPort.
             // Validate an optional timingPort without inventing a remote endpoint.
-            let receiver_timing = d
-                .contains_key("timingPort")
-                .then(|| profile::port(d, "timingPort"))
-                .transpose()?;
+            if d.contains_key("timingPort") {
+                profile::port(d, "timingPort")?;
+            }
             tracing::debug!(target: "piair::rtsp", phase = "initial SETUP", status = 200,
                 timing_profile = "NTP", "initial SETUP profile and ports validated");
             if initial_only {
                 return Ok(());
             }
-            let receiver_timing = receiver_timing.context(
-                "full playback requires receiver timingPort; probe-source NTP lifecycle is not implemented for playback",
-            )?;
-            status = None;
-            stage = "NTP worker startup";
-            self.control.as_ref().unwrap().start_timing(
-                &mut ports,
-                receiver_timing,
-                self.clock.as_ref().unwrap().clone(),
-            )?;
             status = None;
             stage = "event connection";
             self.events = Some(self.control.as_mut().unwrap().event(event_port)?);
-            // The timing endpoint is authenticated before any timing reply is sent.
+            // Timing probes are restricted to the verified control peer IP.
             // Stream ports arrive later; retain the bound sockets until then.
             status = None;
             stage = "RECORD";
@@ -385,10 +387,9 @@ impl Session {
             status = None;
             stage = "media socket connection";
             self.media = Some(self.control.as_ref().unwrap().media(
-                ports,
+                &mut self.ports,
                 data,
                 control,
-                receiver_timing,
             )?);
             self.encoder = Some(encoder);
             status = None;
@@ -443,6 +444,9 @@ impl Session {
             !self.cancel.load(Ordering::Relaxed),
             "diagnostic interrupted"
         );
+        if let Some(ports) = &self.ports {
+            ports.check_timing().context("NTP worker")?;
+        }
         if let Some(event) = &self.events {
             event.check().context("event worker")?;
         }
@@ -621,6 +625,7 @@ impl Session {
     fn release(&mut self) {
         tracing::debug!(target: "piair::rtsp", "session cleanup: releasing sockets and joining workers");
         self.media = None;
+        self.ports = None;
         self.events = None;
         self.encoder = None;
         self.clock = None;
