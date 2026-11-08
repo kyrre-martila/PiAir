@@ -99,6 +99,16 @@ impl Encoder {
             cache: VecDeque::new(),
         })
     }
+    pub(super) fn from_verified_key(key: Zeroizing<[u8; 32]>) -> Result<Self> {
+        let mut encoder = Self::new()?;
+        encoder.key = key;
+        // The fixed diagnostic uses at most 376 packets. Choose an initial
+        // sequence that cannot wrap in that budget, preserving OwnTone's
+        // little-endian sequence nonce without reproducing its wrap reuse.
+        encoder.sequence %= u16::MAX - 375;
+        encoder.nonce = u64::from(encoder.sequence);
+        Ok(encoder)
+    }
     pub(super) fn key(&self) -> &[u8; 32] {
         &self.key
     }

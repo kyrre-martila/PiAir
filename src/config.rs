@@ -141,6 +141,26 @@ pub fn load(cli: Option<PathBuf>) -> Result<Loaded> {
     })
 }
 
+/// Re-read every authorization boundary, including atomic file replacements.
+/// Cache only successful parsing of identical bytes; no metadata/time-based lease.
+pub(crate) fn approval(path: &std::path::Path, id: &str) -> Result<bool> {
+    thread_local! {
+        static PARSED: std::cell::RefCell<Option<(PathBuf, String, Config)>> = const { std::cell::RefCell::new(None) };
+    }
+    let text = fs::read_to_string(path).context("cannot read authorization configuration")?;
+    PARSED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache
+            .as_ref()
+            .is_some_and(|(old_path, old_text, _)| old_path == path && old_text == &text)
+        {
+            let parsed = Config::parse(&text).context("authorization configuration invalid")?;
+            *cache = Some((path.to_owned(), text, parsed));
+        }
+        Ok(cache.as_ref().expect("parsed above").2.allows(id))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +221,27 @@ mod tests {
         );
         assert!(resolve(None, None, p("relative"), p("/home/u")).is_err());
         assert!(resolve(None, None, None, None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod authorization_cache_tests {
+    use super::*;
+    #[test]
+    fn identical_content_cache_never_hides_revocation_invalidity_or_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let id = "device:3ae5c9a302ad";
+        fs::write(&path, format!("receiver_allowlist=['{id}']")).unwrap();
+        assert!(approval(&path, id).unwrap());
+        assert!(approval(&path, id).unwrap());
+        let replacement = dir.path().join("new.toml");
+        fs::write(&replacement, "receiver_allowlist=[]").unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert!(!approval(&path, id).unwrap());
+        fs::write(&path, "receiver_allowlist=3").unwrap();
+        assert!(approval(&path, id).is_err());
+        fs::remove_file(&path).unwrap();
+        assert!(approval(&path, id).is_err());
     }
 }

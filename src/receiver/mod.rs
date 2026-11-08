@@ -351,10 +351,18 @@ pub fn stream_test(
     volume_db: i32,
     setup_check: bool,
     record_check: bool,
+    stream_setup_check: bool,
+    playback_check: bool,
     setup_timeout_seconds: Option<u64>,
     setup_profile: Option<SetupProfile>,
     experimental_owntone_transient: bool,
 ) -> Result<()> {
+    let stream_diagnostic = stream_setup_check || playback_check;
+    ensure!(!stream_diagnostic || (!setup_check && !record_check
+        && !(stream_setup_check && playback_check) && experimental_owntone_transient
+        && id == Some(session::RECORD_RECEIVER_ID) && setup_profile.is_none()
+        && setup_timeout_seconds.is_none() && seconds == 1 && volume_db == -30),
+        "stream diagnostics require the exact approved HomePod, OwnTone transient, fixed defaults and no conflicting modes");
     ensure!(
         setup_profile.is_none() || setup_check,
         "profiles require --setup-check"
@@ -364,8 +372,8 @@ pub fn stream_test(
         "SETUP timeout experiment requires --setup-check and 15 seconds"
     );
     ensure!(
-        !experimental_owntone_transient || ((setup_check || record_check) && id.is_some() && setup_profile.is_none()),
-        "OwnTone transient requires an exact ID, --setup-check or --record-check and no --setup-profile; no fallback"
+        !experimental_owntone_transient || ((setup_check || record_check || stream_diagnostic) && id.is_some() && setup_profile.is_none()),
+        "OwnTone transient requires an exact ID, an explicit diagnostic and no --setup-profile; no fallback"
     );
     ensure!(!record_check || (!setup_check && experimental_owntone_transient
         && id == Some(session::RECORD_RECEIVER_ID) && setup_profile.is_none()
@@ -419,14 +427,18 @@ pub fn stream_test(
         );
         Some(credential)
     };
-    if record_check {
+    if stream_setup_check {
+        println!("Stream SETUP-only check: authentication, initial SETUP, event connection, RECORD, stream SETUP, TEARDOWN. Zero audio; receiver volume unchanged. Successful negotiation does not prove audible playback.");
+    } else if playback_check {
+        println!("Playback check: one second original faded tone (peak below -18 dBFS), fixed receiver volume -40 dB, two second silent drain. Volume may persist and is NOT restored. No retries. Packet transmission does not prove audible playback.");
+    } else if record_check {
         println!("RECORD-only OwnTone transient diagnostic: event channel and empty RECORD, then TEARDOWN. No audio or volume change. RECORD 200 does not prove stream negotiation or audible playback.");
     } else if experimental_owntone_transient {
         println!("Setup-only OwnTone-reference transient SRP selected; no persistent receiver identity verification; no fallback. Successful SETUP does not prove audible playback.");
     } else if selected.method == Method::Transient {
         println!("Stream-test uses the selected legacy transient SRP profile without persistent receiver identity verification. Experimental authenticate profiles are not used; no fallback. Successful authentication or transmission does not prove audible playback.");
     }
-    if record_check {
+    if stream_setup_check || record_check {
         println!("Receiver volume unchanged; no playback operations.");
     } else if setup_check {
         println!("Initial NTP SETUP check: validate response and tear down; no RECORD or audio transmission. Receiver volume unchanged (--volume-db is playback-only).");
@@ -439,7 +451,11 @@ pub fn stream_test(
     );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
     interactive::describe(&snapshot, id)?;
-    if record_check {
+    if stream_setup_check {
+        println!("Operation: stream SETUP-only check");
+    } else if playback_check {
+        println!("Operation: playback check; confirm -40 dB receiver volume may persist; one second tone");
+    } else if record_check {
         println!("Operation: RECORD-only check");
     } else if setup_check {
         println!("Operation: Setup-only check");
@@ -451,7 +467,11 @@ pub fn stream_test(
         loaded,
         proposed.as_ref(),
         &snapshot,
-        if record_check {
+        if stream_setup_check {
+            "Start stream SETUP-only check? [y/N]: "
+        } else if playback_check {
+            "Authorize one second tone and persistent -40 dB receiver volume? [y/N]: "
+        } else if record_check {
             "Start RECORD-only check? [y/N]: "
         } else if setup_check {
             "Start setup-only check? [y/N]: "
@@ -462,7 +482,9 @@ pub fn stream_test(
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
     let connect = || wire::Wire::connect(&loaded.path, id, &selected, &snapshot);
-    if record_check {
+    if stream_diagnostic {
+        session.start_owntone_stream_selected(connect, &selected.capabilities, playback_check)?;
+    } else if record_check {
         session.start_owntone_record_selected(connect, &selected.capabilities)?;
     } else if experimental_owntone_transient {
         session.start_owntone_setup_selected(connect, &selected.capabilities)?;
@@ -479,6 +501,18 @@ pub fn stream_test(
         println!("Authentication: transient SRP proof verified; no persistent receiver identity verification");
     } else {
         println!("Authentication: persistent receiver identity cryptographically verified");
+    }
+    if stream_setup_check {
+        session.check_stream()?;
+        println!("Stream SETUP validated; TEARDOWN acknowledged; local cleanup complete; audio packets: 0; volume unchanged. Audible playback unverified.");
+        return Ok(());
+    }
+    if playback_check {
+        session.prepare_playback_check()?;
+        session.transmit_test(1)?;
+        session.stop()?;
+        println!("Bounded playback transmission: {} packets; TEARDOWN acknowledged; local cleanup complete. Receiver volume -40 dB may persist; audible playback unverified.", session.packets_sent);
+        return Ok(());
     }
     if record_check {
         let result = session.check_record();

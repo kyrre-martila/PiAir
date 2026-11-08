@@ -442,3 +442,26 @@ fn record_diagnostic_rejects_other_receivers_before_discovery_or_terminal() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("approved HomePod exact ID"));
     assert!(!dir.path().join("receiver-state").exists());
 }
+
+#[test]
+fn stream_diagnostics_reject_other_ids_without_state_or_contact() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("piair.toml");
+    std::fs::write(&config, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
+    for mode in ["--stream-setup-check", "--playback-check"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_piair"))
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "stream-test",
+                "device:aabbccddeeff",
+                mode,
+                "--experimental-owntone-transient",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("exact approved HomePod"));
+        assert!(!dir.path().join("receiver-state").exists());
+    }
+}

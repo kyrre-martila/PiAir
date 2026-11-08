@@ -69,7 +69,13 @@ pub enum Command {
         /// Validate RECORD after initial NTP SETUP, then tear down without audio.
         #[arg(long, group = "owntone_diagnostic", requires_all = ["experimental_owntone_transient", "receiver_id"], conflicts_with_all = ["setup_check", "volume_db", "seconds", "setup_profile", "setup_timeout_seconds"])]
         record_check: bool,
-        /// OwnTone-reference transient authentication for SETUP or RECORD diagnostics; no fallback.
+        /// Validate stream SETUP, then TEARDOWN; zero audio and volume changes.
+        #[arg(long, group = "owntone_diagnostic", requires_all = ["experimental_owntone_transient", "receiver_id"], conflicts_with_all = ["volume_db", "seconds", "setup_profile", "setup_timeout_seconds"])]
+        stream_setup_check: bool,
+        /// One second faded tone at -40 dB receiver volume, which may persist.
+        #[arg(long, group = "owntone_diagnostic", requires_all = ["experimental_owntone_transient", "receiver_id"], conflicts_with_all = ["volume_db", "seconds", "setup_profile", "setup_timeout_seconds"])]
+        playback_check: bool,
+        /// OwnTone-reference transient authentication for explicit diagnostics; no fallback.
         #[arg(long, requires_all = ["receiver_id", "owntone_diagnostic"], conflicts_with = "setup_profile")]
         experimental_owntone_transient: bool,
         /// Diagnostic only: wait up to 15 seconds total for initial SETUP.
@@ -340,6 +346,53 @@ mod record_tests {
             "piair",
             "stream-test",
             "--record-check",
+            "--experimental-owntone-transient"
+        ])
+        .is_err());
+    }
+}
+
+#[cfg(test)]
+mod playback_diagnostic_tests {
+    use super::*;
+    #[test]
+    fn both_stream_modes_are_explicit_exclusive_and_fixed() {
+        for mode in ["--stream-setup-check", "--playback-check"] {
+            let base = [
+                "piair",
+                "stream-test",
+                "device:3ae5c9a302ad",
+                "--experimental-owntone-transient",
+                mode,
+            ];
+            assert!(Cli::try_parse_from(base).is_ok());
+            for extra in [
+                vec!["--seconds", "1"],
+                vec!["--volume-db", "-40"],
+                vec!["--record-check"],
+                vec!["--setup-check"],
+                vec!["--setup-profile", "a"],
+                vec!["--setup-timeout-seconds", "15"],
+            ] {
+                assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
+            }
+            assert!(Cli::try_parse_from([
+                "piair",
+                "stream-test",
+                mode,
+                "--experimental-owntone-transient"
+            ])
+            .is_err());
+            assert!(
+                Cli::try_parse_from(["piair", "stream-test", "device:3ae5c9a302ad", mode]).is_err()
+            );
+        }
+        assert!(Cli::try_parse_from([
+            "piair",
+            "stream-test",
+            "device:3ae5c9a302ad",
+            "--stream-setup-check",
+            "--playback-check",
             "--experimental-owntone-transient"
         ])
         .is_err());

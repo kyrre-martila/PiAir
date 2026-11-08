@@ -70,6 +70,7 @@ pub struct Wire {
     authorization: Option<(PathBuf, Selection)>,
     keys: Option<super::crypto::ControlKeys>,
     events: Option<super::crypto::ControlKeys>,
+    audio_key: Option<Zeroizing<[u8; 32]>>,
     last_headers: BTreeMap<String, String>,
     pending: Zeroizing<[u8; 1024]>,
     pending_start: usize,
@@ -181,6 +182,7 @@ impl Wire {
             authorization: None,
             keys: None,
             events: None,
+            audio_key: None,
             last_headers: BTreeMap::new(),
             pending: Zeroizing::new([0; 1024]),
             pending_start: 0,
@@ -353,9 +355,7 @@ impl Wire {
     pub(super) fn reauthorize(&self) -> Result<()> {
         if let Some((path, selected)) = &self.authorization {
             ensure!(
-                config::load(Some(path.clone()))?
-                    .config
-                    .allows(&self.receiver_id),
+                config::approval(path, &self.receiver_id)?,
                 "receiver approval revoked"
             );
             ensure!(
@@ -379,6 +379,20 @@ impl Wire {
         self.events = Some(events);
         Ok(self)
     }
+    pub(super) fn install_audio_key(&mut self, shared: &[u8]) -> Result<()> {
+        ensure!(
+            self.keys.is_some() && shared.len() >= 32,
+            "verified pairing required"
+        );
+        if self.uses_owntone_transient_profile() {
+            self.audio_key = Some(Zeroizing::new(shared[..32].try_into()?));
+        }
+        Ok(())
+    }
+    pub(super) fn take_audio_key(&mut self) -> Result<Zeroizing<[u8; 32]>> {
+        self.reauthorize()?;
+        self.audio_key.take().context("verified audio key absent")
+    }
     pub(super) fn close(&mut self) {
         if !self.failed && self.keys.is_none() {
             tracing::debug!(target: "piair::auth", phase = self.auth_phase,
@@ -387,6 +401,7 @@ impl Wire {
         self.failed = true;
         self.keys = None;
         self.events = None;
+        self.audio_key = None;
         self.pending.zeroize();
         self.pending_start = 0;
         self.pending_end = 0;
@@ -1000,7 +1015,7 @@ impl Lease {
     pub(super) fn check(&self) -> Result<()> {
         if let Some((path, selected)) = &self.authorization {
             ensure!(
-                config::load(Some(path.clone()))?.config.allows(&self.id),
+                config::approval(path, &self.id)?,
                 "receiver approval revoked"
             );
             ensure!(
