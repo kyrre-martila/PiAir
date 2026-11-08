@@ -168,7 +168,7 @@ piair --config config.toml unpair device:aabbccddeeff
 ```
 
 IDs above are examples. Selection pins identity/endpoints and never connects.
-Pair/authenticate require an interactive terminal and typing the exact ID; pairing
+Pair/authenticate require an interactive terminal and explicit y/yes confirmation; pairing
 requests a receiver PIN and reads it without echo. Connections recheck current
 approval and pinned discovery evidence, with no retries, redirects or fallback.
 No Samsung or other unapproved receiver is contacted. Read-only/config/audio
@@ -182,7 +182,7 @@ comes from verified M6, independently of optional, untrusted advertised `pi`.
 Pair-verify uses that stored identifier/key. By default `authenticate` then closes
 its connection. Explicit `authenticate <id> --control-check` retains the same socket
 for an encrypted RTSP OPTIONS exchange before closing. It requires the same
-approval, selection, credentials and interactive exact-ID confirmation. OPTIONS
+approval, selection, credentials and interactive y/yes confirmation. OPTIONS
 success does not establish audio readiness or receiver playback compatibility.
 See [session implementation, research and precise blockers](docs/AIRPLAY_SESSION.md).
 
@@ -204,9 +204,9 @@ the explicit diagnostic is:
 piair --config config.toml stream-test device:aabbccddeeff --seconds 1
 ```
 
-It requires an interactive terminal and exact receiver-ID confirmation. It sends
+It requires an interactive terminal and explicit y/yes confirmation. It sends
 1..3 seconds of deterministic stereo signal plus two seconds latency drain,
-sets receiver volume to -30 dB (which may persist), and reports authentication,
+sets receiver volume to -30 dB by default (which may persist), and reports authentication,
 negotiation, audio packets and acknowledged teardown separately. No audible
 playback is claimed. PTP-only, other codecs and unsupported authorization paths
 fail explicitly. No hardware testing was performed. See [session behavior,
@@ -276,3 +276,60 @@ See the [OwnTone-reference RTSP authentication-only experiment](docs/OWNTONE_TRA
 
 For the pinned OwnTone control-channel audit, exact non-playback HomePod test
 command, expected results and limitations, see [encrypted control verification](docs/ENCRYPTED_CONTROL_CHECK.md).
+
+### Interactive pairing and playback tests
+
+```sh
+piair pairing
+piair receivers
+piair stream-test
+piair stream-test --seconds 3 --volume-db -15
+piair stream-test device:xxxxxxxxxxxx --seconds 3 --volume-db -15
+```
+
+`xxxxxxxxxxxx` is a placeholder for your receiver's 12 lowercase hex digits.
+The wizard lists friendly names, stable IDs, addresses and separate approval,
+selection and local pairing states. Names may be duplicated; compare IDs and
+endpoints. Discovery is untrusted and never proves receiver identity. Unknown
+receivers are never automatically approved: independently verify the device,
+edit `receiver_allowlist` in your configuration, then run `piair config check`
+(with the same `--config` if used). The wizard deliberately does not edit config;
+there is no general transactional allowlist persistence API.
+
+Choose the persistent PIN-display or existing setup-code method explicitly.
+Existing selections retain their protocol profile and endpoint pins; unsupported
+methods fail without fallback. Already-paired receivers return without connection
+or credential replacement. Pairing saves cryptographically verified credentials;
+authentication verifies a new connection. Local pairing is not current
+authentication or playback readiness. Experimental authentication flags remain
+available only through the explicit advanced `authenticate` command.
+
+Omitting the stream-test ID opens a numbered chooser; no first-device default.
+A new selection requires an explicit method choice; receiver, method and endpoint
+remain provisional until the final y/yes confirmation. Cancellation preserves
+existing selection, credentials and allowlist. After confirmation and revalidation,
+selection is saved immediately before receiver contact. A later operation failure
+leaves that authorized selection in place; no stale selection is restored.
+Concurrent selection changes cause an explicit failure instead of being overwritten.
+Persistent methods require stored credentials before connection. Transient SRP is an explicit choice with
+no persistent identity verification. Before connecting, existing allowlist,
+endpoint, capability and credential checks still apply. Explicit receiver IDs
+and advanced `select`, `pair`, `authenticate`, `unpair`, `--setup-check`,
+`--setup-profile a|b|c` and setup timeout syntax remain supported.
+
+All contact operations require a terminal and display the receiver name, full ID
+and operation before confirmation. Only `y` or `yes` (case insensitive) authorizes.
+Enter, n/no, other answers and EOF cancel with a failure status. Use `q` at a
+numbered prompt or Ctrl+C to cancel; no pairing/playback success is reported.
+There is no noninteractive confirmation bypass.
+
+`--volume-db` takes an integer from -60 through -10 inclusive, default -30.
+The selected volume is shown before playback authorization. **Receiver volume
+may remain changed after testing.** This controls the existing receiver volume
+parameter, not audio sample gain. Signal duration remains 1–3 seconds plus the
+existing two-second drain. Setup-only checks never set volume or send audio.
+Hardware and audible playback remain unverified; protocol/mock test success is
+not evidence of sound from a physical receiver. No OwnTone/autostream changes
+are required.
+
+See [example terminal sessions and exact post-merge Raspberry Pi verification commands](docs/CLI_VERIFICATION.md).

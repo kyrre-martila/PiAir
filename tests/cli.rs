@@ -368,3 +368,25 @@ fn setup_profiles_are_explicit_setup_only_and_keep_authorization() {
         Some(2)
     );
 }
+
+#[test]
+fn interactive_commands_fail_before_discovery_or_state_writes_without_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
+    for args in [
+        vec!["pairing"],
+        vec!["stream-test"],
+        vec!["stream-test", "--setup-check", "--volume-db", "-15"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_piair"))
+            .arg("--config")
+            .arg(&config)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
+        assert!(!dir.path().join("receiver-state").exists());
+    }
+}

@@ -3,6 +3,7 @@ pub(crate) mod compatibility;
 mod crypto;
 mod diagnostics;
 mod hex_u64;
+pub(crate) mod interactive;
 // Sans-I/O components only; blocked by the documented unresolved transport profile.
 #[allow(dead_code)]
 mod media;
@@ -28,7 +29,7 @@ use compatibility::{Capabilities, Method};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
-    io::{self, IsTerminal, Write},
+    io::{self, IsTerminal},
     net::IpAddr,
 };
 use zeroize::Zeroizing;
@@ -135,6 +136,29 @@ pub fn select(loaded: &Loaded, id: &str, method: Method) -> Result<()> {
         "receiver unapproved; explicitly add its stable ID to receiver_allowlist first"
     );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    select_from_snapshot(loaded, id, method, &snapshot)
+}
+fn select_from_snapshot(
+    loaded: &Loaded,
+    id: &str,
+    method: Method,
+    snapshot: &[Receiver],
+) -> Result<()> {
+    let selected = validate_selection(loaded, id, method, snapshot)?;
+    let store = store::Store::new(&loaded.path)?;
+    store.select(&selected)?;
+    println!("Selected {id}; endpoint and pairing ID pinned. No connection or playback started.");
+    Ok(())
+}
+// Shared by explicit select and provisional interactive selection; never persists.
+fn validate_selection(
+    loaded: &Loaded,
+    id: &str,
+    method: Method,
+    snapshot: &[Receiver],
+) -> Result<Selection> {
+    exact_id(id)?;
+    ensure!(loaded.config.allows(id), "receiver is not approved");
     let receiver = snapshot
         .iter()
         .find(|r| r.id == id)
@@ -155,9 +179,7 @@ pub fn select(loaded: &Loaded, id: &str, method: Method) -> Result<()> {
             "advertised pi changed; investigate before explicit unpair/re-enrollment"
         );
     }
-    store.select(&selected)?;
-    println!("Selected {id}; endpoint and pairing ID pinned. No connection or playback started.");
-    Ok(())
+    Ok(selected)
 }
 pub fn unpair(loaded: &Loaded, id: &str) -> Result<()> {
     exact_id(id)?;
@@ -172,6 +194,16 @@ pub fn pair(
     control_check: bool,
     auth_profile: AuthProfile,
 ) -> Result<()> {
+    pair_with_selection(loaded, id, authenticate, control_check, auth_profile, None)
+}
+fn pair_with_selection(
+    loaded: &Loaded,
+    id: &str,
+    authenticate: bool,
+    control_check: bool,
+    auth_profile: AuthProfile,
+    proposed: Option<interactive::ProposedSelection>,
+) -> Result<()> {
     exact_id(id)?;
     ensure!(loaded.config.allows(id), "receiver is not approved");
     ensure!(
@@ -180,9 +212,12 @@ pub fn pair(
         "pair/authenticate requires an interactive terminal"
     );
     let store = store::Store::new(&loaded.path)?;
-    let selected = store
-        .selection()?
-        .context("select this approved receiver first")?;
+    let selected = match &proposed {
+        Some(proposed) => proposed.selected.clone(),
+        None => store
+            .selection()?
+            .context("select this approved receiver first")?,
+    };
     ensure!(selected.id == id, "receiver is not selected");
     let transient = selected.method == Method::Transient;
     ensure!(
@@ -211,21 +246,23 @@ pub fn pair(
         AuthProfile::OwnToneTransient => println!("Controlled hardware experiment: OwnTone-reference RTSP transient authentication; HomePod compatibility unverified. No playback."),
         AuthProfile::PyatvDiagnostic => println!("Controlled hardware experiment: pyatv transient HTTP profile (preamble, M1, M3); no compatibility or HomePod support claim."),
     }
-    print!(
-        "{} {id}? Type the exact receiver ID to continue: ",
-        if authenticate { "Authenticate" } else { "Pair" }
+    let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    interactive::describe(&snapshot, id)?;
+    println!(
+        "Operation: {} (no audio).",
+        if authenticate {
+            "Authenticate"
+        } else {
+            "Pair and save verified credentials"
+        }
     );
-    io::stdout().flush()?;
-    let mut confirmation = String::new();
-    io::stdin().read_line(&mut confirmation)?;
-    ensure!(confirmation.trim() == id, "receiver operation cancelled");
+    interactive::confirm_operation(loaded, proposed.as_ref(), &snapshot, "Continue? [y/N]: ")?;
     if let Some(c) = &existing {
         ensure!(
             c.advertised_pi == selected.advertised_pi,
             "credential discovery binding differs from selection"
         );
     }
-    let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
     if authenticate {
         let mut session = session::Session::new();
         session.start_selected(
@@ -308,8 +345,9 @@ fn save_verified_enrollment(
 /// Deliberate diagnostic only. No application startup/activity path calls this.
 pub fn stream_test(
     loaded: &Loaded,
-    id: &str,
+    id: Option<&str>,
     seconds: u32,
+    volume_db: i32,
     setup_check: bool,
     setup_timeout_seconds: Option<u64>,
     setup_profile: Option<SetupProfile>,
@@ -322,6 +360,12 @@ pub fn stream_test(
         setup_timeout_seconds.is_none() || (setup_check && setup_timeout_seconds == Some(15)),
         "SETUP timeout experiment requires --setup-check and 15 seconds"
     );
+    let proposed = if id.is_none() {
+        Some(interactive::choose_for_stream(loaded)?)
+    } else {
+        None
+    };
+    let id = id.unwrap_or_else(|| &proposed.as_ref().unwrap().selected.id);
     exact_id(id)?;
     ensure!(loaded.config.allows(id), "receiver is not approved");
     ensure!(
@@ -333,9 +377,12 @@ pub fn stream_test(
         "stream-test requires an interactive terminal and explicit confirmation"
     );
     let store = store::Store::new(&loaded.path)?;
-    let selected = store
-        .selection()?
-        .context("select this approved receiver first")?;
+    let selected = match &proposed {
+        Some(proposed) => proposed.selected.clone(),
+        None => store
+            .selection()?
+            .context("select this approved receiver first")?,
+    };
     ensure!(selected.id == id, "receiver is not selected");
     ensure!(
         selected.capabilities.features & (1 << 9) != 0
@@ -355,17 +402,27 @@ pub fn stream_test(
         Some(credential)
     };
     if setup_check {
-        println!("Initial NTP SETUP check: validate response and tear down; no RECORD or audio transmission.");
+        println!("Initial NTP SETUP check: validate response and tear down; no RECORD or audio transmission. Receiver volume unchanged (--volume-db is playback-only).");
     } else {
-        println!("AirPlay 2 realtime UDP / ALAC 44100 stereo / NTP diagnostic: {seconds}s signal plus 2s latency drain. Receiver volume will be set to -30 dB and may remain there. Hardware playback is unverified.");
+        println!("AirPlay 2 realtime UDP / ALAC 44100 stereo / NTP diagnostic: {seconds}s signal plus 2s latency drain. Receiver volume will be set to {volume_db} dB and may remain there. Hardware playback is unverified.");
     }
-    print!("Confirm receiver operation for {id}. Type the exact receiver ID: ");
-    io::stdout().flush()?;
-    let mut confirmation = String::new();
-    io::stdin().read_line(&mut confirmation)?;
-    ensure!(confirmation.trim() == id, "receiver operation cancelled");
+    ensure!(
+        (-60..=-10).contains(&volume_db),
+        "volume must be -60..=-10 dB"
+    );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    interactive::describe(&snapshot, id)?;
     let mut session = session::Session::new();
+    interactive::confirm_operation(
+        loaded,
+        proposed.as_ref(),
+        &snapshot,
+        if setup_check {
+            "Start setup-only check? [y/N]: "
+        } else {
+            "Start playback test? [y/N]: "
+        },
+    )?;
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
     let connect = || wire::Wire::connect(&loaded.path, id, &selected, &snapshot);
@@ -390,7 +447,7 @@ pub fn stream_test(
         println!("Initial SETUP: validated NTP response and ports; TEARDOWN acknowledged; audio packets transmitted: 0.");
         return Ok(());
     }
-    if let Err(error) = session.negotiate_realtime() {
+    if let Err(error) = session.negotiate_realtime_at_volume(volume_db) {
         println!("Negotiation: FAILED; audio packets transmitted: 0; partial setup cleanup attempted; audible playback: unverified");
         return Err(error);
     }
