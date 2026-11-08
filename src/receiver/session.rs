@@ -52,7 +52,6 @@ pub struct Session {
     events: Option<Worker>,
     encoder: Option<realtime::Encoder>,
     clock: Option<Arc<realtime::Clock>>,
-    latency: u32,
     pub packets_sent: u64,
     pub resends: u64,
     pub timing_exchanges: u64,
@@ -74,7 +73,6 @@ impl Session {
             events: None,
             encoder: None,
             clock: None,
-            latency: profile::MIN_LATENCY,
             packets_sent: 0,
             resends: 0,
             timing_exchanges: 0,
@@ -374,7 +372,7 @@ impl Session {
             stage = "RECORD";
             let record = self.call("RECORD", None, &[], &[])?;
             status = Some(200);
-            self.latency = realtime::latency(&record.headers)?;
+            realtime::record_latency(&record.headers);
             status = None;
             stage = "stream SETUP";
             let offer = profile::stream_offer(encoder.key(), control_port, session_id)?;
@@ -503,9 +501,9 @@ impl Session {
             let start = Instant::now();
             let mut sent = 0u64;
             let signal = u64::from(seconds) * u64::from(profile::RATE);
-            // Match OwnTone's NTP sync model: selected 2s lead minus receiver latency.
-            let gap = profile::MAX_LATENCY - self.latency;
-            let total = signal + u64::from(profile::MAX_LATENCY);
+            // No unsent PCM at sync time: OwnTone's pos + input - output
+            // reduces to next RTP timestamp minus our sender buffer.
+            let total = signal + u64::from(realtime::PLAYBACK_LEAD_SAMPLES);
             let mut sync_at = 0;
             let mut feedback_at = Instant::now() + Duration::from_secs(2);
             let mut retry_budget = 1024;
@@ -551,7 +549,6 @@ impl Session {
                     self.media.as_ref().unwrap().sync(&realtime::sync(
                         sent == 0,
                         next,
-                        gap,
                         clock.instant(start + realtime::sample_time(sent)),
                     ))?;
                     sync_at = sent + u64::from(profile::RATE);

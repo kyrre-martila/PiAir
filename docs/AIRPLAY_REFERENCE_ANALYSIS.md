@@ -122,8 +122,9 @@ AIRPLAY_SESSION.md.
 
 Playback now follows OwnTone's early NTP service and probe-source replies; see
 [the lifecycle migration](REALTIME_NTP_LIFECYCLE.md). Concrete differences/limits
-remain explicit: require an initial encrypted updateInfo and NTP exchange before READY; refuse zero/out-of-
-window Audio-Latency; do not implement OwnTone's PTP/libairptp branch, automatic
+remain explicit: require an initial encrypted updateInfo and NTP exchange before READY;
+use a fixed two-second total sender lead independent of informational RECORD
+Audio-Latency (see [timing calculations](RECORD_LATENCY.md)); do not implement OwnTone's PTP/libairptp branch, automatic
 transient fallback, password digest, metadata resurrection or long sessions.
 These are deliberate bounded profile choices, not missing undocumented constants.
 For a receiver requiring PTP, the unimplemented work is the exact PTP session
