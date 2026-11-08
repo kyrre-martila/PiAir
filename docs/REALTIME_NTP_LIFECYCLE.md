@@ -1,5 +1,8 @@
 # Realtime playback NTP lifecycle (PR #26)
 
+Historical implementation record: PR #29 supersedes the event-traffic READY gate
+and its earlier uncertainty below; see [EVENT_LIFECYCLE.md](EVENT_LIFECYCLE.md).
+
 Base: fresh `origin/main` `67f6971`, including merged PR #25. No CLI,
 dependency, codec, authentication or approval-policy changes.
 

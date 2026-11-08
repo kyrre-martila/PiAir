@@ -401,17 +401,15 @@ impl Session {
             status = Some(200);
             ensure!(volume.body.is_empty(), "unexpected volume response body");
             status = None;
-            stage = "NTP/event synchronization";
+            stage = "NTP synchronization";
             let deadline = Instant::now() + Duration::from_secs(3);
-            while self.media.as_ref().unwrap().timing.count() == 0
-                || self.events.as_ref().unwrap().count() == 0
-            {
+            // An established event channel may remain idle indefinitely.
+            // OwnTone continues without waiting for unsolicited traffic.
+            while self.media.as_ref().unwrap().timing.count() == 0 {
                 self.workers()?;
                 ensure!(
                     Instant::now() < deadline,
-                    "synchronization wait timed out: ntp_ready={} event_ready={}",
-                    self.media.as_ref().unwrap().timing.count() > 0,
-                    self.events.as_ref().unwrap().count() > 0
+                    "synchronization wait timed out: ntp_ready=false"
                 );
                 std::thread::park_timeout(Duration::from_millis(5));
             }

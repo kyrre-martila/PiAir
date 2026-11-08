@@ -193,7 +193,9 @@ OwnTone's inspected sender does not implement buffered TCP type 103. PiAir's
 older 48 kHz buffered packet components remain separate and disabled.
 
 Normal realtime playback now uses the [early NTP responder lifecycle](docs/REALTIME_NTP_LIFECYCLE.md)
-verified for setup-only profile B. Hardware playback remains unverified.
+verified for setup-only profile B. READY requires NTP synchronization and a healthy
+[event connection](docs/EVENT_LIFECYCLE.md); an idle event channel is valid.
+Hardware playback remains unverified.
 
 After reviewing the physical receiver and existing approval/selection/pairing,
 the explicit diagnostic is:

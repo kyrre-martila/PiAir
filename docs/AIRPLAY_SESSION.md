@@ -70,10 +70,12 @@ There is no plaintext reentry, retry or nonce reset on an active connection.
 
 Events use Events-Salt with **sender transmit Events-Read-Encryption-Key and
 sender receive Events-Write-Encryption-Key**, independently counted from control.
-The event worker accepts bounded `POST /command RTSP/1.0` binary-plist updateInfo
-messages, validates framing/CSeq/type/value, and sends an encrypted correlated 200,
-including CSeq zero. Unknown requests, invalid tags, termination or closure fail
-the session. Remote play/pause commands are not implemented or silently accepted.
+The event worker accepts bounded `POST /command RTSP/1.0` binary plists, validates
+framing/CSeq/type and known values, and sends an encrypted correlated 200, including
+CSeq zero. updateInfo dictionaries remain supported. sendMediaRemoteCommand strings
+and unknown event types are explicitly ignored and acknowledged, without playback
+actions. Malformed requests, invalid tags and unexpected closure fail the worker.
+An established idle event channel is healthy; see [EVENT_LIFECYCLE.md](EVENT_LIFECYCLE.md).
 
 A control request has a 15-second absolute monotonic budget and at most a
 three-second wait per partial I/O; event messages have a three-second budget.
@@ -109,8 +111,9 @@ Startup uses production encoders/decoders and this fixed sequence:
    returned stream, exact type and any echoed format/rate/latency fields, streamID
    and dataPort/controlPort. Connect UDP only to those peer-bound ports.
 6. Set receiver volume to -30 dB using SET_PARAMETER text/parameters. Require a
-   successful NTP query/reply and initial encrypted event acknowledgement before
-   READY. Then send initial sync and the first authenticated audio datagram;
+   successful NTP query/reply and a healthy established event channel before
+   READY; no unsolicited event is required. Then send initial sync and the first
+   authenticated audio datagram;
    only a successful send enters STREAMING.
 
 URI is a fresh sender-address/numeric-session-ID RTSP URI; CSeq continues from
@@ -243,7 +246,7 @@ OPTIONS does not establish which subsequent request stalled. No hardware was
 contacted for this investigation. Negotiation failures now include a local stage
 label and RTSP method for GET /info, initial SETUP, RECORD, stream SETUP and
 SET_PARAMETER. Separate labels cover media socket setup, NTP worker startup,
-event connection and the final NTP/event synchronization wait. Request errors
+event connection and the final NTP synchronization wait. Request errors
 identify writes versus response reads/validation; response reads identify headers
 versus body. Socket WouldBlock (including Linux EAGAIN/os error 11 on a blocking
 socket with a read timeout) and TimedOut are reported as read timeouts, separately
@@ -259,8 +262,8 @@ error content. Stage labels and method names come from local constants.
 
 The request sequence remains GET /info, initial SETUP, authenticated event
 connection with NTP service running, RECORD, stream SETUP, volume SET_PARAMETER,
-then NTP/event readiness. The existing 15-second request budget, capped 3-second
-socket reads/writes, and 3-second synchronization wait remain unchanged. There
+then NTP readiness and event-worker health. The existing 15-second request budget,
+capped 3-second socket reads/writes, and 3-second synchronization wait remain unchanged. There
 is no evidence here to justify a protocol ordering change or longer timeouts.
 Failure cleanup limits best-effort TEARDOWN to a 250ms request budget, preserves
 the original failure, then closes control/event sockets and joins workers. The
@@ -269,16 +272,16 @@ interrupts partial frame reads. Cleanup errors do not replace the primary error.
 
 Loopback mock regressions cover timeouts, rejected statuses and malformed
 responses at each RTSP negotiation request; failed event connection; malformed
-stream/session responses; missing NTP or initial event; NTP/event worker failures;
+stream/session responses; missing NTP; healthy idle event channels; NTP/event
+worker failures;
 a receiver ignoring TEARDOWN; partial encrypted event cleanup; and worker panic.
 They check attribution, sensitive-text exclusion, terminal state, zero audio
 packets, channel closure and idempotent stop. Existing allowlist, authorization,
 explicit confirmation, encryption and response validation remain enforced.
 
-Unverified on Apple TV: acceptance of the existing realtime NTP/ALAC profile and
-request sequence, arrival of the initial updateInfo event and NTP queries within
-the existing deadlines, and successful playback. Mock tests validate local
-behavior, not those hardware assumptions. No OwnTone, Autostream or system
+End-to-end playback remains unverified on Apple TV. PR #29 hardware evidence and
+remaining uncertainty are recorded in [EVENT_LIFECYCLE.md](EVENT_LIFECYCLE.md).
+Mock tests validate local behavior, not audible playback. No OwnTone, Autostream or system
 services were changed.
 
 ### Initial SETUP sender headers (PR #10)

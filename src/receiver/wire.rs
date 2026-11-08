@@ -1151,11 +1151,15 @@ impl Worker {
         Ok(worker)
     }
     fn events(mut wire: Wire) -> Result<Self> {
+        wire.reauthorize()?;
+        ensure!(wire.keys.is_some(), "encrypted event keys required");
+        wire.socket
+            .set_read_timeout(Some(Duration::from_millis(100)))?;
         let closer = Some(wire.socket.try_clone()?);
+        tracing::debug!(target: "piair::rtsp", "encrypted event channel established; idle permitted");
         Ok(Self::spawn(closer, move |health| {
-            wire.socket
-                .set_read_timeout(Some(Duration::from_millis(100)))?;
             while !health.stop.load(Ordering::Relaxed) {
+                wire.reauthorize()?;
                 if wire.pending_start == wire.pending_end {
                     let mut first = [0];
                     match wire.socket.peek(&mut first) {
@@ -1220,14 +1224,32 @@ impl Worker {
                 wire.read_exact(&mut body)?;
                 let value = super::profile::parse(&body)?;
                 let d = super::profile::dictionary(&value)?;
-                ensure!(
-                    d.get("type").and_then(plist::Value::as_string) == Some("updateInfo"),
-                    "unsupported receiver event type"
-                );
-                ensure!(
-                    d.get("value").is_some_and(|v| v.as_dictionary().is_some()),
-                    "invalid updateInfo value"
-                );
+                let kind = d
+                    .get("type")
+                    .and_then(plist::Value::as_string)
+                    .context("invalid receiver event type")?;
+                ensure!(!kind.is_empty(), "empty receiver event type");
+                match kind {
+                    "updateInfo" => {
+                        ensure!(
+                            d.get("value").is_some_and(|v| v.as_dictionary().is_some()),
+                            "invalid updateInfo value"
+                        );
+                        tracing::debug!(target: "piair::rtsp", "updateInfo event acknowledged");
+                    }
+                    "sendMediaRemoteCommand" => {
+                        ensure!(
+                            d.get("value").and_then(plist::Value::as_string).is_some(),
+                            "invalid sendMediaRemoteCommand value"
+                        );
+                        // PiAir implements no receiver-driven playback operations.
+                        tracing::debug!(target: "piair::rtsp", "remote command ignored and acknowledged");
+                    }
+                    _ => {
+                        // Never dispatch unknown types or log receiver-supplied values.
+                        tracing::debug!(target: "piair::rtsp", "unsupported event ignored and acknowledged");
+                    }
+                }
                 wire.reauthorize()?;
                 wire.write_message(format!("RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nContent-Length: 0\r\nAudio-Latency: 0\r\n\r\n").as_bytes())?;
                 health.count.fetch_add(1, Ordering::Relaxed);
@@ -1713,6 +1735,75 @@ mod worker_tests {
         let error = wire.request("SETUP", "bad uri", &[], &[]).err().unwrap();
         assert!(format!("{error:#}").contains("request construction"));
         assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn event_types_are_acknowledged_without_actions_and_failures_are_detected() {
+        for mode in 0..10 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut peer = listener.accept().unwrap().0;
+            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut wire = Wire::mock(socket, Duration::from_secs(1), "test");
+            wire.keys = Some(super::super::crypto::ControlKeys::events(&[7; 32]));
+            let worker = Worker::events(wire).unwrap();
+            let mut keys = super::super::crypto::ControlKeys::events(&[7; 32]);
+            keys.swap_directions_for_test();
+            if mode == 9 {
+                peer.shutdown(Shutdown::Write).unwrap();
+            } else {
+                let (kind, value) = match mode {
+                    0 => ("updateInfo", super::super::profile::dict([])),
+                    1..=4 => (
+                        "sendMediaRemoteCommand",
+                        plist::Value::String(["play", "paus", "nitm", "pitm"][mode - 1].into()),
+                    ),
+                    5 => ("unknown", plist::Value::String("play".into())),
+                    _ => ("updateInfo", plist::Value::String("invalid".into())),
+                };
+                let mut body = Vec::new();
+                super::super::profile::dict([
+                    ("type", plist::Value::String(kind.into())),
+                    ("value", value),
+                ])
+                .to_writer_binary(&mut body)
+                .unwrap();
+                let mut message = format!("POST /command RTSP/1.0\r\nCSeq: 7\r\nContent-Length: {}\r\nContent-Type: application/x-apple-binary-plist\r\n{}\r\n",
+                    body.len(), if mode == 8 { "Transfer-Encoding: chunked\r\n" } else { "" }).into_bytes();
+                message.extend(body);
+                let mut frame = keys.encrypt(&message).unwrap();
+                if mode == 7 {
+                    frame[3] ^= 1;
+                }
+                peer.write_all(&frame).unwrap();
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            if mode <= 5 {
+                let mut length = [0; 2];
+                peer.read_exact(&mut length).unwrap();
+                let mut frame = vec![0; usize::from(u16::from_le_bytes(length)) + 18];
+                frame[..2].copy_from_slice(&length);
+                peer.read_exact(&mut frame[2..]).unwrap();
+                assert!(keys
+                    .decrypt(&frame)
+                    .unwrap()
+                    .starts_with(b"RTSP/1.0 200 OK\r\nCSeq: 7\r\n"));
+                while worker.count() == 0 {
+                    assert!(Instant::now() < deadline);
+                    thread::yield_now();
+                }
+                worker.check().unwrap();
+                assert_eq!(worker.count(), 1);
+            } else {
+                while worker.check().is_ok() {
+                    assert!(Instant::now() < deadline);
+                    thread::park_timeout(Duration::from_millis(1));
+                }
+                assert_eq!(worker.count(), 0);
+            }
+            drop(worker);
+            assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+        }
     }
 
     #[test]
