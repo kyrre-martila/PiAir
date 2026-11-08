@@ -577,10 +577,19 @@ fn verify_mock_before_finish(
     verify_mock_core(socket, fault, signed_id, |_| before_m4())
 }
 fn verify_mock_core(
+    socket: TcpStream,
+    fault: Fault,
+    signed_id: &str,
+    before_m4: impl FnOnce(&[u8; 32]),
+) -> Option<(TcpStream, ControlKeys)> {
+    verify_mock_core_offset(socket, fault, signed_id, before_m4, 0)
+}
+fn verify_mock_core_offset(
     mut socket: TcpStream,
     fault: Fault,
     signed_id: &str,
     before_m4: impl FnOnce(&[u8; 32]),
+    offset: u32,
 ) -> Option<(TcpStream, ControlKeys)> {
     let m1 = Tlv::parse(&request(&mut socket, "/pair-verify")).unwrap();
     let controller_public: [u8; 32] = m1.array(PUBLIC_KEY).unwrap();
@@ -620,7 +629,7 @@ fn verify_mock_core(
     }
     reply(
         &mut socket,
-        1,
+        1 + offset,
         &[
             (STATE, &[2]),
             (PUBLIC_KEY, &public),
@@ -656,10 +665,10 @@ fn verify_mock_core(
     .unwrap();
     before_m4(shared.as_bytes());
     if matches!(fault, Fault::State) {
-        reply(&mut socket, 2, &[(STATE, &[2])]);
+        reply(&mut socket, 2 + offset, &[(STATE, &[2])]);
         None
     } else {
-        reply(&mut socket, 2, &[(STATE, &[4])]);
+        reply(&mut socket, 2 + offset, &[(STATE, &[4])]);
         let mut keys = ControlKeys::new(shared.as_bytes());
         keys.swap_directions_for_test();
         Some((socket, keys))

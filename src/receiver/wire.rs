@@ -503,6 +503,54 @@ impl Wire {
         }
         result
     }
+    /// Deliberately narrow plaintext diagnostic: no caller-controlled method/path/body.
+    pub(super) fn preverify_info(&mut self) -> Result<Reply> {
+        let started = Instant::now();
+        let result = (|| {
+            ensure!(
+                !self.failed && self.keys.is_none() && self.seq == 0,
+                "pre-verify info requires a fresh authorized connection"
+            );
+            self.reauthorize()?;
+            self.restart_deadline();
+            self.auth_phase = "pre-verify GET /info";
+            let mut header = self.authenticated_header("GET", "/info", 0)?;
+            header.extend_from_slice(b"\r\n");
+            self.write_raw(&header)?;
+            let body = self.response()?;
+            self.reauthorize()?;
+            Ok(Reply {
+                body,
+                headers: self.last_headers.clone(),
+            })
+        })();
+        tracing::debug!(target: "piair::rtsp", phase = "pre-verify GET /info",
+            cseq = self.seq, elapsed_ms = started.elapsed().as_millis() as u64,
+            success = result.is_ok(), "pre-verify info completed");
+        if result.is_err() {
+            self.close();
+        }
+        result
+    }
+    pub(super) fn start_early_timing(
+        &self,
+        ports: &mut Ports,
+        clock: Arc<super::realtime::Clock>,
+    ) -> Result<()> {
+        self.reauthorize()?;
+        ensure!(
+            self.keys.is_some(),
+            "authenticated control required for timing"
+        );
+        let socket = ports.timing.take().context("timing socket absent")?;
+        ports.timing_worker = Some(Worker::timing_for_peer(
+            socket,
+            self.lease(),
+            clock,
+            self.socket.peer_addr()?.ip(),
+        )?);
+        Ok(())
+    }
     pub(super) fn sender_device_id(&self) -> String {
         // OwnTone serializes its stable u64 sender ID as eight colon-separated
         // octets. Keep all 64 bits of PiAir's persisted identity, without folding
@@ -772,7 +820,9 @@ impl Wire {
             "invalid receiver response protocol"
         );
         ensure!(
-            (self.keys.is_none() && self.auth_profile != AuthProfile::OwnToneTransient)
+            (self.keys.is_none()
+                && self.auth_profile != AuthProfile::OwnToneTransient
+                && self.auth_phase != "pre-verify GET /info")
                 || words[0] == "RTSP/1.0",
             "selected transport requires RTSP/1.0 response"
         );
@@ -936,6 +986,12 @@ pub(super) struct Ports {
     timing_worker: Option<Worker>,
 }
 impl Ports {
+    pub fn check_timing(&self) -> Result<()> {
+        self.timing_worker
+            .as_ref()
+            .context("NTP service absent")?
+            .check()
+    }
     pub fn control(&self) -> Result<u16> {
         Ok(self.control.local_addr()?.port())
     }
@@ -1053,20 +1109,47 @@ impl Worker {
         self.health.last.lock().unwrap().elapsed()
     }
     fn timing(socket: UdpSocket, lease: Lease, clock: Arc<super::realtime::Clock>) -> Result<Self> {
+        let peer = socket.peer_addr()?.ip();
+        Self::timing_for_peer(socket, lease, clock, peer)
+    }
+    fn timing_for_peer(
+        socket: UdpSocket,
+        lease: Lease,
+        clock: Arc<super::realtime::Clock>,
+        peer_ip: IpAddr,
+    ) -> Result<Self> {
         socket.set_read_timeout(Some(Duration::from_millis(100)))?;
         socket.set_write_timeout(Some(Duration::from_millis(100)))?;
-        Ok(Self::spawn(None, move |health| {
+        let connected = socket.peer_addr().is_ok();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = Self::spawn(None, move |health| {
+            lease.check()?;
             let mut b = [0; 33];
+            ready_tx
+                .send(())
+                .context("timing readiness receiver closed")?;
             while !health.stop.load(Ordering::Relaxed) {
                 match socket.recv_from(&mut b) {
                     Ok((n, peer)) => {
-                        if peer != socket.peer_addr()? {
+                        // Before SETUP there is no negotiated remote port. OwnTone
+                        // replies to recvfrom's source. Restrict this to our verified IP.
+                        if peer.ip() != peer_ip {
                             continue;
                         }
                         let recv = clock.now();
-                        let out = super::realtime::timing_reply(&b[..n], recv, clock.now())?;
+                        let reply = super::realtime::timing_reply(&b[..n], recv, clock.now());
+                        let out = if connected {
+                            reply?
+                        } else if let Ok(out) = reply {
+                            out
+                        } else {
+                            continue;
+                        };
                         lease.check()?;
-                        ensure!(socket.send(&out)? == out.len(), "timing reply send failed");
+                        ensure!(
+                            socket.send_to(&out, peer)? == out.len(),
+                            "timing reply send failed"
+                        );
                         health.count.fetch_add(1, Ordering::Relaxed);
                         *health.last.lock().unwrap() = Instant::now();
                     }
@@ -1077,7 +1160,12 @@ impl Worker {
                 }
             }
             Ok(())
-        }))
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .context("timing readiness timeout")?;
+        worker.check()?;
+        Ok(worker)
     }
     fn events(mut wire: Wire) -> Result<Self> {
         let closer = Some(wire.socket.try_clone()?);
@@ -1176,6 +1264,7 @@ impl Drop for Worker {
         }
         if let Some(join) = self.join.take() {
             let _ = join.join();
+            tracing::debug!(target: "piair::rtsp", exchanges = self.count(), "receiver worker joined; socket released");
         }
     }
 }
@@ -1183,6 +1272,53 @@ impl Drop for Worker {
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+
+    #[test]
+    fn early_timing_ready_filters_packets_and_joins_exactly_one_worker() {
+        for _ in 0..8 {
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = socket.local_addr().unwrap();
+            let lease = Lease {
+                authorization: None,
+                id: "test".into(),
+            };
+            let worker = Worker::timing_for_peer(
+                socket,
+                lease,
+                Arc::new(super::super::realtime::Clock::new().unwrap()),
+                "127.0.0.1".parse().unwrap(),
+            )
+            .unwrap();
+            let health = worker.health.clone();
+            assert_eq!(Arc::strong_count(&health), 3);
+            let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+            peer.set_read_timeout(Some(Duration::from_millis(250)))
+                .unwrap();
+            let mut query = [0; 32];
+            query[..2].copy_from_slice(&[0x80, 0xd2]);
+            peer.send_to(b"malformed", addr).unwrap();
+            let other = UdpSocket::bind("127.0.0.2:0").unwrap();
+            other
+                .set_read_timeout(Some(Duration::from_millis(150)))
+                .unwrap();
+            other.send_to(&query, addr).unwrap();
+            let mut reply = [0; 33];
+            assert!(other.recv_from(&mut reply).is_err());
+            peer.send_to(&query, addr).unwrap();
+            assert_eq!(peer.recv_from(&mut reply).unwrap().0, 32);
+            let started = Instant::now();
+            drop(worker);
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert_eq!(health.count.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                Arc::strong_count(&health),
+                1,
+                "worker thread must be joined"
+            );
+            let rebound = UdpSocket::bind(addr).unwrap();
+            drop(rebound);
+        }
+    }
 
     #[test]
     fn independent_get_then_setup_preserves_directional_frame_state() {
