@@ -209,6 +209,7 @@ pub fn ntp_offer(device: &str, uuid: uuid::Uuid, port: u16) -> Result<Zeroizing<
     ]))
 }
 pub fn stream_offer(key: &[u8; 32], control_port: u16, session: u32) -> Result<Zeroizing<Vec<u8>>> {
+    ensure!(control_port != 0, "zero local control port");
     binary(&mut dict([(
         "streams",
         Value::Array(vec![dict([
@@ -242,7 +243,7 @@ pub fn stream(value: &Value) -> Result<Stream> {
     ensure!(streams.len() == 1, "expected exactly one stream");
     let s = dictionary(&streams[0])?;
     ensure!(
-        integer(s, "type")? == 96,
+        !s.contains_key("type") || integer(s, "type")? == 96,
         "unsupported negotiated stream type"
     );
     for (field, expected) in [
@@ -272,11 +273,50 @@ pub fn stream(value: &Value) -> Result<Stream> {
     } else {
         None
     };
-    Ok(Stream {
-        data: port(s, "dataPort")?,
-        control: port(s, "controlPort")?,
-        id,
-    })
+    let data = port(s, "dataPort")?;
+    let control = port(s, "controlPort")?;
+    ensure!(data != control, "overlapping negotiated media ports");
+    Ok(Stream { data, control, id })
+}
+
+/// Validate any connection echo without requiring fields OwnTone doesn't require.
+pub fn stream_for_connection(value: &Value, session: u32) -> Result<Stream> {
+    let negotiated = stream(value)?;
+    let root = dictionary(value)?;
+    if let Some(protocol) = root.get("timingProtocol") {
+        ensure!(
+            protocol.as_string() == Some("NTP"),
+            "unsupported stream timing"
+        );
+    }
+    let entry = dictionary(&root["streams"].as_array().context("streams absent")?[0])?;
+    if entry.contains_key("streamConnectionID") {
+        ensure!(
+            integer(entry, "streamConnectionID")? == u64::from(session),
+            "stream connection identifier changed"
+        );
+    }
+    for (field, expected) in [("isMedia", true), ("supportsDynamicStreamID", false)] {
+        if let Some(value) = entry.get(field) {
+            ensure!(
+                value.as_boolean() == Some(expected),
+                "unsupported stream policy"
+            );
+        }
+    }
+    if let Some(mode) = entry.get("audioMode") {
+        ensure!(
+            mode.as_string() == Some("default"),
+            "unsupported stream audio mode"
+        );
+    }
+    if let Some(protocol) = entry.get("timingProtocol") {
+        ensure!(
+            protocol.as_string() == Some("NTP"),
+            "unsupported stream timing"
+        );
+    }
+    Ok(negotiated)
 }
 
 /// /info flags are a separate observation from mDNS flags/sf. Only compare
@@ -394,6 +434,51 @@ mod tests {
             ]);
             s.as_dictionary_mut().unwrap().insert(field.into(), value);
             assert!(stream(&dict([("streams", Value::Array(vec![s]))])).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod stream_contract_tests {
+    use super::*;
+    fn response(fields: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
+        let mut s = dict([("dataPort", uint(6000)), ("controlPort", uint(6001))]);
+        for (k, v) in fields {
+            s.as_dictionary_mut().unwrap().insert(k.into(), v);
+        }
+        dict([("streams", Value::Array(vec![s]))])
+    }
+    #[test]
+    fn response_uses_owntone_minimum_and_strictly_validates_optional_echoes_and_ports() {
+        assert!(stream_for_connection(&response([]), 7).is_ok());
+        assert!(stream_for_connection(&response([("streamConnectionID", uint(7))]), 7).is_ok());
+        for port in [
+            uint(0),
+            uint(65536),
+            uint(u64::MAX),
+            Value::String("6000".into()),
+            Value::Boolean(true),
+            Value::Real(6000.0),
+            Value::Integer((-1).into()),
+        ] {
+            for field in ["dataPort", "controlPort"] {
+                assert!(stream_for_connection(&response([(field, port.clone())]), 7).is_err());
+            }
+        }
+        for (field, value) in [
+            ("dataPort", uint(6001)),
+            ("streamConnectionID", uint(8)),
+            ("streamConnectionID", Value::String("7".into())),
+            ("type", uint(103)),
+            ("audioMode", Value::String("movie".into())),
+            ("isMedia", Value::Boolean(false)),
+            ("supportsDynamicStreamID", Value::Boolean(true)),
+            ("timingProtocol", Value::String("PTP".into())),
+        ] {
+            assert!(stream_for_connection(&response([(field, value)]), 7).is_err());
+        }
+        for streams in [vec![], vec![dict([])], vec![dict([]), dict([])]] {
+            assert!(stream_for_connection(&dict([("streams", Value::Array(streams))]), 7).is_err());
         }
     }
 }

@@ -5,6 +5,16 @@ use crate::receiver::session::RECORD_RECEIVER_ID;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Case {
     Good,
+    StreamReject,
+    StreamMalformed,
+    StreamWrongCseq,
+    VolumeReject,
+    SyncTimeout,
+    CancelStream,
+    CancelMedia,
+    RevokeMedia,
+    MediaFeedback,
+    RevokeStream,
     NoTiming,
     NoLengthOrLatency,
     Ptp,
@@ -41,6 +51,16 @@ impl Case {
         matches!(
             self,
             Self::Good
+                | Self::StreamReject
+                | Self::StreamMalformed
+                | Self::StreamWrongCseq
+                | Self::VolumeReject
+                | Self::SyncTimeout
+                | Self::CancelMedia
+                | Self::RevokeMedia
+                | Self::MediaFeedback
+                | Self::CancelStream
+                | Self::RevokeStream
                 | Self::NoLengthOrLatency
                 | Self::NoTiming
                 | Self::TeardownReject
@@ -64,6 +84,9 @@ fn state_files(root: &std::path::Path) -> BTreeMap<std::ffi::OsString, Vec<u8>> 
         .collect()
 }
 fn record_case(case: Case) {
+    record_case_mode(case, None);
+}
+fn record_case_mode(case: Case, playback: Option<bool>) {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
     std::fs::write(
@@ -111,6 +134,8 @@ fn record_case(case: Case) {
     let remote_cancel = cancel.clone();
     let timing_addr = Arc::new(std::sync::Mutex::new(None));
     let remote_timing = timing_addr.clone();
+    let local_media = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let remote_media = local_media.clone();
     let server = thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
         owntone_info(&mut socket, 200, &info_body(0));
@@ -159,7 +184,7 @@ fn record_case(case: Case) {
                 );
                 let timing = profile::port(offer, "timingPort").unwrap();
                 *remote_timing.lock().unwrap() = Some(timing);
-                if case != Case::NoTiming {
+                if !matches!(case, Case::NoTiming | Case::SyncTimeout) {
                     timing_probe(timing);
                 }
                 let events = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -290,7 +315,7 @@ fn record_case(case: Case) {
                     ] {
                         assert_eq!(next.headers[key], setup.headers[key]);
                     }
-                    if case != Case::NoTiming {
+                    if !matches!(case, Case::NoTiming | Case::SyncTimeout) {
                         timing_probe(timing);
                     }
                     if case == Case::CancelRecord {
@@ -363,15 +388,268 @@ fn record_case(case: Case) {
                             extra,
                         );
                     }
+                    let mut next_seq = 7;
+                    if let Some(playback) = playback.filter(|_| case.recorded()) {
+                        let stream = read_message(&mut socket, &mut keys);
+                        assert_eq!(stream.method, "SETUP");
+                        assert_eq!(stream.uri, setup.uri);
+                        assert_eq!(stream.headers["cseq"], "7");
+                        assert_eq!(stream.headers["user-agent"], "AirPlay/999.0.0");
+                        let value = plist(&stream);
+                        let fields = value.as_dictionary().unwrap()["streams"]
+                            .as_array()
+                            .unwrap()[0]
+                            .as_dictionary()
+                            .unwrap();
+                        assert_eq!(fields.len(), 13);
+                        assert_eq!(fields["shk"].as_data().unwrap(), &shared[..32]);
+                        assert_eq!(fields["type"].as_unsigned_integer(), Some(96));
+                        let sid = stream
+                            .uri
+                            .rsplit('/')
+                            .next()
+                            .unwrap()
+                            .parse::<u64>()
+                            .unwrap();
+                        assert_eq!(
+                            fields["streamConnectionID"].as_unsigned_integer(),
+                            Some(sid)
+                        );
+                        remote_media
+                            .lock()
+                            .unwrap()
+                            .push(std::net::SocketAddr::from((
+                                [127, 0, 0, 1],
+                                profile::port(fields, "controlPort").unwrap(),
+                            )));
+                        let expected = profile::stream_offer(
+                            shared[..32].try_into().unwrap(),
+                            profile::port(fields, "controlPort").unwrap(),
+                            sid as u32,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            value,
+                            Value::from_reader(std::io::Cursor::new(&*expected)).unwrap()
+                        );
+                        let data = UdpSocket::bind("127.0.0.1:0").unwrap();
+                        let control = UdpSocket::bind("127.0.0.1:0").unwrap();
+                        data.set_read_timeout(Some(Duration::from_millis(500)))
+                            .unwrap();
+                        control
+                            .set_read_timeout(Some(Duration::from_millis(500)))
+                            .unwrap();
+                        if matches!(
+                            case,
+                            Case::StreamReject
+                                | Case::StreamWrongCseq
+                                | Case::CancelStream
+                                | Case::RevokeStream
+                        ) {
+                            if case == Case::CancelStream {
+                                remote_cancel.store(true, Ordering::Relaxed);
+                            } else if case == Case::RevokeStream {
+                                std::fs::write(&revoke, "receiver_allowlist=[]").unwrap();
+                            } else {
+                                let response = if case == Case::StreamReject {
+                                    b"RTSP/1.0 500 private-reason\r\nCSeq: 7\r\nContent-Length: 0\r\n\r\n".as_slice()
+                                } else {
+                                    b"RTSP/1.0 200 OK\r\nCSeq: 6\r\nContent-Length: 0\r\n\r\n"
+                                        .as_slice()
+                                };
+                                socket.write_all(&keys.encrypt(response).unwrap()).unwrap();
+                            }
+                            assert_eof(&mut socket);
+                            if let Some(mut event) = event_socket {
+                                assert_eof(&mut event);
+                            }
+                            return;
+                        }
+                        if case == Case::StreamMalformed {
+                            send_reply(
+                                &mut socket,
+                                &mut keys,
+                                &stream,
+                                Some(profile::dict([])),
+                                "",
+                            );
+                            let end = read_message(&mut socket, &mut keys);
+                            assert_eq!(end.method, "TEARDOWN");
+                            assert_eq!(end.headers["cseq"], "8");
+                            send_reply(&mut socket, &mut keys, &end, None, "");
+                            assert_eof(&mut socket);
+                            if let Some(mut event) = event_socket {
+                                assert_eof(&mut event);
+                            }
+                            return;
+                        }
+                        send_reply(
+                            &mut socket,
+                            &mut keys,
+                            &stream,
+                            Some(profile::dict([(
+                                "streams",
+                                Value::Array(vec![profile::dict([
+                                    (
+                                        "dataPort",
+                                        profile::uint(u64::from(data.local_addr().unwrap().port())),
+                                    ),
+                                    (
+                                        "controlPort",
+                                        profile::uint(u64::from(
+                                            control.local_addr().unwrap().port(),
+                                        )),
+                                    ),
+                                ])]),
+                            )])),
+                            "",
+                        );
+                        next_seq += 1;
+                        if playback {
+                            let volume = read_message(&mut socket, &mut keys);
+                            assert_eq!(volume.method, "SET_PARAMETER");
+                            assert_eq!(volume.headers["cseq"], "8");
+                            assert_eq!(volume.headers["content-type"], "text/parameters");
+                            assert_eq!(volume.body, b"volume: -40.000000\r\n");
+                            if case == Case::VolumeReject {
+                                socket.write_all(&keys.encrypt(b"RTSP/1.0 403 private-reason\r\nCSeq: 8\r\nContent-Length: 0\r\n\r\n").unwrap()).unwrap();
+                                assert_eof(&mut socket);
+                                if let Some(mut event) = event_socket {
+                                    assert_eof(&mut event);
+                                }
+                                return;
+                            }
+                            send_reply(&mut socket, &mut keys, &volume, None, "");
+                            if case == Case::SyncTimeout {
+                                let end = read_message(&mut socket, &mut keys);
+                                assert_eq!(end.method, "TEARDOWN");
+                                assert_eq!(end.headers["cseq"], "9");
+                                let mut b = [0; 2048];
+                                assert!(data.recv_from(&mut b).is_err());
+                                send_reply(&mut socket, &mut keys, &end, None, "");
+                                assert_eof(&mut socket);
+                                if let Some(mut event) = event_socket {
+                                    assert_eof(&mut event);
+                                }
+                                return;
+                            }
+
+                            next_seq += 1;
+                            let began = std::time::Instant::now();
+                            let mut first_seq = None;
+                            let mut first_ts = 0u32;
+                            let mut first_nonce = 0u64;
+                            let mut count = 0u64;
+                            let expected_packets = 132300_u64.div_ceil(352);
+                            let mut b = [0; 2048];
+                            while count < expected_packets {
+                                let (n, sender) = data.recv_from(&mut b).unwrap();
+                                if count == 0 {
+                                    remote_media.lock().unwrap().push(sender);
+                                }
+                                if count == 0
+                                    && matches!(
+                                        case,
+                                        Case::CancelMedia | Case::RevokeMedia | Case::MediaFeedback
+                                    )
+                                {
+                                    match case {
+                                        Case::CancelMedia => {
+                                            remote_cancel.store(true, Ordering::Relaxed)
+                                        }
+                                        Case::RevokeMedia => {
+                                            std::fs::write(&revoke, "receiver_allowlist=[]")
+                                                .unwrap()
+                                        }
+                                        Case::MediaFeedback => {
+                                            control
+                                                .send_to(
+                                                    &[0x80, 0xd5, 0, 1, 0, 0, 0, 1],
+                                                    (
+                                                        "127.0.0.1",
+                                                        profile::port(fields, "controlPort")
+                                                            .unwrap(),
+                                                    ),
+                                                )
+                                                .unwrap();
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                    if case == Case::RevokeMedia {
+                                        assert_eof(&mut socket);
+                                    } else {
+                                        let end = read_message(&mut socket, &mut keys);
+                                        assert_eq!(end.method, "TEARDOWN");
+                                        assert_eq!(end.headers["cseq"], "9");
+                                        send_reply(&mut socket, &mut keys, &end, None, "");
+                                        assert_eof(&mut socket);
+                                    }
+                                    if let Some(mut event) = event_socket {
+                                        assert_eof(&mut event);
+                                    }
+                                    return;
+                                }
+                                let p = &b[..n];
+                                assert_eq!(p[0], 0x80);
+                                assert_eq!(p[1], if count == 0 { 0xe0 } else { 0x60 });
+                                let seq = u16::from_be_bytes(p[2..4].try_into().unwrap());
+                                let ts = u32::from_be_bytes(p[4..8].try_into().unwrap());
+                                let nonce = u64::from_le_bytes(p[n - 8..].try_into().unwrap());
+                                if first_seq.is_none() {
+                                    first_seq = Some(seq);
+                                    first_ts = ts;
+                                    first_nonce = nonce;
+                                }
+                                assert_eq!(seq, first_seq.unwrap().wrapping_add(count as u16));
+                                assert_eq!(ts, first_ts.wrapping_add(count as u32 * 352));
+                                assert_eq!(nonce, first_nonce + count);
+                                assert_eq!(nonce, u64::from(seq));
+                                // Receiver validates directly with the primitive, not sender helpers.
+                                use chacha20poly1305::{
+                                    aead::{Aead, KeyInit, Payload},
+                                    ChaCha20Poly1305,
+                                };
+                                let mut iv = [0; 12];
+                                iv[4..].copy_from_slice(&p[n - 8..]);
+                                let codec = ChaCha20Poly1305::new_from_slice(&shared[..32])
+                                    .unwrap()
+                                    .decrypt(
+                                        (&iv).into(),
+                                        Payload {
+                                            msg: &p[12..n - 8],
+                                            aad: &p[4..12],
+                                        },
+                                    )
+                                    .unwrap();
+                                let pcm = crate::audio::alac::tests::decode_at_rate(&codec, 44100);
+                                assert_eq!(pcm.len(), 352);
+                                assert!(pcm.iter().flatten().all(|x| x.abs() <= 4100));
+                                if count * 352 >= 44100 {
+                                    assert!(pcm.iter().flatten().all(|x| *x == 0));
+                                }
+                                count += 1;
+                            }
+                            assert!(began.elapsed() >= Duration::from_millis(2800));
+                            assert!(began.elapsed() < Duration::from_secs(4));
+                            let (n, _) = control.recv_from(&mut b).unwrap();
+                            assert_eq!(n, 20);
+                            assert_eq!(&b[..4], &[0x90, 0xd4, 0, 7]);
+                            assert_eq!(u32::from_be_bytes(b[16..20].try_into().unwrap()), first_ts);
+                        } else {
+                            let mut b = [0; 2048];
+                            assert!(data.recv_from(&mut b).is_err());
+                            assert!(control.recv_from(&mut b).is_err());
+                        }
+                    }
                     let end = read_message(&mut socket, &mut keys);
-                    assert_eq!(end.headers["cseq"], "7");
+                    assert_eq!(end.headers["cseq"], next_seq.to_string());
                     end
                 };
                 assert_eq!(teardown.method, "TEARDOWN");
                 assert_eq!(teardown.uri, setup.uri);
                 assert!(plist(&teardown).as_dictionary().unwrap().is_empty());
                 assert_eq!(teardown.headers["session"], "test-session");
-                if case != Case::NoTiming {
+                if !matches!(case, Case::NoTiming | Case::SyncTimeout) {
                     timing_probe(timing);
                 }
                 if case == Case::CancelTeardown {
@@ -385,7 +663,7 @@ fn record_case(case: Case) {
                 } else if case == Case::TeardownEof {
                     return;
                 } else if matches!(case, Case::TeardownReject | Case::BodyTeardownReject) {
-                    socket.write_all(&keys.encrypt(b"RTSP/1.0 500 private-reason\r\nCSeq: 7\r\nContent-Length: 0\r\n\r\n").unwrap()).unwrap();
+                    socket.write_all(&keys.encrypt(format!("RTSP/1.0 500 private-reason\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n", teardown.headers["cseq"]).as_bytes()).unwrap()).unwrap();
                     assert_eof(&mut socket);
                 } else {
                     send_reply(&mut socket, &mut keys, &teardown, None, "");
@@ -399,18 +677,35 @@ fn record_case(case: Case) {
     });
     let mut session = Session::new();
     session.cancel = cancel;
-    session
-        .start_owntone_record_selected(
-            || Wire::connect(&config, RECORD_RECEIVER_ID, &selected, &observed),
-            &selected.capabilities,
-        )
-        .unwrap();
+    if let Some(playback) = playback {
+        session
+            .start_owntone_stream_selected(
+                || Wire::connect(&config, RECORD_RECEIVER_ID, &selected, &observed),
+                &selected.capabilities,
+                playback,
+            )
+            .unwrap();
+    } else {
+        session
+            .start_owntone_record_selected(
+                || Wire::connect(&config, RECORD_RECEIVER_ID, &selected, &observed),
+                &selected.capabilities,
+            )
+            .unwrap();
+    }
     assert!(session.negotiate_realtime_at_volume(-30).is_err());
     if case == Case::CancelAfterAuth {
         session.cancel.store(true, Ordering::Relaxed);
     }
     let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
-        let result = session.check_record();
+        let result = match playback {
+            None => session.check_record(),
+            Some(false) => session.check_stream(),
+            Some(true) => session
+                .prepare_playback_check()
+                .and_then(|()| session.transmit_test(1))
+                .and_then(|()| session.stop()),
+        };
         assert_eq!(result.is_ok(), case.success(), "{case:?}: {result:?}");
         if let Err(error) = result {
             let error = format!("{error:#}");
@@ -434,7 +729,21 @@ fn record_case(case: Case) {
             State::Failed
         }
     );
-    assert_eq!(session.packets_sent, 0);
+    if matches!(
+        case,
+        Case::CancelMedia | Case::RevokeMedia | Case::MediaFeedback
+    ) {
+        assert!((1..=10).contains(&session.packets_sent));
+    } else {
+        assert_eq!(
+            session.packets_sent,
+            if playback == Some(true) && (case.success() || case == Case::TeardownReject) {
+                376
+            } else {
+                0
+            }
+        );
+    }
     assert_eq!(session.resends, 0);
     assert!(!output.contains("private-reason"));
     if case.recorded() {
@@ -449,6 +758,9 @@ fn record_case(case: Case) {
     session.stop().unwrap();
     server.join().unwrap();
     assert_eq!(state_files(&dir.path().join("receiver-state")), before);
+    for addr in local_media.lock().unwrap().iter() {
+        UdpSocket::bind(addr).unwrap();
+    }
     if let Some(port) = *timing_addr.lock().unwrap() {
         UdpSocket::bind(("127.0.0.1", port)).unwrap();
     };
@@ -512,4 +824,80 @@ fn record_rejects_unsupported_policy_and_precancel_before_connect() {
         .start_owntone_record_selected(|| Ok(wire), &owntone_caps())
         .is_err());
     server.join().unwrap();
+}
+
+#[test]
+fn stream_setup_only_uses_verified_key_and_sends_zero_media_or_volume() {
+    record_case_mode(Case::Good, Some(false));
+}
+#[test]
+fn playback_check_receiver_decrypts_decodes_and_validates_bounded_pacing() {
+    record_case_mode(Case::Good, Some(true));
+}
+
+#[test]
+fn stream_and_playback_fail_closed_on_stream_transport_schema_cancellation_and_revocation() {
+    for playback in [false, true] {
+        for case in [
+            Case::StreamReject,
+            Case::StreamMalformed,
+            Case::StreamWrongCseq,
+            Case::CancelStream,
+            Case::RevokeStream,
+        ] {
+            record_case_mode(case, Some(playback));
+        }
+    }
+    for case in [Case::VolumeReject, Case::SyncTimeout] {
+        record_case_mode(case, Some(true));
+    }
+}
+
+#[test]
+fn playback_stops_promptly_on_media_cancellation_revocation_and_resend_request() {
+    for case in [Case::CancelMedia, Case::RevokeMedia, Case::MediaFeedback] {
+        record_case_mode(case, Some(true));
+    }
+}
+
+#[test]
+fn both_stream_modes_report_failed_remote_teardown_and_release_locally() {
+    record_case_mode(Case::TeardownReject, Some(false));
+    record_case_mode(Case::TeardownReject, Some(true));
+}
+
+#[test]
+fn new_modes_preserve_event_health_early_revocation_and_precontact_capability_gates() {
+    for playback in [false, true] {
+        for case in [
+            Case::EventBadTag,
+            Case::EventRefused,
+            Case::CancelSetup,
+            Case::CancelRecord,
+            Case::RevokeSetup,
+            Case::RevokeRecord,
+        ] {
+            record_case_mode(case, Some(playback));
+        }
+        let mut caps = owntone_caps();
+        caps.password = Some(true);
+        assert!(Session::new()
+            .start_owntone_stream_selected(
+                || panic!("unsupported policy must not connect"),
+                &caps,
+                playback
+            )
+            .is_err());
+        let mut session = Session::new();
+        session.cancel.store(true, Ordering::Relaxed);
+        assert!(session
+            .start_owntone_stream_selected(
+                || panic!("cancelled before contact"),
+                &owntone_caps(),
+                playback
+            )
+            .is_err());
+    }
+    // Stream-only negotiation reports timing count without demanding a probe.
+    record_case_mode(Case::NoTiming, Some(false));
 }

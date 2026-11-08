@@ -242,11 +242,14 @@ pub fn transient(mut wire: Wire) -> Result<Wire> {
     let shared = client
         .finish(m4.get(PROOF)?)
         .context("transient cryptographic receiver proof verification failed")?;
-    wire.secure(
-        ControlKeys::new(shared.as_ref()),
-        ControlKeys::events(shared.as_ref()),
-    )
-    .context("transient encrypted channel establishment failed")
+    let mut wire = wire
+        .secure(
+            ControlKeys::new(shared.as_ref()),
+            ControlKeys::events(shared.as_ref()),
+        )
+        .context("transient encrypted channel establishment failed")?;
+    wire.install_audio_key(shared.as_ref())?;
+    Ok(wire)
 }
 
 /// Only verified M4 success transfers the same live wire with directional keys.

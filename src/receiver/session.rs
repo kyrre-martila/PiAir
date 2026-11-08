@@ -40,6 +40,8 @@ pub(super) const RECORD_RECEIVER_ID: &str = "device:3ae5c9a302ad";
 
 pub struct Session {
     record_only: bool,
+    stream_check: bool,
+    playback_check: bool,
     record_ok: bool,
     state: State,
     volume_db: i32,
@@ -67,6 +69,8 @@ impl Session {
     pub fn new() -> Self {
         Self {
             record_only: false,
+            stream_check: false,
+            playback_check: false,
             record_ok: false,
             state: State::Disconnected,
             volume_db: -30,
@@ -146,6 +150,37 @@ impl Session {
             },
             capabilities,
         )
+    }
+    pub fn start_owntone_stream_selected(
+        &mut self,
+        connect: impl FnOnce() -> Result<Wire>,
+        capabilities: &super::compatibility::Capabilities,
+        playback: bool,
+    ) -> Result<()> {
+        self.stream_check = true;
+        self.playback_check = playback;
+        self.start_owntone_record_selected(connect, capabilities)
+    }
+    pub fn check_stream(&mut self) -> Result<()> {
+        ensure!(
+            self.stream_check && !self.playback_check,
+            "stream diagnostic required"
+        );
+        self.negotiate(false, None)?;
+        self.stop()?;
+        ensure!(
+            !self.cancel.load(Ordering::Relaxed),
+            "diagnostic interrupted"
+        );
+        Ok(())
+    }
+    pub fn prepare_playback_check(&mut self) -> Result<()> {
+        ensure!(
+            self.stream_check && self.playback_check,
+            "playback diagnostic required"
+        );
+        self.volume_db = -40;
+        self.negotiate(false, None)
     }
     pub fn record_succeeded(&self) -> bool {
         self.record_ok
@@ -391,11 +426,14 @@ impl Session {
                 self.state == State::Negotiating,
                 "authenticated negotiation required"
             );
-            ensure!(initial_only || !self.owntone_setup_only, "OwnTone transient is setup-only");
-            ensure!(initial_only || !self.control.as_ref().is_some_and(Wire::uses_owntone_transient_profile),
+            ensure!(initial_only || self.stream_check || !self.owntone_setup_only, "OwnTone transient is setup-only");
+            ensure!(initial_only || self.stream_check || !self.control.as_ref().is_some_and(Wire::uses_owntone_transient_profile),
                 "OwnTone transient is setup-only");
-            // Diagnostics never initialize a media encoder or generate audio keys/packets.
-            let encoder = if initial_only { None } else { Some(realtime::Encoder::new()?) };
+            // Initial/RECORD-only checks never initialize the encoder. Stream checks
+            // offer the verified key but generate no audio until readiness.
+            let encoder = if initial_only { None } else if self.stream_check {
+                Some(realtime::Encoder::from_verified_key(self.control.as_mut().context("control absent")?.take_audio_key()?)?)
+            } else { Some(realtime::Encoder::new()?) };
             self.clock = Some(Arc::new(realtime::Clock::new()?));
             let session_id = rand::random::<u32>();
             let local = self
@@ -500,7 +538,7 @@ impl Session {
                 self.record_ok = true;
                 tracing::info!(target: "piair::rtsp", phase = "RECORD", outcome = "validated", status = 200,
                     "RECORD validated; stream negotiation and playback unverified");
-                return Ok(());
+                if !self.stream_check { return Ok(()); }
             }
             realtime::record_latency(&record.headers);
             let encoder = encoder.context("playback encoder absent")?;
@@ -510,8 +548,16 @@ impl Session {
             let stream = self.call("SETUP", None, &offer, &[])?;
             status = Some(200);
             let negotiated =
-                profile::stream(&Self::plist_response(&stream).context("stream SETUP response")?)?;
+                profile::stream_for_connection(&Self::plist_response(&stream).context("stream SETUP response")?, session_id)?;
+            ensure!(negotiated.data != event_port && negotiated.control != event_port,
+                "media ports overlap event endpoint");
+            self.workers()?;
+            tracing::info!(target: "piair::rtsp", phase = "stream SETUP", outcome = "validated",
+                data_port = negotiated.data, control_port = negotiated.control,
+                sample_rate = profile::RATE, frames_per_packet = profile::SPF, payload_type = 96,
+                "stream negotiation validated; audible playback unverified");
             self.stream_id = negotiated.id;
+            if self.stream_check && !self.playback_check { return Ok(()); }
             let (data, control) = (negotiated.data, negotiated.control);
             status = None;
             stage = "media socket connection";
@@ -531,6 +577,8 @@ impl Session {
             )?;
             status = Some(200);
             ensure!(volume.body.is_empty(), "unexpected volume response body");
+            tracing::info!(target: "piair::rtsp", phase = "volume", volume_db = self.volume_db,
+                may_persist = true, outcome = "validated", "receiver volume command acknowledged");
             status = None;
             stage = "NTP synchronization";
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -545,6 +593,8 @@ impl Session {
                 std::thread::park_timeout(Duration::from_millis(5));
             }
             self.workers()?;
+            tracing::info!(target: "piair::rtsp", phase = "NTP synchronization", outcome = "ready",
+                ntp_replies = self.media.as_ref().unwrap().timing.count(), "timing activity validated before audio");
             self.state = State::Ready;
             Ok(())
         })()
@@ -569,7 +619,7 @@ impl Session {
                 let outcome = error
                     .downcast_ref::<super::wire::ResponseFailure>()
                     .map_or("failed", super::wire::ResponseFailure::outcome);
-                tracing::info!(target: "piair::rtsp", phase = stage, outcome, record_validated = self.record_ok, "RECORD diagnostic failed");
+                tracing::info!(target: "piair::rtsp", phase = stage, outcome, record_validated = self.record_ok, "OwnTone diagnostic failed");
             }
         }
         self.finish(result)
@@ -625,6 +675,7 @@ impl Session {
     /// Test input only. The transport, codec, crypto, sockets and timing are real.
     /// Signal amplitude <= -18 dBFS and receiver volume uses the explicitly authorized test setting.
     pub fn transmit_test(&mut self, seconds: u32) -> Result<()> {
+        let attempted = Instant::now();
         let result = (|| {
             ensure!(
                 self.state == State::Ready,
@@ -637,6 +688,10 @@ impl Session {
             let clock = self.clock.as_ref().context("session clock absent")?.clone();
             let start = Instant::now();
             let mut sent = 0u64;
+            ensure!(
+                !self.playback_check || seconds == 1,
+                "playback check is fixed at one second"
+            );
             let signal = u64::from(seconds) * u64::from(profile::RATE);
             // No unsent PCM at sync time: OwnTone's pos + input - output
             // reduces to next RTP timestamp minus our sender buffer.
@@ -651,11 +706,15 @@ impl Session {
                     Instant::now().saturating_duration_since(deadline) < Duration::from_millis(100),
                     "audio scheduler stalled; no uncontrolled catch-up"
                 );
-                if Instant::now() >= feedback_at {
+                if !self.playback_check && Instant::now() >= feedback_at {
                     self.feedback()?;
                     feedback_at += Duration::from_secs(2);
                 }
                 if let Some((first, count)) = self.media.as_ref().unwrap().retransmit()? {
+                    ensure!(
+                        !self.playback_check,
+                        "playback check forbids retransmissions"
+                    );
                     ensure!(
                         retry_budget >= usize::from(count),
                         "session retransmission budget exhausted"
@@ -701,6 +760,13 @@ impl Session {
                             } else {
                                 (100 - phase) * 164 - 4100
                             };
+                            let x = if self.playback_check {
+                                let fade =
+                                    n.min(signal.saturating_sub(n)).min(2205) as f64 / 2205.0;
+                                (f64::from(x) * fade) as i16
+                            } else {
+                                x
+                            };
                             [x, x]
                         }
                     })
@@ -720,6 +786,10 @@ impl Session {
             self.workers()?;
             Ok(())
         })();
+        tracing::info!(target: "piair::rtsp", phase = "playback", rtp_packets = self.packets_sent,
+            ntp_replies = self.media.as_ref().map_or(0, |m| m.timing.count()),
+            elapsed_ms = attempted.elapsed().as_millis() as u64, success = result.is_ok(),
+            "bounded transmission outcome; audible playback unverified");
         self.finish(result)
     }
     pub fn flush(&mut self) -> Result<()> {
@@ -749,6 +819,10 @@ impl Session {
             .is_none_or(|control| control.is_invalidated())
         {
             tracing::debug!(target: "piair::rtsp", outcome = "skipped", "TEARDOWN skipped: control connection already invalidated; local resources will be released");
+            ensure!(
+                !self.stream_check,
+                "TEARDOWN unacknowledged: control invalidated"
+            );
             return Ok(());
         }
         let body = profile::binary(&mut profile::dict([]))?;
@@ -777,6 +851,9 @@ impl Session {
                     replies = ports.timing_replies(), "setup-only NTP responder cleanup");
             }
         }
+        tracing::info!(target: "piair::rtsp", phase = "cleanup", rtp_packets = self.packets_sent,
+            ntp_replies = self.media.as_ref().map_or_else(|| self.ports.as_ref().map_or(0, Ports::timing_replies), |m| m.timing.count()),
+            "local resource release");
         self.media = None;
         self.ports = None;
         self.events = None;
@@ -817,11 +894,16 @@ impl Session {
             return Ok(());
         }
         let result = (|| {
-            if self.encoder.is_some() {
+            if self.encoder.is_some() && !self.playback_check {
                 self.flush()?;
             }
             self.state = State::Stopping;
-            self.teardown()
+            self.teardown()?;
+            ensure!(
+                !self.stream_check || !self.cancel.load(Ordering::Relaxed),
+                "diagnostic interrupted"
+            );
+            Ok(())
         })(); // flush failure already cleans up
         if result.is_err() {
             return self.finish(result);

@@ -862,6 +862,7 @@ fn request_failures_attribute_each_negotiation_stage_and_close_channels() {
                 let event = TcpListener::bind("127.0.0.1:0").unwrap();
                 let timing = UdpSocket::bind("127.0.0.1:0").unwrap();
                 let data = UdpSocket::bind("127.0.0.1:0").unwrap();
+                let control = UdpSocket::bind("127.0.0.1:0").unwrap();
                 let mut event_socket = None;
                 for index in 0..=target {
                     let request = read_message(&mut socket, &mut keys);
@@ -915,7 +916,7 @@ fn request_failures_attribute_each_negotiation_stage_and_close_channels() {
                                 ),
                                 (
                                     "controlPort",
-                                    profile::uint(u64::from(data.local_addr().unwrap().port())),
+                                    profile::uint(u64::from(control.local_addr().unwrap().port())),
                                 ),
                             ])]),
                         )])),

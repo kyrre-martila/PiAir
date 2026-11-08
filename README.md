@@ -380,3 +380,12 @@ not evidence of sound from a physical receiver. No OwnTone/autostream changes
 are required.
 
 See [example terminal sessions and exact post-merge Raspberry Pi verification commands](docs/CLI_VERIFICATION.md).
+
+The approved Even-Olai HomePod also has two separate opt-in diagnostics:
+`stream-test device:3ae5c9a302ad --stream-setup-check --experimental-owntone-transient`
+validates stream negotiation with zero audio or volume changes;
+`stream-test device:3ae5c9a302ad --playback-check --experimental-owntone-transient`
+sends a fixed one-second faded tone with receiver volume −40 dB (may persist).
+Both require existing approval/selection and interactive confirmation. See the
+[pinned comparison and two independently authorized Pi procedures](docs/OWNTONE_PLAYBACK_CHECK.md).
+Stream negotiation or packet transmission alone does not establish audible playback.
