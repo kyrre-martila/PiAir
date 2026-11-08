@@ -100,7 +100,9 @@ Startup uses production encoders/decoders and this fixed sequence:
    Setup-only A retains deferred timing, B/C retain early timing and C's
    pre-verify info order. See [playback lifecycle migration](REALTIME_NTP_LIFECYCLE.md).
 4. Send RECORD and validate any Audio-Latency header within 11025..88200 samples.
-   Absent latency uses the explicitly offered minimum 11025; zero is rejected.
+   Absent latency uses the sender default 11025; zero is rejected. These are
+   current sender policy bounds, not established protocol requirements; RECORD
+   precedes the stream offer. See [latency evidence](RECORD_LATENCY.md).
 5. SETUP one stream: type=96, audioFormat=0x40000, ct=2, spf=352, sr=44100,
    isMedia=true, latencyMin=11025, latencyMax=88200, local controlPort, independent
    shk, session streamConnectionID, supportsDynamicStreamID=false. Validate one
