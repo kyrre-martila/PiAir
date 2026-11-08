@@ -23,6 +23,9 @@ pub enum AuthProfile {
 
 pub struct Wire {
     socket: TcpStream,
+    // Scoped by Session to the initial SETUP diagnostic only.
+    pub(super) setup_response_wait: Option<(Duration, Arc<AtomicBool>)>,
+    polling_response: bool,
     deadline: Instant,
     budget: Duration,
     seq: u32,
@@ -131,6 +134,8 @@ impl Wire {
     fn new(socket: TcpStream, budget: Duration, receiver_id: String, method: Method) -> Self {
         Self {
             socket,
+            setup_response_wait: None,
+            polling_response: false,
             deadline: Instant::now() + budget,
             budget,
             seq: 0,
@@ -186,10 +191,17 @@ impl Wire {
             .context("receiver operation timed out")?;
         ensure!(!remaining.is_zero(), "receiver operation timed out");
         self.socket
-            .set_read_timeout(Some(remaining.min(Duration::from_secs(3))))?;
+            .set_read_timeout(Some(remaining.min(if self.polling_response {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(3)
+            })))?;
         self.socket
             .set_write_timeout(Some(remaining.min(Duration::from_secs(3))))?;
         Ok(())
+    }
+    pub(super) fn is_invalidated(&self) -> bool {
+        self.failed
     }
     pub(super) fn limit_cleanup(&mut self) {
         self.budget = Duration::from_millis(250);
@@ -197,13 +209,32 @@ impl Wire {
     fn read_raw(&mut self, bytes: &mut [u8]) -> Result<()> {
         let mut offset = 0;
         while offset < bytes.len() {
+            if self.polling_response {
+                ensure!(
+                    !self
+                        .setup_response_wait
+                        .as_ref()
+                        .unwrap()
+                        .1
+                        .load(Ordering::Relaxed),
+                    "diagnostic interrupted"
+                );
+            }
             self.timeout().inspect_err(|_| {
                 tracing::debug!(target: "piair::auth", phase = self.auth_phase, "connection deadline expired");
             })?;
-            let n = self
-                .socket
-                .read(&mut bytes[offset..])
-                .map_err(|error| {
+            let read = self.socket.read(&mut bytes[offset..]);
+            if self.polling_response
+                && read.as_ref().is_err_and(|error| {
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    )
+                })
+            {
+                continue; // Keep offsets and the fixed overall deadline, including across frames.
+            }
+            let n = read.map_err(|error| {
                     tracing::debug!(target: "piair::auth", phase = self.auth_phase, outcome = ?error.kind(), "connection read failed");
                     match error.kind() {
                     std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
@@ -433,12 +464,23 @@ impl Wire {
                 headers = "CSeq,User-Agent,X-Apple-ProtocolVersion,Content-Length,Client-Instance,DACP-ID,Active-Remote,X-Apple-Client-Name",
                 extra_header_names = ?headers.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
                 operation_budget_ms = self.budget.as_millis() as u64,
-                socket_wait_cap_ms = 3000u64,
+                socket_wait_cap_ms = if self.setup_response_wait.is_some() { 100u64 } else { 3000u64 },
+                setup_response_budget_ms = self.setup_response_wait.as_ref().map(|(budget, _)| budget.as_millis() as u64),
                 uri_kind = if uri.starts_with("rtsp://") { "session" } else { "endpoint" },
                 "authenticated request start");
             self.write_message(&request)
                 .context("encrypted request write")?;
-            let body = self.response().context("response read/validation")?;
+            if let Some((budget, _)) = &self.setup_response_wait {
+                ensure!(
+                    method == "SETUP",
+                    "SETUP response wait used for another method"
+                );
+                self.deadline = Instant::now() + *budget;
+                self.polling_response = true;
+            }
+            let response = self.response().context("response read/validation");
+            self.polling_response = false;
+            let body = response?;
             ensure!(
                 self.pending_start == self.pending_end,
                 "unsolicited control data"
@@ -1141,6 +1183,123 @@ impl Drop for Worker {
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_setup_wait_has_one_deadline_for_silence_and_partial_frames() {
+        for partial in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut peer = listener.accept().unwrap().0;
+            let mut wire = Wire::mock(socket, Duration::from_secs(1), "test");
+            wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
+            wire.setup_response_wait =
+                Some((Duration::from_millis(350), Arc::new(AtomicBool::new(false))));
+            let server = thread::spawn(move || {
+                if partial {
+                    let mut keys = super::super::crypto::ControlKeys::new(&[7; 32]);
+                    keys.swap_directions_for_test();
+                    let frame = keys
+                        .encrypt(b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n")
+                        .unwrap();
+                    // Dribble ciphertext across poll timeouts without completing a frame.
+                    for chunk in frame[..6].chunks(2) {
+                        peer.write_all(chunk).unwrap();
+                        thread::sleep(Duration::from_millis(120));
+                    }
+                }
+                let mut bytes = Vec::new();
+                peer.read_to_end(&mut bytes).unwrap();
+            });
+            let start = Instant::now();
+            let error = wire
+                .request("SETUP", "rtsp://127.0.0.1/1", &[], &[])
+                .err()
+                .unwrap();
+            assert!(format!("{error:#}").contains("timed out"));
+            assert!(start.elapsed() >= Duration::from_millis(300));
+            assert!(start.elapsed() < Duration::from_secs(1));
+            assert_eq!(wire.response_frames, 0);
+            assert_eq!(wire.response_bytes > 0, partial);
+            assert!(wire.failed && wire.keys.is_none());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn diagnostic_setup_wait_accepts_delayed_fragmented_response_and_preserves_default() {
+        for diagnostic in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut peer = listener.accept().unwrap().0;
+            let mut wire = Wire::mock(socket, Duration::from_secs(15), "test");
+            wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
+            if diagnostic {
+                wire.setup_response_wait =
+                    Some((Duration::from_secs(15), Arc::new(AtomicBool::new(false))));
+            }
+            let server = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(3300));
+                if diagnostic {
+                    let mut keys = super::super::crypto::ControlKeys::new(&[7; 32]);
+                    keys.swap_directions_for_test();
+                    let frame = keys
+                        .encrypt(b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n")
+                        .unwrap();
+                    peer.write_all(&frame[..1]).unwrap();
+                    thread::sleep(Duration::from_millis(150));
+                    peer.write_all(&frame[1..]).unwrap();
+                }
+            });
+            let start = Instant::now();
+            let result = wire.request("SETUP", "rtsp://127.0.0.1/1", &[], &[]);
+            assert_eq!(result.is_ok(), diagnostic);
+            if diagnostic {
+                assert_eq!(wire.response_frames, 1);
+                assert!(!wire.polling_response);
+                wire.setup_response_wait = None;
+                wire.restart_deadline();
+                wire.timeout().unwrap();
+                assert_eq!(
+                    wire.socket.read_timeout().unwrap(),
+                    Some(Duration::from_secs(3))
+                );
+            } else {
+                assert!(format!("{:#}", result.err().unwrap()).contains("receiver read timeout"));
+                assert!(start.elapsed() < Duration::from_millis(3300));
+            }
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn diagnostic_setup_wait_cancels_silence_and_partial_response_promptly() {
+        for partial in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut peer = listener.accept().unwrap().0;
+            let mut wire = Wire::mock(socket, Duration::from_secs(15), "test");
+            wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
+            let cancel = Arc::new(AtomicBool::new(false));
+            wire.setup_response_wait = Some((Duration::from_secs(15), cancel.clone()));
+            if partial {
+                peer.write_all(&[1]).unwrap();
+            }
+            let trigger = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(150));
+                cancel.store(true, Ordering::Relaxed);
+            });
+            let start = Instant::now();
+            let error = wire
+                .request("SETUP", "rtsp://127.0.0.1/1", &[], &[])
+                .err()
+                .unwrap();
+            assert!(format!("{error:#}").contains("diagnostic interrupted"));
+            assert!(start.elapsed() < Duration::from_secs(1));
+            assert_eq!(wire.response_bytes, usize::from(partial));
+            assert!(wire.failed && wire.keys.is_none());
+            trigger.join().unwrap();
+        }
+    }
 
     #[test]
     fn sender_identity_retains_all_persistent_bits_across_connections() {

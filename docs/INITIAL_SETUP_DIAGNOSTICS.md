@@ -1,5 +1,7 @@
 # Apple TV initial encrypted SETUP investigation (PR #21)
 
+Follow-up: [controlled 15-second SETUP timeout experiment (PR #22)](SETUP_TIMEOUT_EXPERIMENT.md).
+
 Target: Stua, device:02d899c1833f, 192.168.1.236:7000,
 AppleTV6,2 / tvOS 26.6.1. User-supplied hardware evidence: persistent PIN
 pairing, pair-verify and encrypted OPTIONS succeed; `stream-test --seconds 3`

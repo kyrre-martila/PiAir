@@ -60,6 +60,9 @@ pub enum Command {
         /// Validate initial SETUP and tear down before RECORD or audio transmission.
         #[arg(long)]
         setup_check: bool,
+        /// Diagnostic only: wait up to 15 seconds total for initial SETUP.
+        #[arg(long, requires = "setup_check", value_parser = clap::value_parser!(u64).range(15..=15))]
+        setup_timeout_seconds: Option<u64>,
     },
     /// Remove local credentials without contacting the receiver.
     Unpair { receiver_id: String },
@@ -95,6 +98,43 @@ pub enum ConfigCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn setup_timeout_is_explicit_and_scoped() {
+        let base = ["piair", "stream-test", "device:aabbccddeeff"];
+        let cli = Cli::try_parse_from(base).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::StreamTest {
+                setup_timeout_seconds: None,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(base.into_iter().chain([
+            "--setup-check",
+            "--setup-timeout-seconds",
+            "15"
+        ]))
+        .is_ok());
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--setup-timeout-seconds", "15"])).is_err()
+        );
+        for value in ["0", "3", "14", "16"] {
+            assert!(Cli::try_parse_from(base.into_iter().chain([
+                "--setup-check",
+                "--setup-timeout-seconds",
+                value
+            ]))
+            .is_err());
+        }
+        assert!(Cli::try_parse_from([
+            "piair",
+            "authenticate",
+            "device:aabbccddeeff",
+            "--setup-timeout-seconds",
+            "15"
+        ])
+        .is_err());
+    }
     #[test]
     fn preamble_requires_explicit_flag() {
         for (args, expected) in [
