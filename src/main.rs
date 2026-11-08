@@ -62,6 +62,7 @@ fn run_with_discovery(
             setup_check,
             setup_timeout_seconds,
             setup_profile,
+            experimental_owntone_transient,
         } => receiver::stream_test(
             &loaded,
             receiver_id.as_deref(),
@@ -70,6 +71,7 @@ fn run_with_discovery(
             setup_check,
             setup_timeout_seconds,
             setup_profile,
+            experimental_owntone_transient,
         )?,
         Command::Unpair { receiver_id } => receiver::unpair(&loaded, &receiver_id)?,
         Command::Audio { command } => audio::run(command, &loaded)?,

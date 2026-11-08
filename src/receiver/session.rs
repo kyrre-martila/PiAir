@@ -40,6 +40,7 @@ pub struct Session {
     state: State,
     volume_db: i32,
     setup_profile: SetupProfile,
+    owntone_setup_only: bool,
     control: Option<Wire>,
     failure: Option<String>,
     uri: String,
@@ -64,6 +65,7 @@ impl Session {
             state: State::Disconnected,
             volume_db: -30,
             setup_profile: SetupProfile::A,
+            owntone_setup_only: false,
             control: None,
             failure: None,
             uri: String::new(),
@@ -91,12 +93,39 @@ impl Session {
     ) -> Result<()> {
         self.start_selected(connect, Some(credential))
     }
+    /// Own the full same-socket authentication lifecycle and retain its profile,
+    /// verified proof, directional cipher counters and CSeq into setup-only negotiation.
+    pub fn start_owntone_setup_selected(
+        &mut self,
+        connect: impl FnOnce() -> Result<Wire>,
+        capabilities: &super::compatibility::Capabilities,
+    ) -> Result<()> {
+        ensure!(
+            self.state == State::Disconnected,
+            "session already started or failed"
+        );
+        capabilities.decide(super::compatibility::Method::Transient)?;
+        self.owntone_setup_only = true;
+        self.start_setup_selected(
+            || {
+                let mut wire = connect()?;
+                wire.owntone_transient(capabilities)?;
+                Ok(wire)
+            },
+            None,
+            SetupProfile::A,
+        )
+    }
     pub fn start_setup_selected(
         &mut self,
         connect: impl FnOnce() -> Result<Wire>,
         credential: Option<&Credential>,
         profile: SetupProfile,
     ) -> Result<()> {
+        ensure!(
+            !self.owntone_setup_only || profile == SetupProfile::A,
+            "OwnTone transient setup requires profile A; no fallback"
+        );
         self.setup_profile = profile;
         tracing::info!(target: "piair::rtsp", ?profile, "setup diagnostic selected");
         self.start_selected(connect, credential)
@@ -278,7 +307,12 @@ impl Session {
             "volume must be -60..=-10 dB"
         );
         ensure!(
-            self.setup_profile == SetupProfile::A,
+            self.setup_profile == SetupProfile::A
+                && !self.owntone_setup_only
+                && !self
+                    .control
+                    .as_ref()
+                    .is_some_and(Wire::uses_owntone_transient_profile),
             "diagnostic profile is setup-only"
         );
         self.volume_db = volume_db;
@@ -297,6 +331,9 @@ impl Session {
                 self.state == State::Negotiating,
                 "authenticated negotiation required"
             );
+            ensure!(initial_only || !self.owntone_setup_only, "OwnTone transient is setup-only");
+            ensure!(initial_only || !self.control.as_ref().is_some_and(Wire::uses_owntone_transient_profile),
+                "OwnTone transient is setup-only");
             let encoder = realtime::Encoder::new()?;
             self.clock = Some(Arc::new(realtime::Clock::new()?));
             let session_id = rand::random::<u32>();
@@ -620,13 +657,18 @@ impl Session {
             .as_ref()
             .is_none_or(|control| control.is_invalidated())
         {
-            tracing::debug!(target: "piair::rtsp", "TEARDOWN skipped: control connection already invalidated; local resources will be released");
+            tracing::debug!(target: "piair::rtsp", outcome = "skipped", "TEARDOWN skipped: control connection already invalidated; local resources will be released");
             return Ok(());
         }
         let body = profile::binary(&mut profile::dict([]))?;
-        let reply = self.call("TEARDOWN", None, &body, &[])?;
-        ensure!(reply.body.is_empty(), "unexpected TEARDOWN body");
-        Ok(())
+        let result = (|| {
+            let reply = self.call("TEARDOWN", None, &body, &[])?;
+            ensure!(reply.body.is_empty(), "unexpected TEARDOWN body");
+            Ok(())
+        })();
+        tracing::debug!(target: "piair::rtsp", phase = "TEARDOWN", success = result.is_ok(),
+            "TEARDOWN outcome; local resources will be released");
+        result
     }
     fn release(&mut self) {
         tracing::debug!(target: "piair::rtsp", "session cleanup: releasing sockets and joining workers");

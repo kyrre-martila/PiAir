@@ -1,3 +1,7 @@
+> For the current HomePod-only opt-in (PR #33), use the
+> [OwnTone transient initial SETUP procedure](OWNTONE_TRANSIENT_SETUP_CHECK.md).
+> The Apple TV experiment below is historical and is not authorized by that procedure.
+
 # Apple TV initial encrypted SETUP investigation (PR #21)
 
 Follow-up: [controlled 15-second SETUP timeout experiment (PR #22)](SETUP_TIMEOUT_EXPERIMENT.md).

@@ -1359,3 +1359,343 @@ fn configured_volume_uses_existing_parameter_and_cleanup() {
         server.join().unwrap();
     }
 }
+
+// Every phase uses the one socket accepted by local_mock_method. Independent
+// receiver keys start at counter zero after M4 and persist across all messages;
+// send_reply deliberately fragments each response into many encrypted frames.
+#[derive(Clone, Copy, Debug)]
+enum OwnSetup {
+    Good,
+    MissingPort,
+    ZeroPort,
+    OversizedPort,
+    WrongPortType,
+    BadTimingPort,
+    Ptp,
+    BadPlist,
+    BadContentType,
+    Rejected,
+    WrongCseq,
+    BadTag,
+    Timeout,
+    TeardownRejected,
+    TeardownBody,
+    InfoRejected,
+    Cancelled,
+}
+fn own_setup_case(mode: OwnSetup) {
+    let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .unwrap();
+        owntone_info(&mut socket, 200, &info_body(0));
+        setup_mock_transport(
+            socket,
+            Fault::None,
+            Method::Transient,
+            "3939",
+            PI,
+            false,
+            true,
+            |mut socket, shared| {
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(8)))
+                    .unwrap();
+                if matches!(mode, OwnSetup::Cancelled) {
+                    assert_eof(&mut socket); // Cancellation sends no encrypted request or audio.
+                    return;
+                }
+                let mut keys = ControlKeys::new(shared.as_ref());
+                keys.swap_directions_for_test();
+                let info = read_message(&mut socket, &mut keys);
+                assert_eq!((info.method.as_str(), info.uri.as_str()), ("GET", "/info"));
+                assert_eq!(info.headers["cseq"], "4");
+                assert_eq!(info.headers["user-agent"], "AirPlay/999.0.0");
+                assert_eq!(info.headers["client-instance"], "123456789ABCDEF0");
+                assert_eq!(info.headers["active-remote"], "123456789");
+                if matches!(mode, OwnSetup::InfoRejected) {
+                    socket.write_all(&keys.encrypt(b"RTSP/1.0 403 private-reason\r\nCSeq: 4\r\nContent-Length: 0\r\n\r\n").unwrap()).unwrap();
+                    assert_eof(&mut socket);
+                    return;
+                }
+                send_reply(
+                    &mut socket,
+                    &mut keys,
+                    &info,
+                    Some(profile::dict([(
+                        "features",
+                        profile::uint((1 << 9) | (1 << 19) | (1 << 41)),
+                    )])),
+                    "",
+                );
+                let setup = read_message(&mut socket, &mut keys);
+                assert_eq!(setup.method, "SETUP");
+                assert_eq!(setup.headers["cseq"], "5");
+                assert_eq!(setup.headers["user-agent"], info.headers["user-agent"]);
+                assert_eq!(
+                    setup.headers["client-instance"],
+                    info.headers["client-instance"]
+                );
+                assert_eq!(setup.headers["session"], "test-session");
+                assert!(setup.uri.starts_with("rtsp://127.0.0.1/"));
+                let value = plist(&setup);
+                let offer = value.as_dictionary().unwrap();
+                assert_eq!(offer.len(), 4);
+                assert_eq!(
+                    offer["deviceID"].as_string(),
+                    Some("12:34:56:78:9A:BC:DE:F0")
+                );
+                assert_eq!(offer["timingProtocol"].as_string(), Some("NTP"));
+                assert_eq!(
+                    uuid::Uuid::parse_str(offer["sessionUUID"].as_string().unwrap())
+                        .unwrap()
+                        .get_version_num(),
+                    4
+                );
+                assert!(offer["timingPort"].as_unsigned_integer().unwrap() > 0);
+                let mut response = profile::dict([("eventPort", profile::uint(7001))]);
+                let d = response.as_dictionary_mut().unwrap();
+                match mode {
+                    OwnSetup::MissingPort => {
+                        d.remove("eventPort");
+                    }
+                    OwnSetup::ZeroPort => {
+                        d.insert("eventPort".into(), profile::uint(0));
+                    }
+                    OwnSetup::OversizedPort => {
+                        d.insert("eventPort".into(), profile::uint(65536));
+                    }
+                    OwnSetup::WrongPortType => {
+                        d.insert("eventPort".into(), Value::String("7001".into()));
+                    }
+                    OwnSetup::BadTimingPort => {
+                        d.insert("timingPort".into(), profile::uint(0));
+                    }
+                    OwnSetup::Ptp => {
+                        d.insert("timingProtocol".into(), Value::String("PTP".into()));
+                    }
+                    _ => (),
+                }
+                match mode {
+                    OwnSetup::Rejected | OwnSetup::WrongCseq | OwnSetup::BadTag => {
+                        let raw = match mode {
+                        OwnSetup::Rejected => b"RTSP/1.0 403 private-reason\r\nCSeq: 5\r\nContent-Length: 0\r\n\r\n".as_slice(),
+                        OwnSetup::WrongCseq => b"RTSP/1.0 200 OK\r\nCSeq: 4\r\nContent-Length: 0\r\n\r\n",
+                        _ => b"RTSP/1.0 200 OK\r\nCSeq: 5\r\nContent-Length: 0\r\n\r\n",
+                    };
+                        let mut frame = keys.encrypt(raw).unwrap();
+                        if matches!(mode, OwnSetup::BadTag) {
+                            *frame.last_mut().unwrap() ^= 1;
+                        }
+                        socket.write_all(&frame).unwrap();
+                        assert_eof(&mut socket); // Invalidated transport: no TEARDOWN or retry.
+                        return;
+                    }
+                    OwnSetup::Timeout => {
+                        assert_eof(&mut socket); // Remain silent until the bounded client read fails.
+                        return;
+                    }
+                    OwnSetup::BadPlist | OwnSetup::BadContentType => {
+                        let raw = if matches!(mode, OwnSetup::BadPlist) {
+                            b"RTSP/1.0 200 OK\r\nCSeq: 5\r\nContent-Type: application/x-apple-binary-plist\r\nContent-Length: 3\r\n\r\nbad".as_slice()
+                        } else {
+                            b"RTSP/1.0 200 OK\r\nCSeq: 5\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n"
+                        };
+                        socket.write_all(&keys.encrypt(raw).unwrap()).unwrap();
+                    }
+                    _ => send_reply(&mut socket, &mut keys, &setup, Some(response), ""),
+                }
+                let teardown = read_message(&mut socket, &mut keys);
+                assert_eq!(teardown.method, "TEARDOWN");
+                assert_eq!(teardown.headers["cseq"], "6");
+                assert_eq!(teardown.uri, setup.uri);
+                assert_eq!(teardown.headers["user-agent"], "AirPlay/999.0.0");
+                assert!(plist(&teardown).as_dictionary().unwrap().is_empty());
+                if matches!(mode, OwnSetup::TeardownRejected) {
+                    socket.write_all(&keys.encrypt(b"RTSP/1.0 403 private-reason\r\nCSeq: 6\r\nContent-Length: 0\r\n\r\n").unwrap()).unwrap();
+                } else {
+                    send_reply(
+                        &mut socket,
+                        &mut keys,
+                        &teardown,
+                        matches!(mode, OwnSetup::TeardownBody).then(|| profile::dict([])),
+                        "",
+                    );
+                }
+                assert_eof(&mut socket); // No RECORD, stream SETUP, volume, or second attempt.
+            },
+        );
+    });
+    wire.owntone_test_identity();
+    let mut session = Session::new();
+    session
+        .start_owntone_setup_selected(|| Ok(wire), &owntone_caps())
+        .unwrap();
+    assert!(session.negotiate_realtime_at_volume(-30).is_err());
+    if matches!(mode, OwnSetup::Cancelled) {
+        session.cancel.store(true, Ordering::Relaxed);
+    }
+    let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
+        let result = session.check_initial_setup_with_timeout(None);
+        if matches!(mode, OwnSetup::Good) {
+            result.unwrap();
+            assert_eq!(session.state(), State::Disconnected);
+        } else {
+            let error = format!("{:#}", result.unwrap_err());
+            let expected = match mode {
+                OwnSetup::MissingPort
+                | OwnSetup::ZeroPort
+                | OwnSetup::OversizedPort
+                | OwnSetup::WrongPortType => "eventPort",
+                OwnSetup::BadTimingPort => "timingPort",
+                OwnSetup::Ptp => "unsupported PTP",
+                OwnSetup::BadPlist => "binary plist",
+                OwnSetup::BadContentType => "Content-Type",
+                OwnSetup::Rejected | OwnSetup::InfoRejected | OwnSetup::TeardownRejected => "403",
+                OwnSetup::WrongCseq => "CSeq",
+                OwnSetup::BadTag => "authentication tag invalid",
+                OwnSetup::Timeout => "receiver read timeout",
+                OwnSetup::TeardownBody => "unexpected TEARDOWN body",
+                OwnSetup::Cancelled => "diagnostic interrupted",
+                OwnSetup::Good => unreachable!(),
+            };
+            assert!(error.contains(expected), "mode={mode:?}: {error}");
+            assert!(!error.contains("private-reason"));
+            assert_eq!(session.state(), State::Failed);
+        }
+    });
+    assert!(!output.contains("private-reason"));
+    if matches!(mode, OwnSetup::Good) {
+        assert!(output.contains("initial SETUP profile and ports validated"));
+        assert!(output.contains("TEARDOWN outcome"));
+    }
+    if matches!(
+        mode,
+        OwnSetup::BadTag | OwnSetup::Rejected | OwnSetup::Timeout
+    ) {
+        assert!(output.contains("\"outcome\":\"skipped\""));
+        assert!(output.contains("authenticated_frames"));
+    }
+    assert_eq!(session.packets_sent, 0);
+    session.stop().unwrap();
+    server.join().unwrap();
+}
+#[test]
+fn owntone_setup_same_socket_counters_validation_and_cleanup() {
+    for mode in [
+        OwnSetup::Good,
+        OwnSetup::MissingPort,
+        OwnSetup::ZeroPort,
+        OwnSetup::OversizedPort,
+        OwnSetup::WrongPortType,
+        OwnSetup::BadTimingPort,
+        OwnSetup::Ptp,
+        OwnSetup::BadPlist,
+        OwnSetup::BadContentType,
+        OwnSetup::Rejected,
+        OwnSetup::WrongCseq,
+        OwnSetup::BadTag,
+        OwnSetup::Timeout,
+        OwnSetup::TeardownRejected,
+        OwnSetup::TeardownBody,
+        OwnSetup::InfoRejected,
+        OwnSetup::Cancelled,
+    ] {
+        own_setup_case(mode);
+    }
+}
+#[test]
+fn owntone_setup_rejects_unsupported_policy_before_connect_and_persistent_before_io() {
+    let mut caps = owntone_caps();
+    caps.password = Some(true);
+    let mut session = Session::new();
+    assert!(session
+        .start_owntone_setup_selected(|| panic!("must not connect"), &caps)
+        .is_err());
+    let (wire, server) =
+        local_mock_method(Method::PinDisplay, |mut socket| assert_eof(&mut socket));
+    assert!(session
+        .start_owntone_setup_selected(|| Ok(wire), &owntone_caps())
+        .is_err());
+    assert_eq!(session.state(), State::Failed);
+    server.join().unwrap();
+}
+
+#[test]
+fn owntone_setup_reauthorizes_after_encrypted_info_and_preserves_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut observed = snapshot(listener.local_addr().unwrap().port());
+    observed[0].services[0]
+        .capabilities
+        .insert("features".into(), "0x80200,0x10000".into());
+    observed[0].services[0]
+        .capabilities
+        .insert("flags".into(), "0x98404".into());
+    let selected = Selection::from_receiver(&observed[0], Method::Transient).unwrap();
+    let store = store::Store::new(&config).unwrap();
+    store.save(&credential()).unwrap();
+    store.select(&selected).unwrap();
+    store.client_identity().unwrap();
+    let identity = dir.path().join("receiver-state/client-identity.toml");
+    std::fs::write(
+        &identity,
+        "client = \"123456789ABCDEF0\"\nremote = 123456789\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&identity, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let credential_path = dir.path().join("receiver-state/aabbccddeeff.toml");
+    let before = std::fs::read(&credential_path).unwrap();
+    let revoke = config.clone();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        owntone_info(&mut socket, 200, &info_body(0));
+        setup_mock_transport(
+            socket,
+            Fault::None,
+            Method::Transient,
+            "3939",
+            PI,
+            false,
+            true,
+            |mut socket, shared| {
+                let mut keys = ControlKeys::new(shared.as_ref());
+                keys.swap_directions_for_test();
+                let info = read_message(&mut socket, &mut keys);
+                assert_eq!(info.method, "GET");
+                assert_eq!(info.headers["cseq"], "4");
+                std::fs::write(revoke, "receiver_allowlist=[]").unwrap();
+                send_reply(
+                    &mut socket,
+                    &mut keys,
+                    &info,
+                    Some(profile::dict([(
+                        "features",
+                        profile::uint((1 << 9) | (1 << 19)),
+                    )])),
+                    "",
+                );
+                assert_eof(&mut socket); // Reauthorization fails: no SETUP or fallback.
+            },
+        );
+    });
+    let mut session = Session::new();
+    session
+        .start_owntone_setup_selected(
+            || Wire::connect(&config, ID, &selected, &observed),
+            &selected.capabilities,
+        )
+        .unwrap();
+    let error = format!(
+        "{:#}",
+        session.check_initial_setup_with_timeout(None).unwrap_err()
+    );
+    assert!(error.contains("approval"), "{error}");
+    assert_eq!(session.state(), State::Failed);
+    assert_eq!(session.packets_sent, 0);
+    assert_eq!(std::fs::read(credential_path).unwrap(), before);
+    assert!(store.selection().unwrap() == Some(selected));
+    server.join().unwrap();
+}

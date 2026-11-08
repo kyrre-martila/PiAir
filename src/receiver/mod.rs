@@ -343,6 +343,7 @@ fn save_verified_enrollment(
 }
 
 /// Deliberate diagnostic only. No application startup/activity path calls this.
+#[allow(clippy::too_many_arguments)]
 pub fn stream_test(
     loaded: &Loaded,
     id: Option<&str>,
@@ -351,6 +352,7 @@ pub fn stream_test(
     setup_check: bool,
     setup_timeout_seconds: Option<u64>,
     setup_profile: Option<SetupProfile>,
+    experimental_owntone_transient: bool,
 ) -> Result<()> {
     ensure!(
         setup_profile.is_none() || setup_check,
@@ -359,6 +361,10 @@ pub fn stream_test(
     ensure!(
         setup_timeout_seconds.is_none() || (setup_check && setup_timeout_seconds == Some(15)),
         "SETUP timeout experiment requires --setup-check and 15 seconds"
+    );
+    ensure!(
+        !experimental_owntone_transient || (setup_check && id.is_some() && setup_profile.is_none()),
+        "OwnTone transient requires an exact ID, --setup-check and no --setup-profile; no fallback"
     );
     let proposed = if id.is_none() {
         Some(interactive::choose_for_stream(loaded)?)
@@ -389,6 +395,13 @@ pub fn stream_test(
             && selected.capabilities.features & (1 << 19) != 0,
         "selected receiver does not advertise audio and ALAC"
     );
+    if experimental_owntone_transient {
+        ensure!(
+            selected.method == Method::Transient,
+            "OwnTone setup check requires explicit transient selection; no fallback"
+        );
+        selected.capabilities.decide(Method::Transient)?;
+    }
     let credential = if selected.method == Method::Transient {
         None
     } else {
@@ -401,7 +414,9 @@ pub fn stream_test(
         );
         Some(credential)
     };
-    if selected.method == Method::Transient {
+    if experimental_owntone_transient {
+        println!("Setup-only OwnTone-reference transient SRP selected; no persistent receiver identity verification; no fallback. Successful SETUP does not prove audible playback.");
+    } else if selected.method == Method::Transient {
         println!("Stream-test uses the selected legacy transient SRP profile without persistent receiver identity verification. Experimental authenticate profiles are not used; no fallback. Successful authentication or transmission does not prove audible playback.");
     }
     if setup_check {
@@ -434,7 +449,9 @@ pub fn stream_test(
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
     let connect = || wire::Wire::connect(&loaded.path, id, &selected, &snapshot);
-    if setup_check {
+    if experimental_owntone_transient {
+        session.start_owntone_setup_selected(connect, &selected.capabilities)?;
+    } else if setup_check {
         session.start_setup_selected(
             connect,
             credential.as_ref(),

@@ -1,3 +1,6 @@
+> Current follow-up: [opt-in HomePod transient initial SETUP-only check](OWNTONE_TRANSIENT_SETUP_CHECK.md).
+> Authentication/control success on 2026-11-08 does not establish SETUP or playback.
+
 > Current guidance and evidence: [receiver authentication audit and safe Pi diagnostic](RECEIVER_AUTHENTICATION.md).
 > Later operator evidence in [PR #21](INITIAL_SETUP_DIAGNOSTICS.md) reports HomePod
 > transient SRP and encrypted OPTIONS success after #20. Earlier 400/403 results
