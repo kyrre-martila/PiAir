@@ -1,5 +1,8 @@
 # Initial SETUP lifecycle experiments
 
+PR #25 corrects the [initial NTP response contract](INITIAL_NTP_RESPONSE.md):
+setup-only accepts an absent timingPort, while validating it strictly when present.
+
 Based on fresh origin/main `01c06381606cbfc729f415cd7084af283df8ab87`,
 which merged PR #23. The protocol audit and its independent crypto/plist
 regressions remain applicable. These are explicit experiments, not an Apple TV

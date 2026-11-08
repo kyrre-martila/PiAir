@@ -928,12 +928,75 @@ fn transient_session_negotiates_encrypted_audio_and_acknowledges_teardown() {
 
 #[test]
 fn initial_setup_check_validates_then_tears_down_without_record_or_audio() {
-    initial_setup_check(None);
-    initial_setup_check(Some(Duration::from_secs(15)));
+    for timeout in [None, Some(Duration::from_secs(15))] {
+        initial_setup_check(
+            timeout,
+            profile::dict([
+                ("eventPort", profile::uint(7001)),
+                ("timingPort", profile::uint(7002)),
+            ]),
+            false,
+            None,
+        );
+    }
 }
 
-fn initial_setup_check(timeout: Option<Duration>) {
-    let (wire, server) = local_mock(|s| {
+#[test]
+fn initial_ntp_response_contract_and_playback_limit() {
+    let valid = profile::dict([("eventPort", profile::uint(7001))]);
+    initial_setup_check(None, valid.clone(), false, None);
+    initial_setup_check(
+        None,
+        valid,
+        true,
+        Some("full playback requires receiver timingPort"),
+    );
+    initial_setup_check(None, profile::dict([]), false, Some("eventPort"));
+    for value in [
+        profile::uint(0),
+        profile::uint(65536),
+        Value::Integer((-1i64).into()),
+        Value::String("7001".into()),
+        Value::Boolean(true),
+        Value::Real(7001.0),
+    ] {
+        initial_setup_check(
+            None,
+            profile::dict([("eventPort", value.clone())]),
+            false,
+            Some("eventPort"),
+        );
+        initial_setup_check(
+            None,
+            profile::dict([("eventPort", profile::uint(7001)), ("timingPort", value)]),
+            false,
+            Some("timingPort"),
+        );
+    }
+    for protocol in [
+        Value::String("PTP".into()),
+        Value::String("None".into()),
+        profile::uint(1),
+    ] {
+        initial_setup_check(
+            None,
+            profile::dict([
+                ("eventPort", profile::uint(7001)),
+                ("timingProtocol", protocol),
+            ]),
+            false,
+            Some("unsupported PTP/timing profile"),
+        );
+    }
+}
+
+fn initial_setup_check(
+    timeout: Option<Duration>,
+    response: Value,
+    playback: bool,
+    error: Option<&str>,
+) {
+    let (wire, server) = local_mock(move |s| {
         let (mut socket, mut keys) = verify_mock_core(s, Fault::None, PI, |_| {}).unwrap();
         let info = read_message(&mut socket, &mut keys);
         assert_eq!((info.method.as_str(), info.uri.as_str()), ("GET", "/info"));
@@ -965,17 +1028,7 @@ fn initial_setup_check(timeout: Option<Duration>) {
         );
         let uuid = uuid::Uuid::parse_str(d["sessionUUID"].as_string().unwrap()).unwrap();
         assert_eq!(uuid.get_version_num(), 4);
-        send_reply(
-            &mut socket,
-            &mut keys,
-            &setup,
-            Some(profile::dict([
-                ("timingProtocol", Value::String("NTP".into())),
-                ("eventPort", profile::uint(7001)),
-                ("timingPort", profile::uint(7002)),
-            ])),
-            "",
-        );
+        send_reply(&mut socket, &mut keys, &setup, Some(response), "");
         let teardown = read_message(&mut socket, &mut keys);
         assert_eq!(teardown.method, "TEARDOWN");
         assert_eq!(teardown.uri, setup.uri);
@@ -984,8 +1037,21 @@ fn initial_setup_check(timeout: Option<Duration>) {
     });
     let mut session = Session::new();
     session.start(|| Ok(wire), &credential()).unwrap();
-    session.check_initial_setup_with_timeout(timeout).unwrap();
-    assert_eq!(session.state(), State::Disconnected);
+    let result = if playback {
+        session.negotiate_realtime()
+    } else {
+        session.check_initial_setup_with_timeout(timeout)
+    };
+    if let Some(expected) = error {
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(error.contains(expected), "{error}");
+        assert_eq!(session.state(), State::Failed);
+        session.stop().unwrap();
+        assert_eq!(session.state(), State::Failed);
+    } else {
+        result.unwrap();
+        assert_eq!(session.state(), State::Disconnected);
+    }
     assert_eq!(session.packets_sent, 0);
     server.join().unwrap();
 }
@@ -1049,7 +1115,6 @@ fn setup_profiles_order_crypto_and_readiness() {
                 Some(profile::dict([
                     ("timingProtocol", Value::String("NTP".into())),
                     ("eventPort", profile::uint(7001)),
-                    ("timingPort", profile::uint(7002)),
                 ])),
                 "",
             );
