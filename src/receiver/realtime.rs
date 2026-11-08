@@ -147,16 +147,29 @@ impl Encoder {
     }
 }
 pub fn latency(headers: &std::collections::BTreeMap<String, String>) -> Result<u32> {
-    let n = match headers.get("audio-latency") {
-        Some(n) => {
-            ensure!(
-                !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()),
-                "invalid latency"
-            );
-            n.parse::<u32>().context("invalid latency")?
-        }
-        None => profile::MIN_LATENCY,
+    let header = headers.get("audio-latency");
+    let parsed = header.map(|n| {
+        ensure!(
+            !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()),
+            "invalid latency"
+        );
+        n.parse::<u32>().context("invalid latency")
+    });
+    let (value, rejection) = match &parsed {
+        Some(Err(_)) => (None, "malformed unsigned decimal or u32 overflow"),
+        Some(Ok(n)) if *n < profile::MIN_LATENCY => (Some(*n), "below minimum"),
+        Some(Ok(n)) if *n > profile::MAX_LATENCY => (Some(*n), "above maximum"),
+        Some(Ok(n)) => (Some(*n), "none"),
+        None => (None, "none"),
     };
+    // Only typed numbers and fixed reasons: never log the supplied header text.
+    tracing::debug!(target: "piair::rtsp", phase = "RECORD",
+        audio_latency_present = header.is_some(), audio_latency_samples = ?value,
+        validation_min_samples = profile::MIN_LATENCY,
+        validation_max_samples = profile::MAX_LATENCY,
+        fallback_samples = profile::MIN_LATENCY, rejection_reason = rejection,
+        "RECORD receiver latency validation");
+    let n = parsed.transpose()?.unwrap_or(profile::MIN_LATENCY);
     ensure!(
         (profile::MIN_LATENCY..=profile::MAX_LATENCY).contains(&n),
         "receiver latency out of negotiated range"
@@ -167,6 +180,86 @@ pub fn latency(headers: &std::collections::BTreeMap<String, String>) -> Result<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn record_latency_validation_and_diagnostics_are_bounded() {
+        for (input, expected, reason) in [
+            (None, Some(11025), "none"),
+            (Some(""), None, "malformed unsigned decimal or u32 overflow"),
+            (
+                Some("secret-token"),
+                None,
+                "malformed unsigned decimal or u32 overflow",
+            ),
+            (
+                Some("+11025"),
+                None,
+                "malformed unsigned decimal or u32 overflow",
+            ),
+            (
+                Some("-1"),
+                None,
+                "malformed unsigned decimal or u32 overflow",
+            ),
+            (
+                Some("11025.0"),
+                None,
+                "malformed unsigned decimal or u32 overflow",
+            ),
+            (
+                Some("11025 0"),
+                None,
+                "malformed unsigned decimal or u32 overflow",
+            ),
+            (
+                Some("4294967296"),
+                None,
+                "malformed unsigned decimal or u32 overflow",
+            ),
+            (Some("0"), None, "below minimum"),
+            (Some("11024"), None, "below minimum"),
+            (Some("11025"), Some(11025), "none"),
+            (Some("44100"), Some(44100), "none"),
+            (Some("88200"), Some(88200), "none"),
+            (Some("88201"), None, "above maximum"),
+            (Some("4294967295"), None, "above maximum"),
+        ] {
+            let mut headers = std::collections::BTreeMap::new();
+            headers.insert("authorization".into(), "secret-credential".into());
+            if let Some(input) = input {
+                headers.insert("audio-latency".into(), input.into());
+            }
+            let emit = || assert_eq!(latency(&headers).ok(), expected);
+            assert!(
+                super::super::diagnostics::tests::capture(tracing::Level::INFO, emit).is_empty()
+            );
+            let output = super::super::diagnostics::tests::capture(tracing::Level::DEBUG, emit);
+            assert!(output.contains(reason), "{output}");
+            assert!(
+                output.contains("validation_min_samples\":11025"),
+                "{output}"
+            );
+            assert!(
+                output.contains("validation_max_samples\":88200"),
+                "{output}"
+            );
+            assert!(
+                output.contains(&format!("audio_latency_present\":{}", input.is_some())),
+                "{output}"
+            );
+            if let Some(n) = input
+                .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                assert!(output.contains(&format!("Some({n})")), "{output}");
+            } else {
+                assert!(
+                    output.contains("audio_latency_samples\":\"None\""),
+                    "{output}"
+                );
+            }
+            assert!(!output.contains("secret"), "{output}");
+        }
+    }
     fn fixture_encoder() -> Encoder {
         let mut e = Encoder::new().unwrap();
         e.key.copy_from_slice(&(0..32).collect::<Vec<_>>());
