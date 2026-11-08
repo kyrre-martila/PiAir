@@ -390,3 +390,15 @@ fn interactive_commands_fail_before_discovery_or_state_writes_without_terminal()
         assert!(!dir.path().join("receiver-state").exists());
     }
 }
+
+#[test]
+fn pairing_help_identifies_enrollment_prerequisites() {
+    let help = run(&["--help"]);
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("persistent credentials"));
+    assert!(text.contains("genuine HAP setup code"));
+    let help = run(&["pair", "--help"]);
+    assert!(String::from_utf8(help.stdout)
+        .unwrap()
+        .contains("selected method"));
+}

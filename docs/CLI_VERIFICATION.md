@@ -31,8 +31,13 @@ export PIAIR_CONFIG="$HOME/.config/piair/config.toml"
 
 Verify names, stable IDs and endpoints independently. If unapproved, edit the
 existing `receiver_allowlist` manually and rerun `config check` and `pairing`.
-Choose the documented pairing method for that receiver; do not guess a setup
-code or substitute transient authentication for persistent pairing. Confirm only
+PIN-display requires a receiver-supported display or equivalent independently
+verified PIN delivery. Setup-code requires a genuine independently obtained HAP
+setup code; an AirPlay password is different. The wizard asks you to confirm the
+chosen prerequisite explicitly. If neither is available, cancel; do not invent
+codes or guess methods. For the separate HomePod session-only diagnostic, follow
+[the current authentication procedure](RECEIVER_AUTHENTICATION.md); no playback
+or enrollment belongs in that round. Confirm only
 when you want to contact that receiver. An already-paired result makes no
 connection and does not prove current authentication.
 
@@ -84,8 +89,11 @@ Available AirPlay receivers:
 
   1. Living Room  [Not paired]
 Select receiver (1-1, q to cancel): 1
-Choose an explicit method: 1. PIN-display; 2. Existing HAP setup code; no fallback. Selection is provisional until final confirmation.
+[explicit method menu explains PIN delivery and genuine HAP code prerequisites; no fallback]
 Select method (1-2, q to cancel): 1
+[permanent enrollment and missing-prerequisite guidance; active state unchanged]
+PIN-display requires a receiver-supported PIN display or equivalent independently verified PIN delivery mechanism. Is that available for this receiver? [y/N]: y
+[persistent enrollment prerequisite reminder before final authorization]
 Receiver: Living Room
 Device ID: device:aabbccddeeff
 Operation: Pair and save verified credentials (no audio).

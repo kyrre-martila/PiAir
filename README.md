@@ -169,13 +169,13 @@ piair --config config.toml unpair device:aabbccddeeff
 
 IDs above are examples. Selection pins identity/endpoints and never connects.
 Pair/authenticate require an interactive terminal and explicit y/yes confirmation; pairing
-requests a receiver PIN and reads it without echo. Connections recheck current
+reads the genuine PIN/setup code without echo. Connections recheck current
 approval and pinned discovery evidence, with no retries, redirects or fallback.
 No Samsung or other unapproved receiver is contacted. Read-only/config/audio
 commands never open a receiver session.
 
 Persistent HAP method 0 has two explicit profiles: `--method pin-display`
-requests a receiver PIN; `--method setup-code` skips PIN-start and requires an
+requires receiver-supported PIN display or equivalent independently verified PIN delivery; `--method setup-code` skips PIN-start and requires a genuine,
 independently obtained `XXX-XX-XXX` HAP setup code. Both verify the complete SRP
 and signed M5/M6 exchange before saving. The authenticated receiver identifier
 comes from verified M6, independently of optional, untrusted advertised `pi`.
@@ -302,7 +302,16 @@ edit `receiver_allowlist` in your configuration, then run `piair config check`
 (with the same `--config` if used). The wizard deliberately does not edit config;
 there is no general transactional allowlist persistence API.
 
-Choose the persistent PIN-display or existing setup-code method explicitly.
+Choose persistent credential enrollment only with its actual prerequisite:
+PIN-display needs a receiver-supported display or equivalent independently verified
+PIN delivery; setup-code needs a genuine, independently obtained HAP setup code.
+An AirPlay password is not a HAP setup code. Do not invent codes or guess methods.
+If neither is available, persistent enrollment cannot currently proceed through
+these methods; cancel without changing selection or credentials. The wizard asks
+for explicit prerequisite confirmation even for a saved persistent method.
+For session-only diagnostics, follow the [current authentication evidence and safe
+HomePod procedure](docs/RECEIVER_AUTHENTICATION.md). It uses the existing explicit
+OwnTone-reference command with separate authorization and no playback.
 Existing selections retain their protocol profile and endpoint pins; unsupported
 methods fail without fallback. Already-paired receivers return without connection
 or credential replacement. Pairing saves cryptographically verified credentials;

@@ -1,3 +1,8 @@
+> Current guidance and evidence: [receiver authentication audit and safe Pi diagnostic](RECEIVER_AUTHENTICATION.md).
+> Later operator evidence in [PR #21](INITIAL_SETUP_DIAGNOSTICS.md) reports HomePod
+> transient SRP and encrypted OPTIONS success after #20. Earlier 400/403 results
+> below are historical; no confirmed audible HomePod playback is documented.
+
 > Transient update: the earlier transient blocker recorded below is superseded by
 > [TRANSIENT_AUTHENTICATION.md](TRANSIENT_AUTHENTICATION.md). PiAir now implements
 > OwnTone's explicit HKP 4 M1–M4 SRP flow, without enrollment or pair-verify.
@@ -9,7 +14,7 @@ PR #3 implements independently written persistent HAP pairing and pair-verify,
 not AirPlay audio transport. No sender implementation source from OwnTone,
 Autostream, airplay2-rs or other projects is copied, translated or incorporated.
 Protocol documentation, public wire observations and numerical test vectors are
-used as evidence. **No real receiver has been contacted or validated by PiAir.**
+used as evidence. At that baseline no real receiver had been validated; see the current evidence above.
 
 This document records the PR #3 baseline. PR #4 supersedes its statements that
 verify always drops the socket and that encrypted application I/O is absent:
@@ -99,17 +104,17 @@ MFi attestation and FairPlay sender/media setup are distinct from HAP enrollment
 passing HAP alone does not prove that a future encrypted audio setup can proceed.
 Neither MFi nor FairPlay is implemented.
 
-## Compatibility matrix
+## Historical baseline compatibility matrix (current policy corrections included)
 
 All categories below require real hardware validation before compatibility claims.
 
 | Receiver / protocol category | Requested method | Implementation | Authentication guarantee | Persistent credentials | Hardware validation |
 | --- | --- | --- | --- | --- | --- |
-| HK bit 46, no bit 51, usable displayed PIN; Apple TV candidate | `pin-display` | Implemented: PIN-start + persistent method 0 M1–M6 | Physical PIN-authenticated signed ID/key enrollment | Yes, after verified M6 | Required; no tvOS/model verified |
+| HK bit 46, usable displayed PIN; Apple TV candidate | `pin-display` | Implemented: PIN-start + persistent method 0 M1–M6 | Physical PIN-authenticated signed ID/key enrollment | Yes, after verified M6 | Apple TV success reported in PR #21; other receiver/firmware validation required |
 | Same HK category with an independently obtained existing HAP code | `setup-code` | Implemented: method 0 M1–M6 without PIN-start | Code-authenticated signed ID/key enrollment | Yes, after verified M6 | Required; usable HomePod code not established |
-| Previously enrolled receiver passing the current capability policy | Same selected persistent profile; `authenticate` | Implemented: pair-verify M1–M4 | Stored receiver ID/key, fresh X25519 and mutual signatures | Reads existing; never replaces on verify | Required; no live session retained |
-| System/transient bits 43/48 with unprotected status; HomePod/mini candidate | Explicit `transient` | Implemented HKP 4 SRP M1–M4; no separate verify | Connection encryption; no durable identity | No credentials created | Required; hardware unverified |
-| Bit 51, with or without bit 46 | Unified/MFi or policy-specific | Unsupported; no inference that MFi is universally mandatory | No MFi chain/attestation validation | No new enrollment | Required |
+| Previously enrolled receiver passing the current capability policy | Same selected persistent profile; `authenticate` | Implemented: pair-verify M1–M4 | Stored receiver ID/key, fresh X25519 and mutual signatures | Reads existing; never replaces on verify | Apple TV success reported in PR #21; live socket retained for explicit diagnostics |
+| System/transient bits 43/48 with unprotected status; HomePod/mini candidate | Explicit `transient` | Implemented HKP 4 SRP M1–M4; no separate verify | Connection encryption; no durable identity | No credentials created | Legacy profile unverified; later explicit OwnTone profile success reported |
+| Bit 51 | Unified/MFi or policy-specific | MFi unsupported; bit 46 still permits an explicit persistent candidate | No MFi chain/attestation validation | Only after verified persistent enrollment | Receiver-specific validation required |
 | CoreUtils 38 only, legacy bit 27, unknown combinations, password/Home access restrictions | Unresolved / legacy / FairPlay | Unsupported; no fallback | None | No new enrollment | Required |
 
 Bit 40 (buffered audio) is reported only as an advertised playback-related feature;
@@ -126,7 +131,7 @@ signals fail closed. Unknown non-pairing feature bits remain uninterpreted data.
 Missing/unsupported pairing evidence never becomes a default successful method.
 
 `Capabilities::decide(requested)` is a pure, tested local policy. It never searches
-for another method. Both persistent profiles require bit 46 without bit 51.
+for another method. Both persistent profiles require bit 46; bit 51 does not independently authorize or blanket-block them.
 Bit 38/43/48 alone is insufficient evidence for persistent enrollment. Password
 requirements, nonzero ACL and unknown protocol versions are refused; missing
 optional metadata is retained as unknown, not proof of unrestricted access.
@@ -146,8 +151,7 @@ CSeq, HKP 3 (persistent) or HKP 4 (transient) and octet-stream TLV8. Responses a
 request retry or header-version negotiation occurs. This corrects the earlier
 RTSP-only request assumption; firmware acceptance still needs controlled tests.
 HAP's URL table does not define `/pair-pin-start`; the AirPlay capture does not
-make that request mandatory for every HAP accessory. Encrypted application
-control I/O is not implemented.
+make that request mandatory for every HAP accessory. Encrypted control is now implemented; see ENCRYPTED_CONTROL_CHECK.md.
 
 `pin-display` requests `/pair-pin-start`, then asks for 4..8 digits after M2.
 `setup-code` goes directly to `/pair-setup`, then asks for an existing
@@ -236,8 +240,9 @@ sequenceDiagram
 
 `discovered`, `approved`, `selected`, and `paired` are separate facts. `paired`
 means valid stored enrollment, not current authentication/liveness. Read-only
-commands never claim authenticated/connected. Only completed pair-verify reports
-an authenticated exchange, then closes immediately. Playback remains unimplemented.
+commands never claim authenticated/connected. Persistent authentication requires
+completed pair-verify; transient SRP establishes only session-scoped authentication.
+Default authenticate closes after the exchange. Realtime stream-test is now implemented; audible playback requires separate physical confirmation.
 
 Connect and each I/O are limited to 3 seconds; automated phases have 15-second
 absolute deadlines, recalculated for partial I/O. User PIN think time is excluded.
@@ -321,7 +326,7 @@ change requiring real Apple TV validation, not a verified schema or proven fix.
    receiver records. Strict field validation and authenticated identity verification
    still apply; unexpected type numbers alone do not establish their semantics.
 
-## Controlled commands and the PR #4 boundary
+## Historical controlled commands and the PR #4 boundary
 
 Only use a physically verified, intentionally allowlisted receiver. IDs are examples:
 

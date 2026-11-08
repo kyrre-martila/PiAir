@@ -319,6 +319,22 @@ pub(super) fn choose_for_stream(loaded: &Loaded) -> Result<ProposedSelection> {
     .context("no playback selection")
 }
 
+// The user must supply evidence advertisements cannot establish.
+fn enrollment_prerequisite(
+    method: Method,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<()> {
+    writeln!(output, "Persistent pairing enrolls permanent verified credentials; it is separate from session authentication and playback.")?;
+    let prompt = match method {
+        Method::PinDisplay => "PIN-display requires a receiver-supported PIN display or equivalent independently verified PIN delivery mechanism. Is that available for this receiver? [y/N]: ",
+        Method::SetupCode => "Existing HAP setup-code enrollment requires a genuine, independently obtained HAP setup code for this receiver. An AirPlay password is not a HAP setup code. Do you have that code? [y/N]: ",
+        Method::Transient => anyhow::bail!("transient authentication does not enroll persistent credentials; use authenticate explicitly; no fallback"),
+    };
+    writeln!(output, "Do not invent codes or guess methods. If neither prerequisite is available, persistent enrollment cannot currently proceed through these methods. Cancel safely; active selection and credentials remain unchanged. For a separately authorized session-only diagnostic, see docs/RECEIVER_AUTHENTICATION.md and the explicit authenticate --experimental-owntone-transient command. No automatic fallback.")?;
+    confirm(input, output, prompt)
+}
+
 // Injectable presentation seam; all choices remain provisional, including method.
 fn prepare(
     loaded: &Loaded,
@@ -335,7 +351,7 @@ fn prepare(
     }
     let selected = if let Some(selected) = previous.as_ref().filter(|s| s.id == id) {
         ensure!(!enrollment || selected.method != Method::Transient,
-            "selected transient method does not enroll credentials; explicitly select pin-display or setup-code first");
+            "selected transient method does not enroll credentials; persistent enrollment requires verified PIN delivery or a genuine independently obtained HAP setup code. If neither is available, enrollment cannot currently proceed; see docs/RECEIVER_AUTHENTICATION.md for explicitly authorized session authentication");
         let observed = super::validate_selection(loaded, &id, selected.method, snapshot)?;
         ensure!(
             selected.matches_observation(&observed),
@@ -343,7 +359,7 @@ fn prepare(
         );
         selected.clone()
     } else {
-        writeln!(output, "Choose an explicit method: 1. PIN-display; 2. Existing HAP setup code{}; no fallback. Selection is provisional until final confirmation.", if enrollment { "" } else { "; 3. Transient SRP (no persistent identity verification)" })?;
+        writeln!(output, "Choose an explicit method: 1. PIN-display (requires supported PIN delivery); 2. Existing HAP setup code (requires genuine independently obtained code, not an AirPlay password){}; no fallback. Selection is provisional until final confirmation.", if enrollment { "" } else { "; 3. Transient SRP (no persistent identity verification)" })?;
         let method = match numbered_choice(input, output, if enrollment { 2 } else { 3 }, "method")?
         {
             0 => Method::PinDisplay,
@@ -353,6 +369,9 @@ fn prepare(
         };
         super::validate_selection(loaded, &id, method, snapshot)?
     };
+    if enrollment {
+        enrollment_prerequisite(selected.method, input, output)?;
+    }
     Ok(Some(ProposedSelection {
         selected,
         previous,
@@ -601,7 +620,7 @@ mod persistence_tests {
             }
             for method in ["1", "2"].into_iter().chain((!enrollment).then_some("3")) {
                 let proposed = f
-                    .propose(&format!("1\n{method}\n"), enrollment)
+                    .propose(&format!("1\n{method}\ny\n"), enrollment)
                     .unwrap()
                     .unwrap();
                 assert_eq!(f.files(), before); // receiver AND method are still provisional
@@ -613,6 +632,120 @@ mod persistence_tests {
             }
         }
     }
+    #[test]
+    fn enrollment_prerequisites_are_explicit_and_cancellation_preserves_every_file() {
+        for (method, phrase) in [
+            ("1", "receiver-supported PIN display"),
+            ("2", "genuine, independently obtained HAP setup code"),
+        ] {
+            let f = Fixture::new(false);
+            let before = f.files();
+            for answer in ["", "y", "\n", "n\n", "q\n", "invented\n"] {
+                assert!(f.propose(&format!("1\n{method}\n{answer}"), true).is_err());
+                assert_eq!(f.files(), before);
+            }
+            let mut output = Vec::new();
+            let proposed = prepare(
+                &f.loaded,
+                &f.snapshot,
+                &mut format!("1\n{method}\nyes\n").as_bytes(),
+                &mut output,
+                true,
+            )
+            .unwrap()
+            .unwrap();
+            let text = String::from_utf8(output).unwrap();
+            for expected in [
+                phrase,
+                "permanent verified credentials",
+                "separate from session authentication and playback",
+                "not an AirPlay password",
+                "Do not invent codes or guess methods",
+                "persistent enrollment cannot currently proceed",
+                "No automatic fallback",
+            ] {
+                assert!(text.contains(expected), "{expected}: {text}");
+            }
+            assert_eq!(f.files(), before);
+            assert!(f.authorize(&proposed, "").is_err());
+            assert_eq!(f.files(), before);
+        }
+    }
+
+    #[test]
+    fn saved_method_still_requires_prerequisite_and_never_falls_back() {
+        for method in [Method::PinDisplay, Method::SetupCode, Method::Transient] {
+            let f = Fixture::new(false);
+            super::super::select_from_snapshot(&f.loaded, NEW, method, &f.snapshot).unwrap();
+            let before = f.files();
+            assert!(f.propose("", true).is_err()); // no receiver selected automatically
+            for input in ["1\n", "1\nn\n"] {
+                assert!(f.propose(input, true).is_err());
+                assert_eq!(f.files(), before);
+            }
+            if method != Method::Transient {
+                let proposed = f.propose("1\ny\n", true).unwrap().unwrap();
+                assert_eq!(proposed.selected.method, method);
+                assert_eq!(f.files(), before);
+            } else {
+                assert!(f
+                    .propose("1\ny\n", true)
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("does not enroll credentials"));
+            }
+        }
+    }
+
+    #[test]
+    fn names_and_models_never_choose_a_method_and_transient_is_not_paired() {
+        for name in ["Even-Olai HomePod", "Apple TV", "Generic receiver"] {
+            let mut f = Fixture::new(false);
+            f.snapshot[0].name = name.into();
+            f.snapshot[0].services[0]
+                .capabilities
+                .insert("model".into(), name.into());
+            let before = f.files();
+            assert!(f.propose("1\n", true).is_err());
+            for (choice, method) in [("1", Method::PinDisplay), ("2", Method::SetupCode)] {
+                let proposed = f
+                    .propose(&format!("1\n{choice}\ny\n"), true)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(proposed.selected.method, method);
+                assert_eq!(f.files(), before);
+            }
+            let proposed = f.propose("1\n3\n", false).unwrap().unwrap();
+            assert_eq!(proposed.selected.method, Method::Transient);
+            f.authorize(&proposed, "y\n").unwrap();
+            let mut output = Vec::new();
+            listing(&f.loaded, &f.snapshot, &mut output).unwrap();
+            let text = String::from_utf8(output).unwrap();
+            assert!(text.contains("[Selected]"));
+            assert!(!text.contains("[Paired"));
+            assert!(Store::new(&f.loaded.path)
+                .unwrap()
+                .credential(NEW)
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn unavailable_persistent_method_does_not_try_transient_or_change_selection() {
+        let mut f = Fixture::new(false);
+        f.snapshot[0].name = "Even-Olai HomePod".into();
+        f.snapshot[0].services[0]
+            .capabilities
+            .insert("features".into(), "0x0,0x10000".into());
+        let before = f.files();
+        for input in ["1\n", "1\n1\ny\n", "1\n2\ny\n"] {
+            assert!(f.propose(input, true).is_err());
+            assert_eq!(f.files(), before);
+        }
+    }
+
     #[test]
     fn detailed_snapshot_includes_full_identity_endpoints_and_local_states() {
         let mut f = Fixture::new(true);
@@ -675,7 +808,7 @@ mod persistence_tests {
             let listener = std::net::TcpListener::bind("127.0.0.2:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             f.snapshot[0].services[0].port = listener.local_addr().unwrap().port();
-            let proposed = f.propose("1\n2\n", enrollment).unwrap().unwrap();
+            let proposed = f.propose("1\n2\ny\n", enrollment).unwrap().unwrap();
             let before = f.files();
             f.authorize(&proposed, "YeS\n").unwrap();
             let store = Store::new(&f.loaded.path).unwrap();
@@ -708,7 +841,7 @@ mod persistence_tests {
         ] {
             let mut f = Fixture::new(fault == "missing-credential");
             let proposed = f
-                .propose("1\n1\n", fault != "missing-credential")
+                .propose("1\n1\ny\n", fault != "missing-credential")
                 .unwrap()
                 .unwrap();
             let store = Store::new(&f.loaded.path).unwrap();
@@ -745,7 +878,7 @@ mod persistence_tests {
     #[test]
     fn selection_writers_fail_closed_while_another_writer_holds_directory_lock() {
         let f = Fixture::new(false);
-        let proposed = f.propose("1\n1\n", true).unwrap().unwrap();
+        let proposed = f.propose("1\n1\ny\n", true).unwrap().unwrap();
         let lock = fs::File::open(f.loaded.path.parent().unwrap().join("receiver-state")).unwrap();
         lock.try_lock().unwrap();
         let before = f.files();
@@ -770,7 +903,7 @@ mod persistence_tests {
         )
         .unwrap();
         let before = f.files();
-        let proposed = f.propose("1\n1\n", true).unwrap().unwrap();
+        let proposed = f.propose("1\n1\ny\n", true).unwrap().unwrap();
         assert!(proposed.previous.is_none());
         assert!(f.authorize(&proposed, "n\n").is_err());
         assert_eq!(f.files(), before);

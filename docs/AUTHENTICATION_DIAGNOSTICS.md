@@ -1,7 +1,12 @@
+> Current guidance and evidence: [receiver authentication audit and safe Pi diagnostic](RECEIVER_AUTHENTICATION.md).
+> Later operator evidence in [PR #21](INITIAL_SETUP_DIAGNOSTICS.md) reports HomePod
+> transient SRP and encrypted OPTIONS success after #20. Earlier 400/403 results
+> below are historical; no confirmed audible HomePod playback is documented.
+
 # AirPlay authentication diagnostics
 
 This change does not fix or establish HomePod compatibility. No receiver was
-contacted during development. The supplied hardware observation is:
+contacted during development. The early hardware observation was:
 Even-Olai HomePod, `device:3ae5c9a302ad`, `192.168.1.33:7000`,
 `AudioAccessory5,1`, firmware 27.2, AirPlay protocol 1.1, status `0x98404`,
 ACL 0. Persistent HKP 3 PIN-start returns HTTP 403; explicitly selected transient
@@ -10,7 +15,7 @@ A rejection before M2 cannot be attributed to SRP proof calculation or session
 key derivation, because neither has been reached. It does not reveal the server's
 policy reason. ACL 0 and capability checks are not permission guarantees.
 
-## Reproduce on the Raspberry Pi
+## Historical legacy-profile reproduction (not the recommended next test)
 
 Use the existing configuration, approval and selected method. Do not unpair,
 change credentials or receiver access policy. Inspect passive discovery first:
