@@ -102,52 +102,131 @@ fn ordered(receivers: &[Receiver]) -> Vec<&Receiver> {
     rows
 }
 
+#[derive(Clone, Copy)]
+struct ReceiverState {
+    approved: bool,
+    selected: bool,
+    paired: bool,
+}
+
+impl ReceiverState {
+    fn label(self) -> &'static str {
+        match (self.approved, self.selected, self.paired) {
+            (false, _, _) => "Not approved",
+            (true, true, true) => "Paired, selected",
+            (true, false, true) => "Paired",
+            (true, true, false) => "Selected",
+            (true, false, false) => "Not paired",
+        }
+    }
+}
+
+// Advertised names are untrusted terminal text, never receiver identities.
+fn display_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+fn short_name(name: &str) -> String {
+    // Leave room for numbering and the longest state label on narrow terminals.
+    let limit = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(80)
+        .saturating_sub(28)
+        .clamp(8, 32);
+    let name = display_name(name);
+    if name.chars().count() > limit {
+        name.chars().take(limit - 1).chain(['…']).collect()
+    } else {
+        name
+    }
+}
+
 fn listing(loaded: &Loaded, receivers: &[Receiver], output: &mut impl Write) -> Result<()> {
+    render_listing(loaded, receivers, output, false)
+}
+
+pub(super) fn render_listing(
+    loaded: &Loaded,
+    receivers: &[Receiver],
+    output: &mut impl Write,
+    detailed: bool,
+) -> Result<()> {
     let store = Store::new(&loaded.path)?;
     let selected = store.selection()?;
-    writeln!(output, "Available AirPlay receivers (unverified advertisements; discovery does not prove identity):")?;
-    for (index, receiver) in ordered(receivers).iter().enumerate() {
-        let approved = loaded.config.allows(&receiver.id);
-        let paired = if exact_id(&receiver.id).is_ok() {
-            store.credential(&receiver.id)?.is_some()
-        } else {
-            false
-        };
+    writeln!(output, "Available AirPlay receivers:\n")?;
+    if receivers.is_empty() {
         writeln!(
             output,
-            "{}. {:?} [{}; {}; {}]",
-            index + 1,
-            receiver.name,
-            if approved {
-                "Approved"
-            } else {
-                "Not approved; ineligible"
-            },
-            if selected.as_ref().is_some_and(|s| s.id == receiver.id) {
-                "Selected"
-            } else {
-                "Not selected"
-            },
-            if paired {
-                "Paired locally; not authenticated"
-            } else {
-                "Not paired; authentication required"
-            }
+            "No receivers discovered. Check the local network and try again."
         )?;
-        writeln!(output, "   Device ID: {}", receiver.id)?;
-        for service in &receiver.services {
+    }
+    let width = receivers
+        .iter()
+        .map(|r| short_name(&r.name).chars().count())
+        .max()
+        .unwrap_or(0);
+    for (index, receiver) in ordered(receivers).iter().enumerate() {
+        let state = ReceiverState {
+            approved: loaded.config.allows(&receiver.id),
+            selected: selected.as_ref().is_some_and(|s| s.id == receiver.id),
+            paired: exact_id(&receiver.id).is_ok() && store.credential(&receiver.id)?.is_some(),
+        };
+        let name = short_name(&receiver.name);
+        let duplicate = receivers
+            .iter()
+            .filter(|r| short_name(&r.name) == short_name(&receiver.name))
+            .count()
+            > 1;
+        write!(
+            output,
+            "  {}. {}{}  [{}]",
+            index + 1,
+            name,
+            " ".repeat(width.saturating_sub(name.chars().count())),
+            state.label()
+        )?;
+        if duplicate && !detailed {
+            write!(output, " ({})", receiver.id)?;
+        }
+        writeln!(output)?;
+        if detailed {
             writeln!(
                 output,
-                "   Address: {:?}:{} ({:?})",
-                service.addresses, service.port, service.service_type
+                "     Receiver: {}\n     Device ID: {}",
+                display_name(&receiver.name),
+                receiver.id
             )?;
+            writeln!(
+                output,
+                "     Approved: {}\n     Selected: {}\n     Paired locally: {}",
+                state.approved, state.selected, state.paired
+            )?;
+            for service in &receiver.services {
+                writeln!(
+                    output,
+                    "     Service: {} port {}\n     Addresses (IPv4/IPv6): {:?}",
+                    service.service_type, service.port, service.addresses
+                )?;
+            }
         }
     }
     Ok(())
 }
 
 fn choice(input: &mut impl BufRead, output: &mut impl Write, count: usize) -> Result<usize> {
-    write!(output, "Select receiver (or q to cancel): ")?;
+    numbered_choice(input, output, count, "receiver")
+}
+
+fn numbered_choice(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    count: usize,
+    subject: &str,
+) -> Result<usize> {
+    write!(output, "Select {subject} (1-{count}, q to cancel): ")?;
     output.flush()?;
     let mut line = String::new();
     let n = input.read_line(&mut line)?;
@@ -173,7 +252,6 @@ fn choose(
     ensure!(!receivers.is_empty(), "no receivers discovered");
     let index = choice(input, output, receivers.len())?;
     let receiver = ordered(receivers)[index];
-    describe(receivers, &receiver.id)?;
     require_approval(loaded, &receiver.id)?;
     Ok(receiver.id.clone())
 }
@@ -191,10 +269,11 @@ pub(super) fn describe(receivers: &[Receiver], id: &str) -> Result<()> {
         "receiver missing or ambiguous in discovery"
     );
     let receiver = matches[0];
-    println!("Receiver: {:?}\nDevice ID: {}", receiver.name, receiver.id);
-    for service in &receiver.services {
-        println!("Address: {:?}:{}", service.addresses, service.port);
-    }
+    println!(
+        "Receiver: {}\nDevice ID: {}",
+        display_name(&receiver.name),
+        receiver.id
+    );
     Ok(())
 }
 
@@ -265,7 +344,8 @@ fn prepare(
         selected.clone()
     } else {
         writeln!(output, "Choose an explicit method: 1. PIN-display; 2. Existing HAP setup code{}; no fallback. Selection is provisional until final confirmation.", if enrollment { "" } else { "; 3. Transient SRP (no persistent identity verification)" })?;
-        let method = match choice(input, output, if enrollment { 2 } else { 3 })? {
+        let method = match numbered_choice(input, output, if enrollment { 2 } else { 3 }, "method")?
+        {
             0 => Method::PinDisplay,
             1 => Method::SetupCode,
             2 => Method::Transient,
@@ -313,6 +393,57 @@ mod tests {
         );
     }
     #[test]
+    fn status_priority_and_combinations() {
+        for (approved, selected, paired, label) in [
+            (false, false, false, "Not approved"),
+            (false, true, false, "Not approved"),
+            (false, false, true, "Not approved"),
+            (false, true, true, "Not approved"),
+            (true, false, false, "Not paired"),
+            (true, true, false, "Selected"),
+            (true, false, true, "Paired"),
+            (true, true, true, "Paired, selected"),
+        ] {
+            assert_eq!(
+                ReceiverState {
+                    approved,
+                    selected,
+                    paired
+                }
+                .label(),
+                label
+            );
+        }
+    }
+
+    #[test]
+    fn compact_long_names_and_empty_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loaded = Loaded {
+            config: crate::config::Config::default(),
+            path: tmp.path().join("config.toml"),
+            source: "test",
+        };
+        let receivers = vec![Receiver {
+            name: "Long receiver ".repeat(20),
+            id: "device:aa1122334455".into(),
+            services: vec![],
+        }];
+        let mut output = Vec::new();
+        listing(&loaded, &receivers, &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(text.lines().count(), 3);
+        assert!(text.contains("…  [Not approved]"));
+        assert!(!text.contains("Device ID:"));
+        assert!(!short_name("Room\n\u{1b}[31m").chars().any(char::is_control));
+        let mut output = Vec::new();
+        assert!(choose(&loaded, &[], &mut "1\n".as_bytes(), &mut output).is_err());
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("No receivers discovered"));
+    }
+
+    #[test]
     fn duplicate_names_have_stable_id_order_and_explicit_states() {
         let tmp = tempfile::tempdir().unwrap();
         let loaded = Loaded {
@@ -336,7 +467,9 @@ mod tests {
         listing(&loaded, &receivers, &mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.find("device:aa").unwrap() < output.find("device:bb").unwrap());
-        assert!(output.contains("Not approved; ineligible"));
+        assert!(output.contains("[Not approved]"));
+        assert_eq!(output.lines().count(), 4);
+        assert!(output.contains("(device:aa1122334455)"));
         assert!(!output.contains("Ready"));
         assert!(require_approval(&loaded, &receivers[0].id).is_err());
     }
@@ -480,6 +613,42 @@ mod persistence_tests {
             }
         }
     }
+    #[test]
+    fn detailed_snapshot_includes_full_identity_endpoints_and_local_states() {
+        let mut f = Fixture::new(true);
+        f.snapshot[0].services[0]
+            .addresses
+            .insert("::1".parse().unwrap());
+        let mut output = Vec::new();
+        render_listing(&f.loaded, &f.snapshot, &mut output, true).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        for expected in [
+            "New receiver",
+            NEW,
+            "127.0.0.2",
+            "::1",
+            "_airplay._tcp.local.",
+            "port 7000",
+            "Approved: true",
+            "Selected: false",
+            "Paired locally: true",
+            "[Paired]",
+        ] {
+            assert!(output.contains(expected), "{expected}: {output}");
+        }
+        let old = Store::new(&f.loaded.path)
+            .unwrap()
+            .selection()
+            .unwrap()
+            .unwrap();
+        f.snapshot[0].id = old.id;
+        let mut output = Vec::new();
+        listing(&f.loaded, &f.snapshot, &mut output).unwrap();
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("[Paired, selected]"));
+    }
+
     #[test]
     fn already_paired_does_not_select_or_authenticate() {
         let f = Fixture::new(true);
