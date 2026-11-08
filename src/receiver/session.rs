@@ -217,14 +217,14 @@ impl Session {
     }
     /// Explicit concrete profile: HAP, ALAC/44100/16/2, realtime UDP, NTP.
     pub fn negotiate_realtime(&mut self) -> Result<()> {
-        self.negotiate(false)
+        self.negotiate(false, None)
     }
     /// Validate the initial NTP SETUP only, then release the receiver session.
-    pub fn check_initial_setup(&mut self) -> Result<()> {
-        self.negotiate(true)?;
+    pub fn check_initial_setup_with_timeout(&mut self, timeout: Option<Duration>) -> Result<()> {
+        self.negotiate(true, timeout)?;
         self.stop()
     }
-    fn negotiate(&mut self, initial_only: bool) -> Result<()> {
+    fn negotiate(&mut self, initial_only: bool, setup_timeout: Option<Duration>) -> Result<()> {
         let mut stage = "local initialization";
         let mut status = None;
         let result = (|| {
@@ -264,7 +264,13 @@ impl Session {
                 plist_fields = "deviceID:string,sessionUUID:string,timingProtocol:string,timingPort:unsigned-integer",
                 sender_identity = "persistent client identity", "initial SETUP start");
             self.remote_attempted = true;
-            let base = self.call("SETUP", None, &body, &[])?;
+            if let Some(timeout) = setup_timeout {
+                ensure!(initial_only && timeout == Duration::from_secs(15), "invalid SETUP timeout experiment");
+                self.control.as_mut().unwrap().setup_response_wait = Some((timeout, self.cancel.clone()));
+            }
+            let base = self.call("SETUP", None, &body, &[]);
+            self.control.as_mut().unwrap().setup_response_wait = None;
+            let base = base?;
             tracing::debug!(target: "piair::rtsp", phase = "initial SETUP", status = 200,
                 "initial SETUP RTSP response validated");
             status = Some(200);
@@ -532,6 +538,14 @@ impl Session {
             return Ok(());
         }
         self.remote_attempted = false;
+        if self
+            .control
+            .as_ref()
+            .is_none_or(|control| control.is_invalidated())
+        {
+            tracing::debug!(target: "piair::rtsp", "TEARDOWN skipped: control connection already invalidated; local resources will be released");
+            return Ok(());
+        }
         let body = profile::binary(&mut profile::dict([]))?;
         let reply = self.call("TEARDOWN", None, &body, &[])?;
         ensure!(reply.body.is_empty(), "unexpected TEARDOWN body");

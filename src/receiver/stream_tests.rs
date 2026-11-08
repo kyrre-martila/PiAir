@@ -849,7 +849,16 @@ fn request_failures_attribute_each_negotiation_stage_and_close_channels() {
             let mut session = Session::new();
             session.start(|| Ok(wire), &credential()).unwrap();
             let start = std::time::Instant::now();
-            let error = session.negotiate_realtime().unwrap_err();
+            let mut outcome = None;
+            let cleanup_log = super::diagnostics::tests::capture(tracing::Level::DEBUG, || {
+                outcome = Some(session.negotiate_realtime());
+            });
+            let error = outcome.unwrap().unwrap_err();
+            if target > 0 {
+                assert!(cleanup_log
+                    .contains("TEARDOWN skipped: control connection already invalidated"));
+                assert!(!cleanup_log.contains("session cleanup failed"));
+            }
             let diagnostic = format!("{error:#}");
             assert!(
                 diagnostic.contains(&format!("stage={stage}")),
@@ -916,6 +925,11 @@ fn transient_session_negotiates_encrypted_audio_and_acknowledges_teardown() {
 
 #[test]
 fn initial_setup_check_validates_then_tears_down_without_record_or_audio() {
+    initial_setup_check(None);
+    initial_setup_check(Some(Duration::from_secs(15)));
+}
+
+fn initial_setup_check(timeout: Option<Duration>) {
     let (wire, server) = local_mock(|s| {
         let (mut socket, mut keys) = verify_mock_core(s, Fault::None, PI, |_| {}).unwrap();
         let info = read_message(&mut socket, &mut keys);
@@ -967,7 +981,7 @@ fn initial_setup_check_validates_then_tears_down_without_record_or_audio() {
     });
     let mut session = Session::new();
     session.start(|| Ok(wire), &credential()).unwrap();
-    session.check_initial_setup().unwrap();
+    session.check_initial_setup_with_timeout(timeout).unwrap();
     assert_eq!(session.state(), State::Disconnected);
     assert_eq!(session.packets_sent, 0);
     server.join().unwrap();

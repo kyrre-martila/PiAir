@@ -305,7 +305,17 @@ fn save_verified_enrollment(
 }
 
 /// Deliberate diagnostic only. No application startup/activity path calls this.
-pub fn stream_test(loaded: &Loaded, id: &str, seconds: u32, setup_check: bool) -> Result<()> {
+pub fn stream_test(
+    loaded: &Loaded,
+    id: &str,
+    seconds: u32,
+    setup_check: bool,
+    setup_timeout_seconds: Option<u64>,
+) -> Result<()> {
+    ensure!(
+        setup_timeout_seconds.is_none() || (setup_check && setup_timeout_seconds == Some(15)),
+        "SETUP timeout experiment requires --setup-check and 15 seconds"
+    );
     exact_id(id)?;
     ensure!(loaded.config.allows(id), "receiver is not approved");
     ensure!(
@@ -362,7 +372,9 @@ pub fn stream_test(loaded: &Loaded, id: &str, seconds: u32, setup_check: bool) -
         println!("Authentication: persistent receiver identity cryptographically verified");
     }
     if setup_check {
-        session.check_initial_setup()?;
+        session.check_initial_setup_with_timeout(
+            setup_timeout_seconds.map(std::time::Duration::from_secs),
+        )?;
         println!("Initial SETUP: validated NTP response and ports; TEARDOWN acknowledged; audio packets transmitted: 0.");
         return Ok(());
     }
