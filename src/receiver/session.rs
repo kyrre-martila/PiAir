@@ -14,6 +14,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Setup-only comparisons; production playback retains the control lifecycle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum SetupProfile {
+    #[default]
+    A,
+    B,
+    C,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Disconnected,
@@ -29,6 +38,7 @@ pub enum State {
 
 pub struct Session {
     state: State,
+    setup_profile: SetupProfile,
     control: Option<Wire>,
     failure: Option<String>,
     uri: String,
@@ -49,6 +59,7 @@ impl Session {
     pub fn new() -> Self {
         Self {
             state: State::Disconnected,
+            setup_profile: SetupProfile::A,
             control: None,
             failure: None,
             uri: String::new(),
@@ -76,6 +87,16 @@ impl Session {
     ) -> Result<()> {
         self.start_selected(connect, Some(credential))
     }
+    pub fn start_setup_selected(
+        &mut self,
+        connect: impl FnOnce() -> Result<Wire>,
+        credential: Option<&Credential>,
+        profile: SetupProfile,
+    ) -> Result<()> {
+        self.setup_profile = profile;
+        tracing::info!(target: "piair::rtsp", ?profile, "setup diagnostic selected");
+        self.start_selected(connect, credential)
+    }
     pub fn start_selected(
         &mut self,
         connect: impl FnOnce() -> Result<Wire>,
@@ -94,7 +115,22 @@ impl Session {
         self.timing_exchanges = 0;
         self.state = State::Connecting;
         let result = (|| {
-            let wire = connect()?;
+            let mut wire = connect()?;
+            if self.setup_profile == SetupProfile::C {
+                ensure!(
+                    credential.is_some()
+                        && wire.method() != super::compatibility::Method::Transient,
+                    "profile C requires persistent credentials"
+                );
+                ensure!(
+                    !self.cancel.load(Ordering::Relaxed),
+                    "diagnostic interrupted"
+                );
+                // Untrusted capability metadata cannot authorize or install keys.
+                let info = wire.preverify_info()?;
+                Self::validate_info(&info)?;
+            }
+            tracing::debug!(target: "piair::rtsp", phase = "pair-verify", "authentication start");
             self.state = State::Authenticating;
             self.control = Some(
                 if wire.method() == super::compatibility::Method::Transient {
@@ -215,8 +251,17 @@ impl Session {
         );
         profile::parse(&reply.body)
     }
+    fn validate_info(info: &Reply) -> Result<()> {
+        let info = Self::plist_response(info)?;
+        profile::capabilities(&info)?;
+        profile::select_ntp(&info)
+    }
     /// Explicit concrete profile: HAP, ALAC/44100/16/2, realtime UDP, NTP.
     pub fn negotiate_realtime(&mut self) -> Result<()> {
+        ensure!(
+            self.setup_profile == SetupProfile::A,
+            "diagnostic profile is setup-only"
+        );
         self.negotiate(false, None)
     }
     /// Validate the initial NTP SETUP only, then release the receiver session.
@@ -244,16 +289,27 @@ impl Session {
             tracing::debug!(target: "piair::rtsp", uri = %self.uri, "session RTSP URI selected");
             status = None;
             stage = "GET /info";
-            let info = self.call("GET", Some("/info"), &[], &[])?;
-            status = Some(200);
-            let info = Self::plist_response(&info)?;
-            profile::capabilities(&info)?;
-            profile::select_ntp(&info)?;
+            if self.setup_profile != SetupProfile::C {
+                let info = self.call("GET", Some("/info"), &[], &[])?;
+                status = Some(200);
+                Self::validate_info(&info)?;
+            }
             status = None;
             stage = "media socket binding";
             let mut ports = self.control.as_ref().unwrap().bind_media()?;
             let control_port = ports.control()?;
             let timing_port = ports.timing()?;
+            if self.setup_profile != SetupProfile::A {
+                stage = "early NTP worker startup";
+                self.control.as_ref().unwrap().start_early_timing(
+                    &mut ports, self.clock.as_ref().unwrap().clone(),
+                )?;
+                tracing::info!(target: "piair::rtsp", timing_port, ready = true,
+                    "NTP responder ready before initial SETUP");
+            } else {
+                tracing::info!(target: "piair::rtsp", timing_port, ready = false,
+                    "control lifecycle: timing socket bound; responder deferred");
+            }
             let uuid = uuid::Uuid::new_v4();
             let device = self.control.as_ref().unwrap().sender_device_id();
             let body = profile::ntp_offer(&device, uuid, timing_port)?;
@@ -263,6 +319,9 @@ impl Session {
                 body_length = body.len(), timing_port,
                 plist_fields = "deviceID:string,sessionUUID:string,timingProtocol:string,timingPort:unsigned-integer",
                 sender_identity = "persistent client identity", "initial SETUP start");
+            if self.setup_profile != SetupProfile::A {
+                ports.check_timing()?;
+            }
             self.remote_attempted = true;
             if let Some(timeout) = setup_timeout {
                 ensure!(initial_only && timeout == Duration::from_secs(15), "invalid SETUP timeout experiment");
@@ -552,11 +611,13 @@ impl Session {
         Ok(())
     }
     fn release(&mut self) {
+        tracing::debug!(target: "piair::rtsp", "session cleanup: releasing sockets and joining workers");
         self.media = None;
         self.events = None;
         self.encoder = None;
         self.clock = None;
         self.control = None;
+        tracing::debug!(target: "piair::rtsp", "session cleanup complete");
     }
     fn finish(&mut self, result: Result<()>) -> Result<()> {
         if let Err(error) = &result {

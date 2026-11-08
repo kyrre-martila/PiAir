@@ -330,3 +330,41 @@ fn owntone_experiment_is_authentication_only_and_mutually_exclusive() {
             .contains("not approved")
     );
 }
+
+#[test]
+fn setup_profiles_are_explicit_setup_only_and_keep_authorization() {
+    for profile in ["a", "b", "c"] {
+        assert_eq!(
+            run(&[
+                "stream-test",
+                "device:aabbccddeeff",
+                "--setup-profile",
+                profile
+            ])
+            .status
+            .code(),
+            Some(2)
+        );
+        let output = run(&[
+            "stream-test",
+            "device:aabbccddeeff",
+            "--setup-check",
+            "--setup-profile",
+            profile,
+        ]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("not approved"));
+    }
+    assert_eq!(
+        run(&[
+            "stream-test",
+            "device:aabbccddeeff",
+            "--setup-check",
+            "--setup-profile",
+            "d"
+        ])
+        .status
+        .code(),
+        Some(2)
+    );
+}

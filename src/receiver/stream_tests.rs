@@ -855,8 +855,11 @@ fn request_failures_attribute_each_negotiation_stage_and_close_channels() {
             });
             let error = outcome.unwrap().unwrap_err();
             if target > 0 {
-                assert!(cleanup_log
-                    .contains("TEARDOWN skipped: control connection already invalidated"));
+                assert!(
+                    cleanup_log
+                        .contains("TEARDOWN skipped: control connection already invalidated"),
+                    "target={target} error={error:#} log={cleanup_log}"
+                );
                 assert!(!cleanup_log.contains("session cleanup failed"));
             }
             let diagnostic = format!("{error:#}");
@@ -983,6 +986,200 @@ fn initial_setup_check(timeout: Option<Duration>) {
     session.start(|| Ok(wire), &credential()).unwrap();
     session.check_initial_setup_with_timeout(timeout).unwrap();
     assert_eq!(session.state(), State::Disconnected);
+    assert_eq!(session.packets_sent, 0);
+    server.join().unwrap();
+}
+
+// The same actual verify/control implementation drives every profile; the mock
+// withholds SETUP until a real UDP reply, exposing the lifecycle difference.
+#[test]
+fn setup_profiles_order_crypto_and_readiness() {
+    for selected in [SetupProfile::A, SetupProfile::B, SetupProfile::C] {
+        let (wire, server) = local_mock(move |mut socket| {
+            if selected == SetupProfile::C {
+                preverify_info_mock(&mut socket);
+            }
+            let offset = u32::from(selected == SetupProfile::C);
+            let (mut socket, mut keys) =
+                verify_mock_core_offset(socket, Fault::None, PI, |_| {}, offset).unwrap();
+            if selected != SetupProfile::C {
+                let info = read_message(&mut socket, &mut keys);
+                assert_eq!(info.method, "GET");
+                assert_eq!(info.headers["cseq"], "3");
+                send_reply(
+                    &mut socket,
+                    &mut keys,
+                    &info,
+                    Some(profile::dict([(
+                        "features",
+                        profile::uint((1 << 9) | (1 << 19) | (1 << 41)),
+                    )])),
+                    "",
+                );
+            }
+            // Decrypting here requires TX nonce 1 for A/B, 0 for C.
+            let setup = read_message(&mut socket, &mut keys);
+            assert_eq!(setup.method, "SETUP");
+            assert_eq!(setup.headers["cseq"], "4");
+            let offer = plist(&setup);
+            let port = profile::port(offer.as_dictionary().unwrap(), "timingPort").unwrap();
+            let timing = UdpSocket::bind("127.0.0.1:0").unwrap();
+            timing
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .unwrap();
+            let mut query = [0; 32];
+            query[..2].copy_from_slice(&[0x80, 0xd2]);
+            query[24..].copy_from_slice(&1234u64.to_be_bytes());
+            timing.send_to(&query, ("127.0.0.1", port)).unwrap();
+            let mut reply = [0; 33];
+            if selected == SetupProfile::A {
+                assert!(timing.recv_from(&mut reply).is_err());
+            } else {
+                let (n, source) = timing.recv_from(&mut reply).unwrap();
+                assert_eq!(n, 32);
+                assert_eq!(source.port(), port);
+                assert_eq!(&reply[..2], &[0x80, 0xd3]);
+                assert_eq!(&reply[8..16], &query[24..32]);
+                assert_ne!(&reply[16..24], &[0; 8]);
+            }
+            send_reply(
+                &mut socket,
+                &mut keys,
+                &setup,
+                Some(profile::dict([
+                    ("timingProtocol", Value::String("NTP".into())),
+                    ("eventPort", profile::uint(7001)),
+                    ("timingPort", profile::uint(7002)),
+                ])),
+                "",
+            );
+            let teardown = read_message(&mut socket, &mut keys);
+            assert_eq!(teardown.method, "TEARDOWN");
+            assert_eq!(teardown.headers["cseq"], "5");
+            send_reply(&mut socket, &mut keys, &teardown, None, "");
+            assert_eof(&mut socket);
+            // EOF follows synchronous joining and release of the bound sockets.
+            let rebound = UdpSocket::bind(("127.0.0.1", port)).unwrap();
+            drop(rebound);
+        });
+        let mut session = Session::new();
+        session
+            .start_setup_selected(|| Ok(wire), Some(&credential()), selected)
+            .unwrap();
+        session.check_initial_setup_with_timeout(None).unwrap();
+        assert_eq!(session.state(), State::Disconnected);
+        assert_eq!(session.packets_sent, 0);
+        server.join().unwrap();
+    }
+}
+
+fn preverify_info_mock(socket: &mut TcpStream) {
+    let mut raw = Vec::new();
+    while !raw.ends_with(b"\r\n\r\n") {
+        let mut b = [0];
+        socket.read_exact(&mut b).unwrap();
+        raw.push(b[0]);
+    }
+    let text = String::from_utf8(raw).unwrap();
+    assert!(text.starts_with("GET /info RTSP/1.0\r\nCSeq: 1\r\n"));
+    let body = profile::binary(&mut profile::dict([(
+        "features",
+        profile::uint((1 << 9) | (1 << 19) | (1 << 41)),
+    )]))
+    .unwrap();
+    write!(socket, "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Type: application/x-apple-binary-plist\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
+    socket.write_all(&body).unwrap();
+}
+
+#[test]
+fn setup_profiles_cancel_timeout_and_failure_release_timing_socket() {
+    let _ = super::diagnostics::tests::capture(tracing::Level::DEBUG, || {
+        for selected in [SetupProfile::A, SetupProfile::B, SetupProfile::C] {
+            for fault in ["cancel", "timeout", "invalid"] {
+                let mut session = Session::new();
+                let cancel = session.cancel.clone();
+                let (cleaned_tx, cleaned_rx) = std::sync::mpsc::sync_channel(1);
+                let (wire, server) = local_mock(move |mut socket| {
+                    if selected == SetupProfile::C {
+                        preverify_info_mock(&mut socket);
+                    }
+                    let offset = u32::from(selected == SetupProfile::C);
+                    let (mut socket, mut keys) =
+                        verify_mock_core_offset(socket, Fault::None, PI, |_| {}, offset).unwrap();
+                    if selected != SetupProfile::C {
+                        let info = read_message(&mut socket, &mut keys);
+                        send_reply(
+                            &mut socket,
+                            &mut keys,
+                            &info,
+                            Some(profile::dict([(
+                                "features",
+                                profile::uint((1 << 9) | (1 << 19) | (1 << 41)),
+                            )])),
+                            "",
+                        );
+                    }
+                    let setup = read_message(&mut socket, &mut keys);
+                    let offer = plist(&setup);
+                    let port = profile::port(offer.as_dictionary().unwrap(), "timingPort").unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(6)))
+                        .unwrap();
+                    match fault {
+                        "cancel" => cancel.store(true, Ordering::Relaxed),
+                        "invalid" => {
+                            // A valid encrypted reply with invalid plist semantics must
+                            // release the live timing worker too, after best-effort teardown.
+                            send_reply(&mut socket, &mut keys, &setup, Some(profile::dict([])), "");
+                            let teardown = read_message(&mut socket, &mut keys);
+                            assert_eq!(teardown.method, "TEARDOWN");
+                            send_reply(&mut socket, &mut keys, &teardown, None, "");
+                        }
+                        _ => (),
+                    }
+                    assert_eof(&mut socket);
+                    // TCP shutdown is visible before the client has unwound Ports.
+                    cleaned_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                    let rebound = UdpSocket::bind(("127.0.0.1", port)).unwrap();
+                    drop(rebound);
+                });
+                session
+                    .start_setup_selected(|| Ok(wire), Some(&credential()), selected)
+                    .unwrap();
+                let started = std::time::Instant::now();
+                let result = session.check_initial_setup_with_timeout(
+                    (fault == "cancel").then_some(Duration::from_secs(15)),
+                );
+                assert!(result.is_err());
+                let error = format!("{:#}", result.unwrap_err());
+                if fault == "cancel" {
+                    assert!(error.contains("interrupted"), "{error}");
+                    assert!(started.elapsed() < Duration::from_secs(2));
+                } else if fault == "timeout" {
+                    assert!(error.contains("timeout"), "{error}");
+                    assert!(started.elapsed() < Duration::from_secs(5));
+                }
+                assert_eq!(session.state(), State::Failed);
+                assert_eq!(session.packets_sent, 0);
+                session.stop().unwrap();
+                cleaned_tx.send(()).unwrap();
+                server.join().unwrap();
+            }
+        }
+    });
+}
+
+#[test]
+fn preverify_info_cannot_bypass_pinned_identity_verification() {
+    let (wire, server) = local_mock(|mut socket| {
+        preverify_info_mock(&mut socket);
+        assert!(verify_mock_core_offset(socket, Fault::Signature, PI, |_| {}, 1).is_none());
+    });
+    let mut session = Session::new();
+    assert!(session
+        .start_setup_selected(|| Ok(wire), Some(&credential()), SetupProfile::C)
+        .is_err());
+    assert_eq!(session.state(), State::Failed);
     assert_eq!(session.packets_sent, 0);
     server.join().unwrap();
 }

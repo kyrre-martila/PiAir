@@ -207,6 +207,12 @@ playback is claimed. PTP-only, other codecs and unsupported authorization paths
 fail explicitly. No hardware testing was performed. See [session behavior,
 bounds and limitations](docs/AIRPLAY_SESSION.md).
 
+For an initial SETUP check without RECORD or audio, use `stream-test --setup-check`.
+The explicit `--setup-profile a|b|c` compares the existing lifecycle, early NTP
+readiness, and early NTP plus OwnTone-style pre-verify `/info`. Defaults remain
+unchanged. See [profile differences, tests and exact Raspberry Pi commands with
+sanitized log capture](docs/SETUP_DIAGNOSTIC_PROFILES.md).
+
 A tested capability decision rejects unsupported combinations before connection,
 including protected transient profiles, required MFi, password and Home-access paths.
 Bit 51 with bit 46 can be explicitly selected for persistent HAP; it is a

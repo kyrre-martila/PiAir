@@ -16,6 +16,7 @@ mod store;
 mod tests;
 mod tlv;
 mod wire;
+pub use session::SetupProfile;
 pub use wire::AuthProfile;
 
 use crate::{
@@ -311,7 +312,12 @@ pub fn stream_test(
     seconds: u32,
     setup_check: bool,
     setup_timeout_seconds: Option<u64>,
+    setup_profile: Option<SetupProfile>,
 ) -> Result<()> {
+    ensure!(
+        setup_profile.is_none() || setup_check,
+        "profiles require --setup-check"
+    );
     ensure!(
         setup_timeout_seconds.is_none() || (setup_check && setup_timeout_seconds == Some(15)),
         "SETUP timeout experiment requires --setup-check and 15 seconds"
@@ -362,10 +368,16 @@ pub fn stream_test(
     let mut session = session::Session::new();
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
-    session.start_selected(
-        || wire::Wire::connect(&loaded.path, id, &selected, &snapshot),
-        credential.as_ref(),
-    )?;
+    let connect = || wire::Wire::connect(&loaded.path, id, &selected, &snapshot);
+    if setup_check {
+        session.start_setup_selected(
+            connect,
+            credential.as_ref(),
+            setup_profile.unwrap_or_default(),
+        )?;
+    } else {
+        session.start_selected(connect, credential.as_ref())?;
+    }
     if selected.method == Method::Transient {
         println!("Authentication: transient SRP proof verified; no persistent receiver identity verification");
     } else {

@@ -63,6 +63,9 @@ pub enum Command {
         /// Diagnostic only: wait up to 15 seconds total for initial SETUP.
         #[arg(long, requires = "setup_check", value_parser = clap::value_parser!(u64).range(15..=15))]
         setup_timeout_seconds: Option<u64>,
+        /// Setup-only profile: a=control, b=early timing, c=early timing + pre-verify info.
+        #[arg(long, requires = "setup_check", value_enum)]
+        setup_profile: Option<crate::receiver::SetupProfile>,
     },
     /// Remove local credentials without contacting the receiver.
     Unpair { receiver_id: String },
