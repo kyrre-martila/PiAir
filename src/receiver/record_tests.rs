@@ -96,14 +96,22 @@ fn authenticated_case(case: Case, playback: Option<bool>, persistent: bool) {
         RECORD_RECEIVER_ID
     };
     let method = if persistent {
-        Method::PinDisplay
+        Method::StoredHap
     } else {
         Method::Transient
     };
     let seq = move |n: u32| (n - u32::from(persistent)).to_string();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
-    std::fs::write(&config, format!("receiver_allowlist=['{receiver_id}']")).unwrap();
+    std::fs::write(
+        &config,
+        if persistent {
+            format!("receiver_allowlist=['{receiver_id}', '{ID}']")
+        } else {
+            format!("receiver_allowlist=['{receiver_id}']")
+        },
+    )
+    .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let advertisement = mdns_sd::ServiceInfo::new(
         "_airplay._tcp.local.",
@@ -134,7 +142,7 @@ fn authenticated_case(case: Case, playback: Option<bool>, persistent: bool) {
         .as_slice(),
     )
     .unwrap();
-    let observed = vec![Receiver {
+    let mut observed = vec![Receiver {
         id: receiver_id.into(),
         name: "RecordFixture".into(),
         services: vec![discovery::Advertisement::test_from_info(&advertisement)],
@@ -148,7 +156,39 @@ fn authenticated_case(case: Case, playback: Option<bool>, persistent: bool) {
         c.receiver_id = receiver_id.into();
         store.save(&c).unwrap();
     }
-    store.select(&selected).unwrap();
+    // An approved, paired default receiver remains selected for the entire Stua
+    // diagnostic. Advertise its distinct endpoint and prove it is never contacted.
+    let other_listener = if persistent {
+        let other = TcpListener::bind("127.0.0.2:0").unwrap();
+        other.set_nonblocking(true).unwrap();
+        let info = mdns_sd::ServiceInfo::new(
+            "_airplay._tcp.local.",
+            "DefaultFixture",
+            "default.local.",
+            "127.0.0.2",
+            other.local_addr().unwrap().port(),
+            [
+                ("deviceid", "AA:BB:CC:DD:EE:FF"),
+                ("pi", PI),
+                ("features", "0x80200,0x4000"),
+            ]
+            .as_slice(),
+        )
+        .unwrap();
+        let default = Receiver {
+            id: ID.into(),
+            name: "DefaultFixture".into(),
+            services: vec![discovery::Advertisement::test_from_info(&info)],
+        };
+        store
+            .select(&Selection::from_receiver(&default, Method::PinDisplay).unwrap())
+            .unwrap();
+        observed.push(default);
+        Some(other)
+    } else {
+        store.select(&selected).unwrap();
+        None
+    };
     store.client_identity().unwrap();
     let identity = dir.path().join("receiver-state/client-identity.toml");
     std::fs::write(
@@ -726,7 +766,7 @@ fn authenticated_case(case: Case, playback: Option<bool>, persistent: bool) {
         let c = stua_credential(&store, &selected).unwrap();
         session
             .start_stua_stream_selected(
-                || Wire::connect(&config, receiver_id, &selected, &observed),
+                || Wire::connect_stua_operation(&config, &selected, &observed, &c),
                 &c,
                 playback.unwrap(),
             )
@@ -801,7 +841,8 @@ fn authenticated_case(case: Case, playback: Option<bool>, persistent: bool) {
                 376
             } else {
                 0
-            }
+            },
+            "{case:?}: {output}"
         );
     }
     assert_eq!(session.resends, 0);
@@ -818,6 +859,13 @@ fn authenticated_case(case: Case, playback: Option<bool>, persistent: bool) {
     session.stop().unwrap();
     server.join().unwrap();
     assert_eq!(state_files(&dir.path().join("receiver-state")), before);
+    if let Some(other) = other_listener {
+        assert_eq!(store.selection().unwrap().unwrap().id, ID);
+        assert!(
+            other.accept().is_err(),
+            "Stua must never contact the default receiver"
+        );
+    }
     for addr in local_media.lock().unwrap().iter() {
         UdpSocket::bind(addr).unwrap();
     }

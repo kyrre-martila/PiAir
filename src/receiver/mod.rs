@@ -554,21 +554,18 @@ pub fn stua_check(loaded: &Loaded, id: &str, playback: bool) -> Result<()> {
     );
     ensure!(loaded.config.allows(id), "receiver is not approved");
     let store = store::Store::new(&loaded.path)?;
-    let selected = store
-        .selection()?
-        .context("existing Stua selection required; diagnostic never changes selection")?;
-    let credential = stua_credential(&store, &selected)?;
+    let credential = store
+        .credential(id)?
+        .context("existing Stua HAP credentials required; no automatic pairing")?;
+    let method = credential.authentication_method(id)?;
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "Stua diagnostic requires an interactive terminal and explicit confirmation"
     );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
     // Validate the exact endpoint before confirmation as well as at Wire::connect.
-    let observed = validate_selection(loaded, id, selected.method, &snapshot)?;
-    ensure!(
-        selected.matches_observation(&observed),
-        "receiver identity/capability/endpoint changed"
-    );
+    let selected = validate_selection(loaded, id, method, &snapshot)?;
+    stua_credential(&store, &selected)?;
     interactive::describe(&snapshot, id)?;
     println!("Persistent HAP pair-verify using existing stored keys; no pairing, credential writes, retries or receiver fallback. Only NTP realtime ALAC is supported; PTP/FairPlay/MFi requirements fail closed. Stua uses HomePod 2 as default output; routing and audible playback remain unverified.");
     let prompt = if playback {
@@ -583,7 +580,7 @@ pub fn stua_check(loaded: &Loaded, id: &str, playback: bool) -> Result<()> {
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
     session.start_stua_stream_selected(
-        || wire::Wire::connect(&loaded.path, id, &selected, &snapshot),
+        || wire::Wire::connect_stua_operation(&loaded.path, &selected, &snapshot, &credential),
         &credential,
         playback,
     )?;
@@ -602,11 +599,11 @@ pub fn stua_check(loaded: &Loaded, id: &str, playback: bool) -> Result<()> {
 fn stua_credential(store: &store::Store, selected: &Selection) -> Result<store::Credential> {
     ensure!(
         selected.id == session::STUA_RECEIVER_ID,
-        "existing selection must be Stua; no selection changes or fallback"
+        "operation selection must be Stua; no selection changes or fallback"
     );
     ensure!(
-        selected.method != Method::Transient,
-        "Stua requires stored persistent HAP credentials; no transient fallback"
+        selected.method == Method::StoredHap,
+        "Stua requires stored persistent HAP authentication; no method guessing or fallback"
     );
     selected.capabilities.decide(selected.method)?;
     ensure!(
@@ -616,7 +613,10 @@ fn stua_credential(store: &store::Store, selected: &Selection) -> Result<store::
     let credential = store
         .credential(&selected.id)?
         .context("existing Stua HAP credentials required; no automatic pairing")?;
-    credential.validate(session::STUA_RECEIVER_ID)?;
+    ensure!(
+        credential.authentication_method(session::STUA_RECEIVER_ID)? == selected.method,
+        "credential authentication method differs from operation"
+    );
     ensure!(
         credential.advertised_pi == selected.advertised_pi,
         "credential discovery binding differs from selection"

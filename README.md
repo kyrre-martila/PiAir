@@ -394,6 +394,8 @@ Stua-only persistent HAP diagnostics reuse stored credentials and the same realt
 engine: `stua-stream-setup-check device:02d899c1833f` (zero audio/volume changes)
 and separately `stua-playback-check device:02d899c1833f` (one second faded tone,
 -40 dB volume which may persist, two seconds silent drain). Both require existing
-approval/selection/credentials and interactive confirmation. See
+approval, valid stored HAP credentials and interactive confirmation. Stua uses a
+temporary operation selection from passive discovery; the selected default
+receiver remains unchanged. See
 [Stua protocol limits and exact Pi commands](docs/STUA_REALTIME_DIAGNOSTICS.md).
 Automated tests do not establish physical routing or audible playback.

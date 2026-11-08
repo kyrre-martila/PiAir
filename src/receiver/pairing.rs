@@ -66,8 +66,11 @@ fn setup_inner(
     pin: impl FnOnce() -> Result<Zeroizing<String>>,
 ) -> Result<Credential> {
     ensure!(
-        wire.method() != super::compatibility::Method::Transient,
-        "transient method unsupported; no fallback"
+        matches!(
+            wire.method(),
+            super::compatibility::Method::PinDisplay | super::compatibility::Method::SetupCode
+        ),
+        "explicit enrollment method required; stored HAP and transient cannot enroll"
     );
     if wire.method().pin_start() {
         wire.auth_phase("PIN-start");

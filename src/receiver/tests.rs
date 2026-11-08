@@ -2595,15 +2595,16 @@ fn stua_stored_credentials_reused_without_writes_or_method_fallback() {
     store.select(&selected).unwrap();
     let path = dir.path().join("receiver-state/02d899c1833f.toml");
     let before = std::fs::read(&path).unwrap();
-    for method in [Method::PinDisplay, Method::SetupCode] {
+    // Schema v2 establishes HAP, not the historical PIN delivery choice.
+    for method in [Method::PinDisplay, Method::SetupCode, Method::Transient] {
         selected.method = method;
-        let reused = stua_credential(&store, &selected).unwrap();
-        assert_eq!(reused.seed, c.seed);
-        assert_eq!(reused.receiver_key, c.receiver_key);
+        assert!(stua_credential(&store, &selected).is_err());
     }
-    selected.method = Method::Transient;
-    assert!(stua_credential(&store, &selected).is_err());
-    selected.method = Method::PinDisplay;
+    selected.method = c.authentication_method(session::STUA_RECEIVER_ID).unwrap();
+    assert_eq!(selected.method, Method::StoredHap);
+    let reused = stua_credential(&store, &selected).unwrap();
+    assert_eq!(reused.seed, c.seed);
+    assert_eq!(reused.receiver_key, c.receiver_key);
     selected.advertised_pi = Some("changed".into());
     assert!(stua_credential(&store, &selected).is_err());
     selected.advertised_pi = c.advertised_pi.clone();
@@ -2694,6 +2695,12 @@ fn stua_identity_and_endpoint_drift_never_opens_control_socket() {
         .unwrap()
         .select(&selected)
         .unwrap();
+    let store = store::Store::new(&config).unwrap();
+    let mut c = credential();
+    c.receiver_id = id.into();
+    store.save(&c).unwrap();
+    let mut operation = selected.clone();
+    operation.method = c.authentication_method(id).unwrap();
     for change in 0..5 {
         let mut drifted = vec![Receiver {
             id: observed[0].id.clone(),
@@ -2722,6 +2729,125 @@ fn stua_identity_and_endpoint_drift_never_opens_control_socket() {
             }
         }
         assert!(Wire::connect(&config, id, &selected, &drifted).is_err());
+        assert!(Wire::connect_stua_operation(&config, &operation, &drifted, &c).is_err());
         assert!(listener.accept().is_err());
     }
+}
+
+fn stua_snapshot(port: u16) -> Vec<Receiver> {
+    let info = mdns_sd::ServiceInfo::new(
+        "_airplay._tcp.local.",
+        "StuaFixture",
+        "stua.local.",
+        "127.0.0.1",
+        port,
+        [
+            ("deviceid", "02:D8:99:C1:83:3F"),
+            ("pi", PI),
+            ("features", "0x80200,0x4000"),
+        ]
+        .as_slice(),
+    )
+    .unwrap();
+    vec![Receiver {
+        id: session::STUA_RECEIVER_ID.into(),
+        name: "StuaFixture".into(),
+        services: vec![discovery::Advertisement::test_from_info(&info)],
+    }]
+}
+
+#[test]
+fn stua_operation_leases_recheck_credentials_and_approval_independently_of_default() {
+    for change in 0..7 {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let id = session::STUA_RECEIVER_ID;
+        std::fs::write(&config, format!("receiver_allowlist=['{id}', '{ID}']")).unwrap();
+        let store = store::Store::new(&config).unwrap();
+        let mut c = credential();
+        c.receiver_id = id.into();
+        store.save(&c).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let observed = stua_snapshot(listener.local_addr().unwrap().port());
+        let selected =
+            Selection::from_receiver(&observed[0], c.authentication_method(id).unwrap()).unwrap();
+        // No default selection is needed, and even malformed default state must
+        // not redirect or authorize this explicitly targeted operation.
+        let wire = Wire::connect_stua_operation(&config, &selected, &observed, &c).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        let lease = wire.lease();
+        assert!(wire.reauthorize().is_ok());
+        assert!(lease.check().is_ok());
+        let path = dir.path().join("receiver-state/02d899c1833f.toml");
+        match change {
+            0 => {
+                std::fs::write(&config, "receiver_allowlist=[]").unwrap();
+            }
+            1 => {
+                std::fs::remove_file(&path).unwrap();
+            }
+            2 => {
+                c.seed = [55; 32];
+                std::fs::write(&path, toml::to_string(&c).unwrap()).unwrap();
+            }
+            3 => {
+                c.advertised_pi = Some("changed".into());
+                std::fs::write(&path, toml::to_string(&c).unwrap()).unwrap();
+            }
+            4 => {
+                c.version = 1;
+                std::fs::write(&path, toml::to_string(&c).unwrap()).unwrap();
+            }
+            5 => {
+                store
+                    .select(
+                        &Selection::from_receiver(&snapshot(1234)[0], Method::PinDisplay).unwrap(),
+                    )
+                    .unwrap();
+            }
+            _ => {
+                std::fs::write(dir.path().join("receiver-state/selected.toml"), "malformed")
+                    .unwrap();
+            }
+        }
+        assert_eq!(wire.reauthorize().is_ok(), change >= 5);
+        assert_eq!(lease.check().is_ok(), change >= 5);
+        drop(wire);
+        assert_eof(&mut peer); // Authorization alone sends no protocol traffic.
+    }
+}
+
+#[test]
+fn stua_operation_rejects_ambiguous_state_and_changed_confirmation_before_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let id = session::STUA_RECEIVER_ID;
+    std::fs::write(&config, format!("receiver_allowlist=['{id}']")).unwrap();
+    let store = store::Store::new(&config).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let observed = stua_snapshot(listener.local_addr().unwrap().port());
+    let mut c = credential();
+    c.receiver_id = id.into();
+    let method = c.authentication_method(id).unwrap();
+    let selected = Selection::from_receiver(&observed[0], method).unwrap();
+    assert!(Wire::connect_stua_operation(&config, &selected, &observed, &c).is_err());
+    store.save(&c).unwrap();
+    for wrong_method in [Method::PinDisplay, Method::SetupCode, Method::Transient] {
+        let mut wrong = selected.clone();
+        wrong.method = wrong_method;
+        assert!(Wire::connect_stua_operation(&config, &wrong, &observed, &c).is_err());
+    }
+    // The method cannot be established for unknown credential schema versions.
+    for version in [0, 1, 3] {
+        c.version = version;
+        assert!(c.authentication_method(id).is_err());
+        assert!(Wire::connect_stua_operation(&config, &selected, &observed, &c).is_err());
+    }
+    c.version = 2;
+    c.seed = [77; 32]; // Credentials changed while the confirmation was open.
+    assert!(Wire::connect_stua_operation(&config, &selected, &observed, &c).is_err());
+    assert!(listener.accept().is_err());
+    assert!(store.selection().unwrap().is_none());
+    assert!(toml::to_string(&selected).is_err()); // Operation method cannot be persisted.
 }

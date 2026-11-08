@@ -41,17 +41,45 @@ encoder, RTP encryption, pacing, readiness, drain and cleanup as PR #36.
 
 ## Gates and limits
 
-Both new commands require the exact ID, existing allowlist approval, an existing
-persisted Stua selection with a persistent method, valid stored Stua credentials
-and matching `pi`, current discovery identity/capability/address/port agreement,
-and interactive terminal confirmation. No chooser, pairing, selection writes,
-credential writes, method fallback, reconnect or automatic retry exists. A
-selection pointing at another receiver causes an error; this procedure must not
-change it. Other advertised receivers are used only to reject endpoint conflicts,
-never contacted. All control/event/media/timing traffic remains restricted to
-the authorized control peer. Approval and selection are rechecked during use.
-The shared public sender identity file can be initialized if absent; this does
-not modify pairing credentials or receiver selections.
+Both commands require the exact Stua ID, existing allowlist approval, valid stored
+Stua HAP credentials and matching advertised `pi`, and interactive terminal
+confirmation. Stua does **not** need to be the globally selected default. The
+commands never read, repair or overwrite the persisted selection: another
+receiver may remain selected, or the selection may be absent.
+
+The trusted credential schema v2 is emitted exclusively by PiAir's signed
+persistent HAP method-0 enrollment. It unambiguously establishes the HAP
+pair-verify authentication method. It does not store the historical PIN delivery
+choice (`PinDisplay` versus `SetupCode`); that choice is unnecessary for
+pair-verify and is never guessed from receiver name, model, PIN behavior or
+current default selection. A validated v2 credential selects the explicit
+internal `StoredHap` authentication-only method. Unknown/legacy schema versions,
+invalid identities/keys or unestablished protocols fail closed before contact.
+`StoredHap` cannot be chosen for enrollment or serialized as a default selection.
+Existing credential files require no migration, added fields or writes.
+
+Passive discovery supplies Stua's current literal addresses, port, capabilities
+and advertised pairing ID. The method is checked against advertised persistent
+HAP capability/policy, audio and ALAC; conflicting identities/endpoints fail.
+These values form a temporary operation-scoped selection that is pinned for
+confirmation and connection, and discarded afterward. Discovery changes never
+redirect a live connection. Other advertised receivers are used only to reject
+endpoint conflicts and are never contacted.
+
+Wire now distinguishes persisted-selection authorization from Stua operation
+authorization. All existing operations retain exact persisted-selection equality
+checks. A Stua operation instead binds its immutable identity/endpoint selection
+to the validated stored credential snapshot. The snapshot is parsed and
+fingerprinted from the same protected read; before connection it must match the
+credential snapshot held across confirmation. Every control/event/media/timing lease
+rechecks allowlist approval, file protections and the exact credential-file
+fingerprint. Removal, replacement, corruption, pairing-ID changes or approval
+revocation stop further sends. Raw-byte fingerprint checks avoid repeated
+TOML/key parsing on the sample timeline. Changing the unrelated default receiver
+neither authorizes nor redirects Stua. No pairing, selection/credential writes,
+method fallback, reconnect or automatic retry exists. The shared public sender
+identity file can be initialized if absent; pairing and default selection data
+are preserved.
 
 Only audio+ALAC, realtime UDP type 96, 44100 Hz/16-bit/stereo, 352 frames/packet
 and NTP are implemented. Encrypted `/info` validates codec capabilities; initial
@@ -94,8 +122,9 @@ OwnTone, autostream, services and deployed configurations are untouched.
 
 Use a separate checkout; do not overwrite a deployed binary. Use the existing
 config path and adjacent `receiver-state`, under its existing owner. Do not copy
-secrets or select/pair/unpair anything. If the required persisted Stua selection
-is absent or differs, stop and review; these commands do not repair it.
+secrets or select/pair/unpair anything. Keep the currently selected default
+receiver as it is; Stua is authorized only for this operation using its existing
+credentials and current passive discovery endpoint.
 
 ```sh
 git clone --branch feat/stua-realtime-diagnostics --single-branch \
@@ -149,7 +178,12 @@ tone and silent drain for playback. Focused credential/CLI/endpoint gates reject
 missing/mismatched credentials, transient authentication, wrong IDs, endpoint
 drift, conflicts and unfixed options. Failure cases cover unsupported timing,
 event refusal, malformed/rejected stream SETUP, cancellation/revocation and
-failed/timed-out TEARDOWN with local port reuse. Existing HomePod tests remain.
+failed/timed-out TEARDOWN with local port reuse. Both Stua paths run with another
+approved, paired receiver still selected, prove byte-for-byte preservation of
+stored state, and assert that its listening endpoint receives no connection.
+Operation lease tests also cover absent/default selection independence,
+credential replacement/removal/schema errors, approval revocation and endpoint
+drift. Existing HomePod and persisted-selection regression tests remain.
 
 Automated checks do not establish tvOS acceptance, default-output routing,
 receiver acoustics or audible playback. No physical Stua verification has been
@@ -157,9 +191,9 @@ performed as part of this PR.
 
 Validation in the development workspace (x86_64 Linux): `cargo fmt` and
 `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`,
-`cargo test --locked` (**196 unit tests + 19 CLI tests passed**) and
-`cargo build --release --locked` passed. Cargo.lock is unchanged. The first full
-test run overlapped release compilation and one existing realtime test correctly
-tripped its 100 ms scheduler-stall guard; the complete rerun without competing
-compilation passed. No scheduler limits or tests were weakened. Raspberry Pi
+`RUST_TEST_THREADS=1 cargo test --locked` (**198 unit tests + 20 CLI tests
+passed**) and `cargo build --release --locked` passed. Cargo.lock is unchanged.
+A concurrent test run passed all new Stua cases but tripped an existing transient
+playback test's 100 ms scheduler guard. The full serial rerun avoids competing
+realtime tests; no scheduler limits or assertions were weakened. Raspberry Pi
 compilation and physical receiver verification remain separate operator steps.

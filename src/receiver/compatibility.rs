@@ -12,6 +12,11 @@ pub enum Method {
     PinDisplay,
     /// Persistent HAP method 0 with a user-supplied existing setup code; no PIN-start.
     SetupCode,
+    /// Authentication-only persistent HAP, established by validated v2 credentials.
+    /// Never an enrollment choice or a persisted selection value.
+    #[value(skip)]
+    #[serde(skip)]
+    StoredHap,
     /// Connection-scoped SRP with no persistent identity verification.
     Transient,
 }

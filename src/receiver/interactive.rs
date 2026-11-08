@@ -329,6 +329,7 @@ fn enrollment_prerequisite(
     let prompt = match method {
         Method::PinDisplay => "PIN-display requires a receiver-supported PIN display or equivalent independently verified PIN delivery mechanism. Is that available for this receiver? [y/N]: ",
         Method::SetupCode => "Existing HAP setup-code enrollment requires a genuine, independently obtained HAP setup code for this receiver. An AirPlay password is not a HAP setup code. Do you have that code? [y/N]: ",
+        Method::StoredHap => anyhow::bail!("stored HAP is authentication-only; no enrollment"),
         Method::Transient => anyhow::bail!("transient authentication does not enroll persistent credentials; use authenticate explicitly; no fallback"),
     };
     writeln!(output, "Do not invent codes or guess methods. If neither prerequisite is available, persistent enrollment cannot currently proceed through these methods. Cancel safely; active selection and credentials remain unchanged. For a separately authorized session-only diagnostic, see docs/RECEIVER_AUTHENTICATION.md and the explicit authenticate --experimental-owntone-transient command. No automatic fallback.")?;

@@ -501,3 +501,13 @@ fn stua_diagnostics_require_exact_id_and_fixed_modes_without_contact() {
             .contains("not approved"));
     }
 }
+
+#[test]
+fn stored_hap_operation_method_cannot_be_selected_for_enrollment() {
+    assert_eq!(
+        run(&["select", "device:02d899c1833f", "--method", "stored-hap"])
+            .status
+            .code(),
+        Some(2)
+    );
+}
