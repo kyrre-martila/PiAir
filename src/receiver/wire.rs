@@ -67,7 +67,7 @@ pub struct Wire {
     failed: bool,
     receiver_id: String,
     method: Method,
-    authorization: Option<(PathBuf, Selection)>,
+    authorization: Option<(PathBuf, Authorization)>,
     keys: Option<super::crypto::ControlKeys>,
     events: Option<super::crypto::ControlKeys>,
     audio_key: Option<Zeroizing<[u8; 32]>>,
@@ -76,12 +76,106 @@ pub struct Wire {
     pending_start: usize,
     pending_end: usize,
 }
+/// Persisted operations retain exact global-selection checks. A Stua operation
+/// instead owns an immutable endpoint/capability pin and credential fingerprint.
+#[derive(Clone)]
+enum Authorization {
+    Persisted(Selection),
+    StuaOperation {
+        selected: Selection,
+        credential: Zeroizing<[u8; 64]>,
+    },
+}
+impl Authorization {
+    fn check(&self, path: &Path, id: &str) -> Result<()> {
+        ensure!(config::approval(path, id)?, "receiver approval revoked");
+        let store = super::store::Store::new(path)?;
+        match self {
+            Self::Persisted(selected) => ensure!(
+                store.selection()?.as_ref() == Some(selected),
+                "receiver selection changed"
+            ),
+            Self::StuaOperation {
+                selected,
+                credential,
+            } => {
+                ensure!(
+                    id == super::session::STUA_RECEIVER_ID && selected.id == id,
+                    "operation receiver identity changed"
+                );
+                let current = store
+                    .credential_fingerprint(id)?
+                    .context("operation credentials removed")?;
+                use subtle::ConstantTimeEq;
+                ensure!(
+                    bool::from(current.as_ref().ct_eq(credential.as_ref())),
+                    "operation credentials changed or revoked"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Wire {
     pub fn connect(
         config_path: &Path,
         id: &str,
         selected: &Selection,
         snapshot: &[Receiver],
+    ) -> Result<Self> {
+        Self::connect_authorized(
+            config_path,
+            id,
+            selected,
+            snapshot,
+            Authorization::Persisted(selected.clone()),
+        )
+    }
+    /// Exact Stua-only authorization; never reads or changes the default selection.
+    pub(super) fn connect_stua_operation(
+        config_path: &Path,
+        selected: &Selection,
+        snapshot: &[Receiver],
+        credential: &super::store::Credential,
+    ) -> Result<Self> {
+        let id = super::session::STUA_RECEIVER_ID;
+        ensure!(
+            selected.id == id && selected.method == credential.authentication_method(id)?,
+            "Stua operation requires exact identity and stored HAP authentication"
+        );
+        let snapshot_credential = super::store::Store::new(config_path)?
+            .credential_snapshot(id)?
+            .context("existing Stua HAP credentials required")?;
+        use subtle::ConstantTimeEq;
+        ensure!(
+            credential.advertised_pi == selected.advertised_pi
+                && bool::from(
+                    snapshot_credential
+                        .value
+                        .fingerprint()?
+                        .as_ref()
+                        .ct_eq(credential.fingerprint()?.as_ref())
+                ),
+            "operation credential binding changed or differs from confirmation"
+        );
+        selected.capabilities.decide(selected.method)?;
+        ensure!(
+            selected.capabilities.features & ((1 << 9) | (1 << 19)) == ((1 << 9) | (1 << 19)),
+            "Stua must advertise audio and ALAC"
+        );
+        let authorization = Authorization::StuaOperation {
+            selected: selected.clone(),
+            credential: snapshot_credential.fingerprint,
+        };
+        Self::connect_authorized(config_path, id, selected, snapshot, authorization)
+    }
+    fn connect_authorized(
+        config_path: &Path,
+        id: &str,
+        selected: &Selection,
+        snapshot: &[Receiver],
+        authorization: Authorization,
     ) -> Result<Self> {
         exact_id(id)?;
         // No hostname resolution exists: only pinned, literal discovery addresses.
@@ -108,17 +202,8 @@ impl Wire {
                 "conflicting/ambiguous receiver identities share an address"
             );
         }
-        // Recheck persisted selection and approval immediately before the socket.
-        let saved = super::store::Store::new(config_path)?
-            .selection()?
-            .context("receiver selection absent")?;
-        ensure!(
-            &saved == selected
-                && config::load(Some(config_path.to_owned()))?
-                    .config
-                    .allows(id),
-            "receiver approval/selection changed"
-        );
+        // Recheck the appropriate authorization immediately before the socket.
+        authorization.check(config_path, id)?;
         let ip = selected
             .addresses
             .iter()
@@ -157,7 +242,7 @@ impl Wire {
         );
         (wire.client_instance, wire.active_remote) =
             super::store::Store::new(config_path)?.client_identity()?;
-        wire.authorization = Some((config_path.to_owned(), selected.clone()));
+        wire.authorization = Some((config_path.to_owned(), authorization));
         Ok(wire)
     }
     fn new(socket: TcpStream, budget: Duration, receiver_id: String, method: Method) -> Self {
@@ -353,15 +438,8 @@ impl Wire {
         Ok(())
     }
     pub(super) fn reauthorize(&self) -> Result<()> {
-        if let Some((path, selected)) = &self.authorization {
-            ensure!(
-                config::approval(path, &self.receiver_id)?,
-                "receiver approval revoked"
-            );
-            ensure!(
-                super::store::Store::new(path)?.selection()?.as_ref() == Some(selected),
-                "receiver selection changed"
-            );
+        if let Some((path, authorization)) = &self.authorization {
+            authorization.check(path, &self.receiver_id)?;
         }
         Ok(())
     }
@@ -384,7 +462,7 @@ impl Wire {
             self.keys.is_some() && shared.len() >= 32,
             "verified pairing required"
         );
-        if self.uses_owntone_transient_profile() {
+        if self.uses_owntone_transient_profile() || self.method != Method::Transient {
             self.audio_key = Some(Zeroizing::new(shared[..32].try_into()?));
         }
         Ok(())
@@ -1008,20 +1086,13 @@ pub(super) struct Reply {
 }
 #[derive(Clone)]
 pub(super) struct Lease {
-    authorization: Option<(PathBuf, Selection)>,
+    authorization: Option<(PathBuf, Authorization)>,
     id: String,
 }
 impl Lease {
     pub(super) fn check(&self) -> Result<()> {
-        if let Some((path, selected)) = &self.authorization {
-            ensure!(
-                config::approval(path, &self.id)?,
-                "receiver approval revoked"
-            );
-            ensure!(
-                super::store::Store::new(path)?.selection()?.as_ref() == Some(selected),
-                "selection changed during session"
-            );
+        if let Some((path, authorization)) = &self.authorization {
+            authorization.check(path, &self.id)?;
         }
         Ok(())
     }

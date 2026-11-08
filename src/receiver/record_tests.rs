@@ -87,11 +87,29 @@ fn record_case(case: Case) {
     record_case_mode(case, None);
 }
 fn record_case_mode(case: Case, playback: Option<bool>) {
+    authenticated_case(case, playback, false);
+}
+fn authenticated_case(case: Case, playback: Option<bool>, persistent: bool) {
+    let receiver_id = if persistent {
+        session::STUA_RECEIVER_ID
+    } else {
+        RECORD_RECEIVER_ID
+    };
+    let method = if persistent {
+        Method::StoredHap
+    } else {
+        Method::Transient
+    };
+    let seq = move |n: u32| (n - u32::from(persistent)).to_string();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
     std::fs::write(
         &config,
-        format!("receiver_allowlist=['{RECORD_RECEIVER_ID}']"),
+        if persistent {
+            format!("receiver_allowlist=['{receiver_id}', '{ID}']")
+        } else {
+            format!("receiver_allowlist=['{receiver_id}']")
+        },
     )
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -102,24 +120,75 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
         "127.0.0.1",
         listener.local_addr().unwrap().port(),
         [
-            ("deviceid", "3A:E5:C9:A3:02:AD"),
+            (
+                "deviceid",
+                if persistent {
+                    "02:D8:99:C1:83:3F"
+                } else {
+                    "3A:E5:C9:A3:02:AD"
+                },
+            ),
             ("pi", PI),
-            ("features", "0x80200,0x10000"),
+            (
+                "features",
+                if persistent {
+                    "0x80200,0x4000"
+                } else {
+                    "0x80200,0x10000"
+                },
+            ),
             ("flags", "0x98404"),
         ]
         .as_slice(),
     )
     .unwrap();
-    let observed = vec![Receiver {
-        id: RECORD_RECEIVER_ID.into(),
+    let mut observed = vec![Receiver {
+        id: receiver_id.into(),
         name: "RecordFixture".into(),
         services: vec![discovery::Advertisement::test_from_info(&advertisement)],
     }];
-    let selected = Selection::from_receiver(&observed[0], Method::Transient).unwrap();
+    let selected = Selection::from_receiver(&observed[0], method).unwrap();
     let store = store::Store::new(&config).unwrap();
     // Existing credentials for another receiver must survive byte-for-byte.
     store.save(&credential()).unwrap();
-    store.select(&selected).unwrap();
+    if persistent {
+        let mut c = credential();
+        c.receiver_id = receiver_id.into();
+        store.save(&c).unwrap();
+    }
+    // An approved, paired default receiver remains selected for the entire Stua
+    // diagnostic. Advertise its distinct endpoint and prove it is never contacted.
+    let other_listener = if persistent {
+        let other = TcpListener::bind("127.0.0.2:0").unwrap();
+        other.set_nonblocking(true).unwrap();
+        let info = mdns_sd::ServiceInfo::new(
+            "_airplay._tcp.local.",
+            "DefaultFixture",
+            "default.local.",
+            "127.0.0.2",
+            other.local_addr().unwrap().port(),
+            [
+                ("deviceid", "AA:BB:CC:DD:EE:FF"),
+                ("pi", PI),
+                ("features", "0x80200,0x4000"),
+            ]
+            .as_slice(),
+        )
+        .unwrap();
+        let default = Receiver {
+            id: ID.into(),
+            name: "DefaultFixture".into(),
+            services: vec![discovery::Advertisement::test_from_info(&info)],
+        };
+        store
+            .select(&Selection::from_receiver(&default, Method::PinDisplay).unwrap())
+            .unwrap();
+        observed.push(default);
+        Some(other)
+    } else {
+        store.select(&selected).unwrap();
+        None
+    };
     store.client_identity().unwrap();
     let identity = dir.path().join("receiver-state/client-identity.toml");
     std::fs::write(
@@ -137,17 +206,11 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
     let local_media = Arc::new(std::sync::Mutex::new(Vec::new()));
     let remote_media = local_media.clone();
     let server = thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
-        owntone_info(&mut socket, 200, &info_body(0));
-        setup_mock_transport(
+        let (socket, _) = listener.accept().unwrap();
+        diagnostic_auth_mock(
+            persistent,
             socket,
-            Fault::None,
-            Method::Transient,
-            "3939",
-            PI,
-            false,
-            true,
-            move |mut socket, shared| {
+            move |mut socket: TcpStream, shared: &[u8]| {
                 socket
                     .set_read_timeout(Some(Duration::from_secs(6)))
                     .unwrap();
@@ -155,12 +218,12 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                     assert_eof(&mut socket);
                     return;
                 }
-                let mut keys = ControlKeys::new(shared.as_ref());
+                let mut keys = ControlKeys::new(shared);
                 keys.swap_directions_for_test();
                 let info = read_message(&mut socket, &mut keys);
                 assert_eq!(
                     (&*info.method, &*info.uri, &*info.headers["cseq"]),
-                    ("GET", "/info", "4")
+                    ("GET", "/info", seq(4).as_str())
                 );
                 send_reply(
                     &mut socket,
@@ -173,7 +236,10 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                     "",
                 );
                 let setup = read_message(&mut socket, &mut keys);
-                assert_eq!((&*setup.method, &*setup.headers["cseq"]), ("SETUP", "5"));
+                assert_eq!(
+                    (&*setup.method, &*setup.headers["cseq"]),
+                    ("SETUP", seq(5).as_str())
+                );
                 let value = plist(&setup);
                 let offer = value.as_dictionary().unwrap();
                 assert_eq!(offer.len(), 4);
@@ -219,7 +285,7 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                     );
                     let end = read_message(&mut socket, &mut keys);
                     assert_eq!(end.method, "TEARDOWN");
-                    assert_eq!(end.headers["cseq"], "6");
+                    assert_eq!(end.headers["cseq"], seq(6));
                     timing_probe(timing);
                     send_reply(&mut socket, &mut keys, &end, None, "");
                     assert_eof(&mut socket);
@@ -264,7 +330,7 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                         assert_eof(&mut event);
                     } else {
                         // Prove event-key derivation and encrypted ACK, not just TCP accept.
-                        let mut event_keys = ControlKeys::events(shared.as_ref());
+                        let mut event_keys = ControlKeys::events(shared);
                         event_keys.swap_directions_for_test();
                         let mut body = Vec::new();
                         profile::dict([
@@ -292,12 +358,12 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                         Case::CancelSetup | Case::EventRefused | Case::EventBadTag
                     ));
                     assert_eq!(next.method, "TEARDOWN");
-                    assert_eq!(next.headers["cseq"], "6");
+                    assert_eq!(next.headers["cseq"], seq(6));
                     next
                 } else {
                     assert_eq!(next.method, "RECORD");
                     assert_eq!(next.uri, setup.uri);
-                    assert_eq!(next.headers["cseq"], "6");
+                    assert_eq!(next.headers["cseq"], seq(6));
                     assert!(next.body.is_empty());
                     assert_eq!(next.headers["content-length"], "0");
                     assert_eq!(next.headers.len(), 9); // common envelope + Session only
@@ -375,7 +441,15 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                         _ => "Audio-Latency: 88200\r\n",
                     };
                     if case == Case::NoLengthOrLatency {
-                        socket.write_all(&keys.encrypt(b"RTSP/1.0 200 OK\r\nCSeq: 6\r\nSession: test-session\r\n\r\n").unwrap()).unwrap();
+                        socket
+                        .write_all(
+                            &keys
+                                .encrypt(
+                                    b"RTSP/1.0 200 OK\r\nCSeq: 6\r\nSession: test-session\r\n\r\n",
+                                )
+                                .unwrap(),
+                        )
+                        .unwrap();
                     } else if case == Case::BadSession {
                         socket.write_all(&keys.encrypt(b"RTSP/1.0 200 OK\r\nCSeq: 6\r\nSession: changed\r\nContent-Length: 0\r\n\r\n").unwrap()).unwrap();
                     } else {
@@ -393,8 +467,15 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                         let stream = read_message(&mut socket, &mut keys);
                         assert_eq!(stream.method, "SETUP");
                         assert_eq!(stream.uri, setup.uri);
-                        assert_eq!(stream.headers["cseq"], "7");
-                        assert_eq!(stream.headers["user-agent"], "AirPlay/999.0.0");
+                        assert_eq!(stream.headers["cseq"], seq(7));
+                        assert_eq!(
+                            stream.headers["user-agent"],
+                            if persistent {
+                                "PiAir/0.1"
+                            } else {
+                                "AirPlay/999.0.0"
+                            }
+                        );
                         let value = plist(&stream);
                         let fields = value.as_dictionary().unwrap()["streams"]
                             .as_array()
@@ -452,12 +533,16 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                                 std::fs::write(&revoke, "receiver_allowlist=[]").unwrap();
                             } else {
                                 let response = if case == Case::StreamReject {
-                                    b"RTSP/1.0 500 private-reason\r\nCSeq: 7\r\nContent-Length: 0\r\n\r\n".as_slice()
+                                    format!("RTSP/1.0 500 private-reason\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n", seq(7))
                                 } else {
-                                    b"RTSP/1.0 200 OK\r\nCSeq: 6\r\nContent-Length: 0\r\n\r\n"
-                                        .as_slice()
+                                    format!(
+                                        "RTSP/1.0 200 OK\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n",
+                                        seq(6)
+                                    )
                                 };
-                                socket.write_all(&keys.encrypt(response).unwrap()).unwrap();
+                                socket
+                                    .write_all(&keys.encrypt(response.as_bytes()).unwrap())
+                                    .unwrap();
                             }
                             assert_eof(&mut socket);
                             if let Some(mut event) = event_socket {
@@ -475,7 +560,7 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                             );
                             let end = read_message(&mut socket, &mut keys);
                             assert_eq!(end.method, "TEARDOWN");
-                            assert_eq!(end.headers["cseq"], "8");
+                            assert_eq!(end.headers["cseq"], seq(8));
                             send_reply(&mut socket, &mut keys, &end, None, "");
                             assert_eof(&mut socket);
                             if let Some(mut event) = event_socket {
@@ -508,7 +593,7 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                         if playback {
                             let volume = read_message(&mut socket, &mut keys);
                             assert_eq!(volume.method, "SET_PARAMETER");
-                            assert_eq!(volume.headers["cseq"], "8");
+                            assert_eq!(volume.headers["cseq"], seq(8));
                             assert_eq!(volume.headers["content-type"], "text/parameters");
                             assert_eq!(volume.body, b"volume: -40.000000\r\n");
                             if case == Case::VolumeReject {
@@ -523,7 +608,7 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                             if case == Case::SyncTimeout {
                                 let end = read_message(&mut socket, &mut keys);
                                 assert_eq!(end.method, "TEARDOWN");
-                                assert_eq!(end.headers["cseq"], "9");
+                                assert_eq!(end.headers["cseq"], seq(9));
                                 let mut b = [0; 2048];
                                 assert!(data.recv_from(&mut b).is_err());
                                 send_reply(&mut socket, &mut keys, &end, None, "");
@@ -580,7 +665,7 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                                     } else {
                                         let end = read_message(&mut socket, &mut keys);
                                         assert_eq!(end.method, "TEARDOWN");
-                                        assert_eq!(end.headers["cseq"], "9");
+                                        assert_eq!(end.headers["cseq"], seq(9));
                                         send_reply(&mut socket, &mut keys, &end, None, "");
                                         assert_eof(&mut socket);
                                     }
@@ -642,7 +727,7 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
                         }
                     }
                     let end = read_message(&mut socket, &mut keys);
-                    assert_eq!(end.headers["cseq"], next_seq.to_string());
+                    assert_eq!(end.headers["cseq"], seq(next_seq));
                     end
                 };
                 assert_eq!(teardown.method, "TEARDOWN");
@@ -677,7 +762,16 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
     });
     let mut session = Session::new();
     session.cancel = cancel;
-    if let Some(playback) = playback {
+    if persistent {
+        let c = stua_credential(&store, &selected).unwrap();
+        session
+            .start_stua_stream_selected(
+                || Wire::connect_stua_operation(&config, &selected, &observed, &c),
+                &c,
+                playback.unwrap(),
+            )
+            .unwrap();
+    } else if let Some(playback) = playback {
         session
             .start_owntone_stream_selected(
                 || Wire::connect(&config, RECORD_RECEIVER_ID, &selected, &observed),
@@ -737,11 +831,18 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
     } else {
         assert_eq!(
             session.packets_sent,
-            if playback == Some(true) && (case.success() || case == Case::TeardownReject) {
+            if playback == Some(true)
+                && (case.success()
+                    || matches!(
+                        case,
+                        Case::TeardownReject | Case::TeardownTimeout | Case::TeardownEof
+                    ))
+            {
                 376
             } else {
                 0
-            }
+            },
+            "{case:?}: {output}"
         );
     }
     assert_eq!(session.resends, 0);
@@ -758,6 +859,13 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
     session.stop().unwrap();
     server.join().unwrap();
     assert_eq!(state_files(&dir.path().join("receiver-state")), before);
+    if let Some(other) = other_listener {
+        assert_eq!(store.selection().unwrap().unwrap().id, ID);
+        assert!(
+            other.accept().is_err(),
+            "Stua must never contact the default receiver"
+        );
+    }
     for addr in local_media.lock().unwrap().iter() {
         UdpSocket::bind(addr).unwrap();
     }
@@ -900,4 +1008,54 @@ fn new_modes_preserve_event_health_early_revocation_and_precontact_capability_ga
     }
     // Stream-only negotiation reports timing count without demanding a probe.
     record_case_mode(Case::NoTiming, Some(false));
+}
+
+#[test]
+fn stua_persistent_setup_reuses_credentials_and_shared_engine_without_media_or_volume() {
+    authenticated_case(Case::Good, Some(false), true);
+}
+#[test]
+fn stua_persistent_playback_decrypts_and_decodes_fixed_faded_tone() {
+    authenticated_case(Case::Good, Some(true), true);
+}
+#[test]
+fn stua_persistent_failures_teardown_and_release_without_retry() {
+    for playback in [false, true] {
+        for case in [
+            Case::Ptp,
+            Case::StreamReject,
+            Case::StreamMalformed,
+            Case::EventRefused,
+            Case::TeardownReject,
+            Case::TeardownTimeout,
+            Case::CancelStream,
+            Case::RevokeStream,
+        ] {
+            authenticated_case(case, Some(playback), true);
+        }
+    }
+}
+
+fn diagnostic_auth_mock(
+    persistent: bool,
+    mut socket: TcpStream,
+    continuation: impl FnOnce(TcpStream, &[u8]),
+) {
+    if persistent {
+        let mut shared = [0; 32];
+        let (socket, _) = verify_mock_core(socket, Fault::None, PI, |key| shared = *key).unwrap();
+        continuation(socket, &shared);
+    } else {
+        owntone_info(&mut socket, 200, &info_body(0));
+        setup_mock_transport(
+            socket,
+            Fault::None,
+            Method::Transient,
+            "3939",
+            PI,
+            false,
+            true,
+            |socket, shared| continuation(socket, shared.as_ref()),
+        );
+    }
 }

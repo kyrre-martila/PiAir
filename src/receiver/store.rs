@@ -23,6 +23,17 @@ pub struct Credential {
 }
 
 impl Credential {
+    /// Version 2 is exclusively the signed persistent HAP enrollment result.
+    /// PIN delivery is not stored, and is irrelevant to existing-key pair-verify.
+    pub(super) fn authentication_method(&self, id: &str) -> Result<super::compatibility::Method> {
+        self.validate(id)?;
+        Ok(super::compatibility::Method::StoredHap)
+    }
+    pub(super) fn fingerprint(&self) -> Result<Zeroizing<[u8; 64]>> {
+        let serialized = Zeroizing::new(toml::to_string(self)?);
+        Ok(super::crypto::hash(&[serialized.as_bytes()]))
+    }
+
     pub fn validate(&self, id: &str) -> Result<()> {
         super::exact_id(id)?;
         ensure!(
@@ -44,6 +55,10 @@ impl Credential {
         ensure!(!key.is_weak(), "weak credential public key");
         Ok(())
     }
+}
+pub(super) struct CredentialSnapshot {
+    pub value: Credential,
+    pub fingerprint: Zeroizing<[u8; 64]>,
 }
 pub struct Store {
     root: PathBuf,
@@ -156,13 +171,27 @@ impl Store {
         Ok((identity.client, identity.remote))
     }
     pub fn credential(&self, id: &str) -> Result<Option<Credential>> {
+        Ok(self.credential_snapshot(id)?.map(|snapshot| snapshot.value))
+    }
+    /// Parse and fingerprint the same protected read, avoiding a validation/snapshot race.
+    pub(super) fn credential_snapshot(&self, id: &str) -> Result<Option<CredentialSnapshot>> {
         let Some(text) = self.read(&self.path(id)?)? else {
             return Ok(None);
         };
         let c: Credential = toml::from_str(&text)
             .map_err(|_| anyhow::anyhow!("corrupt credential; remove explicitly with unpair"))?;
         c.validate(id)?;
-        Ok(Some(c))
+        Ok(Some(CredentialSnapshot {
+            value: c,
+            fingerprint: super::crypto::hash(&[text.as_bytes()]),
+        }))
+    }
+    /// Hot-path revocation check: validate filesystem protections and exact bytes,
+    /// without repeatedly parsing TOML/Ed25519 keys on the audio sample timeline.
+    pub(super) fn credential_fingerprint(&self, id: &str) -> Result<Option<Zeroizing<[u8; 64]>>> {
+        Ok(self
+            .read(&self.path(id)?)?
+            .map(|text| super::crypto::hash(&[text.as_bytes()])))
     }
     pub fn save(&self, c: &Credential) -> Result<()> {
         c.validate(&c.receiver_id)?;

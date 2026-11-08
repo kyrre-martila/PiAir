@@ -465,3 +465,49 @@ fn stream_diagnostics_reject_other_ids_without_state_or_contact() {
         assert!(!dir.path().join("receiver-state").exists());
     }
 }
+
+#[test]
+fn stua_diagnostics_require_exact_id_and_fixed_modes_without_contact() {
+    for mode in ["stua-stream-setup-check", "stua-playback-check"] {
+        assert_eq!(run(&[mode]).status.code(), Some(2));
+        for id in [
+            "Stua",
+            "device:3ae5c9a302ad",
+            "device:02D899C1833F",
+            "device:02d899c1833f:7000",
+        ] {
+            let output = run(&[mode, id]);
+            assert_eq!(output.status.code(), Some(1));
+            assert!(String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("requires device:02d899c1833f"));
+        }
+        for flag in [
+            "--volume-db=-40",
+            "--seconds=1",
+            "--experimental-owntone-transient",
+            "--setup-profile=a",
+            "--playback-check",
+        ] {
+            assert_eq!(
+                run(&[mode, "device:02d899c1833f", flag]).status.code(),
+                Some(2)
+            );
+        }
+        let output = run(&[mode, "device:02d899c1833f"]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("not approved"));
+    }
+}
+
+#[test]
+fn stored_hap_operation_method_cannot_be_selected_for_enrollment() {
+    assert_eq!(
+        run(&["select", "device:02d899c1833f", "--method", "stored-hap"])
+            .status
+            .code(),
+        Some(2)
+    );
+}
