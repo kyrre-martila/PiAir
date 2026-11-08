@@ -1791,3 +1791,6 @@ fn own_setup_revocation(after_setup: bool) {
         UdpSocket::bind(("127.0.0.1", port_rx.recv().unwrap())).unwrap();
     }
 }
+
+#[path = "record_tests.rs"]
+mod record_tests;

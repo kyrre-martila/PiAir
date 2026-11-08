@@ -53,6 +53,7 @@ pub struct Wire {
     // Scoped by Session to the initial SETUP diagnostic only.
     pub(super) setup_response_wait: Option<(Duration, Arc<AtomicBool>)>,
     polling_response: bool,
+    pub(super) diagnostic_cancel: Option<Arc<AtomicBool>>,
     deadline: Instant,
     budget: Duration,
     seq: u32,
@@ -163,6 +164,7 @@ impl Wire {
             socket,
             setup_response_wait: None,
             polling_response: false,
+            diagnostic_cancel: None,
             deadline: Instant::now() + budget,
             budget,
             seq: 0,
@@ -240,16 +242,17 @@ impl Wire {
     fn read_raw(&mut self, bytes: &mut [u8]) -> Result<()> {
         let mut offset = 0;
         while offset < bytes.len() {
-            if self.polling_response {
+            if let Some(cancel) = &self.diagnostic_cancel {
+                self.reauthorize()?;
                 ensure!(
-                    !self
-                        .setup_response_wait
-                        .as_ref()
-                        .unwrap()
-                        .1
-                        .load(Ordering::Relaxed),
+                    self.auth_phase == "encrypted TEARDOWN" || !cancel.load(Ordering::Relaxed),
                     "diagnostic interrupted"
                 );
+            }
+            if self.polling_response {
+                if let Some((_, cancel)) = &self.setup_response_wait {
+                    ensure!(!cancel.load(Ordering::Relaxed), "diagnostic interrupted");
+                }
             }
             self.timeout().inspect_err(|_| {
                 tracing::debug!(target: "piair::auth", phase = self.auth_phase, "connection deadline expired");
@@ -317,6 +320,13 @@ impl Wire {
     fn write_raw(&mut self, bytes: &[u8]) -> Result<()> {
         let mut offset = 0;
         while offset < bytes.len() {
+            if let Some(cancel) = &self.diagnostic_cancel {
+                self.reauthorize()?;
+                ensure!(
+                    self.auth_phase == "encrypted TEARDOWN" || !cancel.load(Ordering::Relaxed),
+                    "diagnostic interrupted"
+                );
+            }
             self.timeout()?;
             let n = self.socket.write(&bytes[offset..]).inspect_err(|error| {
                 tracing::debug!(target: "piair::auth", phase = self.auth_phase, outcome = ?error.kind(), "connection write failed");
@@ -509,6 +519,10 @@ impl Wire {
                     "SETUP response wait used for another method"
                 );
                 self.deadline = Instant::now() + *budget;
+                self.polling_response = true;
+            }
+            if self.diagnostic_cancel.is_some() && self.setup_response_wait.is_none() {
+                self.deadline = Instant::now() + self.budget.min(Duration::from_secs(3));
                 self.polling_response = true;
             }
             let response = self.response().context("response read/validation");
