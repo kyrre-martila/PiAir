@@ -4,13 +4,20 @@ use super::{
     profile::{self, RATE, SPF},
 };
 use crate::audio::alac;
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 use rand::{rngs::OsRng, RngCore};
 use std::{
     collections::VecDeque,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use zeroize::{Zeroize, Zeroizing};
+
+// Sender policy, independent of the receiver's informational RECORD header and
+// of the stream offer's upper bound. OwnTone: output_buffer = start_buffer -
+// AIRPLAY_AUDIO_LATENCY_MS. PiAir keeps its existing two-second total lead.
+pub const PLAYBACK_LEAD_SAMPLES: u32 = 2 * RATE;
+pub const STREAM_LATENCY_SAMPLES: u32 = profile::MIN_LATENCY;
+pub const SYNC_OFFSET_SAMPLES: u32 = PLAYBACK_LEAD_SAMPLES - STREAM_LATENCY_SAMPLES;
 
 pub struct Clock {
     mono: Instant,
@@ -57,12 +64,12 @@ pub fn timing_reply(request: &[u8], recv: u64, send: u64) -> Result<[u8; 32]> {
     out[24..].copy_from_slice(&send.to_be_bytes());
     Ok(out)
 }
-pub fn sync(first: bool, next: u32, latency: u32, ntp: u64) -> [u8; 20] {
+pub fn sync(first: bool, next: u32, ntp: u64) -> [u8; 20] {
     let mut out = [0; 20];
     out[0] = if first { 0x90 } else { 0x80 };
     out[1] = 0xd4;
     out[3] = 7;
-    out[4..8].copy_from_slice(&next.wrapping_sub(latency).to_be_bytes());
+    out[4..8].copy_from_slice(&next.wrapping_sub(SYNC_OFFSET_SAMPLES).to_be_bytes());
     out[8..16].copy_from_slice(&ntp.to_be_bytes());
     out[16..].copy_from_slice(&next.to_be_bytes());
     out
@@ -146,100 +153,71 @@ impl Encoder {
         self.first = true;
     }
 }
-pub fn latency(headers: &std::collections::BTreeMap<String, String>) -> Result<u32> {
+/// RECORD Audio-Latency is diagnostic only, as in OwnTone's response handler.
+/// Parsing is deliberately non-fatal and never logs receiver-supplied text.
+pub fn record_latency(headers: &std::collections::BTreeMap<String, String>) {
     let header = headers.get("audio-latency");
-    let parsed = header.map(|n| {
-        ensure!(
-            !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()),
-            "invalid latency"
-        );
-        n.parse::<u32>().context("invalid latency")
-    });
-    let (value, rejection) = match &parsed {
-        Some(Err(_)) => (None, "malformed unsigned decimal or u32 overflow"),
-        Some(Ok(n)) if *n < profile::MIN_LATENCY => (Some(*n), "below minimum"),
-        Some(Ok(n)) if *n > profile::MAX_LATENCY => (Some(*n), "above maximum"),
-        Some(Ok(n)) => (Some(*n), "none"),
-        None => (None, "none"),
+    let value = header
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|n| n.parse::<u32>().ok());
+    let parse_status = match (header, value) {
+        (None, _) => "absent",
+        (_, Some(_)) => "unsigned decimal",
+        _ => "malformed unsigned decimal or u32 overflow",
     };
-    // Only typed numbers and fixed reasons: never log the supplied header text.
     tracing::debug!(target: "piair::rtsp", phase = "RECORD",
         audio_latency_present = header.is_some(), audio_latency_samples = ?value,
-        validation_min_samples = profile::MIN_LATENCY,
-        validation_max_samples = profile::MAX_LATENCY,
-        fallback_samples = profile::MIN_LATENCY, rejection_reason = rejection,
-        "RECORD receiver latency validation");
-    let n = parsed.transpose()?.unwrap_or(profile::MIN_LATENCY);
-    ensure!(
-        (profile::MIN_LATENCY..=profile::MAX_LATENCY).contains(&n),
-        "receiver latency out of negotiated range"
-    );
-    Ok(n)
+        parse_status, sender_sync_offset_samples = SYNC_OFFSET_SAMPLES,
+        sender_playback_lead_samples = PLAYBACK_LEAD_SAMPLES,
+        "RECORD receiver latency (informational)");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn record_latency_validation_and_diagnostics_are_bounded() {
-        for (input, expected, reason) in [
-            (None, Some(11025), "none"),
-            (Some(""), None, "malformed unsigned decimal or u32 overflow"),
-            (
-                Some("secret-token"),
-                None,
-                "malformed unsigned decimal or u32 overflow",
-            ),
-            (
-                Some("+11025"),
-                None,
-                "malformed unsigned decimal or u32 overflow",
-            ),
-            (
-                Some("-1"),
-                None,
-                "malformed unsigned decimal or u32 overflow",
-            ),
-            (
-                Some("11025.0"),
-                None,
-                "malformed unsigned decimal or u32 overflow",
-            ),
-            (
-                Some("11025 0"),
-                None,
-                "malformed unsigned decimal or u32 overflow",
-            ),
-            (
-                Some("4294967296"),
-                None,
-                "malformed unsigned decimal or u32 overflow",
-            ),
-            (Some("0"), None, "below minimum"),
-            (Some("11024"), None, "below minimum"),
-            (Some("11025"), Some(11025), "none"),
-            (Some("44100"), Some(44100), "none"),
-            (Some("88200"), Some(88200), "none"),
-            (Some("88201"), None, "above maximum"),
-            (Some("4294967295"), None, "above maximum"),
+    fn record_latency_is_informational_and_diagnostics_are_bounded() {
+        for input in [
+            None,
+            Some(""),
+            Some("secret-token"),
+            Some("+11025"),
+            Some("-1"),
+            Some("11025.0"),
+            Some("11025 0"),
+            Some("4294967296"),
+            Some("0"),
+            Some("11024"),
+            Some("11025"),
+            Some("44100"),
+            Some("88200"),
+            Some("88201"),
+            Some("4294967295"),
         ] {
             let mut headers = std::collections::BTreeMap::new();
             headers.insert("authorization".into(), "secret-credential".into());
             if let Some(input) = input {
                 headers.insert("audio-latency".into(), input.into());
             }
-            let emit = || assert_eq!(latency(&headers).ok(), expected);
+            // Actual sync bytes cannot change after observing any RECORD header.
+            let initial = sync(true, 10, 123);
+            let periodic = sync(false, 44162, 123 + (1_u64 << 32));
+            let emit = || {
+                record_latency(&headers);
+                assert_eq!(sync(true, 10, 123), initial);
+                assert_eq!(sync(false, 44162, 123 + (1_u64 << 32)), periodic);
+            };
             assert!(
                 super::super::diagnostics::tests::capture(tracing::Level::INFO, emit).is_empty()
             );
             let output = super::super::diagnostics::tests::capture(tracing::Level::DEBUG, emit);
-            assert!(output.contains(reason), "{output}");
+            assert!(output.contains("informational"), "{output}");
             assert!(
-                output.contains("validation_min_samples\":11025"),
+                output.contains("sender_sync_offset_samples\":77175"),
                 "{output}"
             );
             assert!(
-                output.contains("validation_max_samples\":88200"),
+                output.contains("sender_playback_lead_samples\":88200"),
                 "{output}"
             );
             assert!(
@@ -257,7 +235,71 @@ mod tests {
                     "{output}"
                 );
             }
+            let status = match input {
+                None => "absent",
+                Some(n)
+                    if !n.is_empty()
+                        && n.bytes().all(|b| b.is_ascii_digit())
+                        && n.parse::<u32>().is_ok() =>
+                {
+                    "unsigned decimal"
+                }
+                _ => "malformed unsigned decimal or u32 overflow",
+            };
+            assert!(
+                output.contains(&format!("parse_status\":\"{status}\"")),
+                "{output}"
+            );
             assert!(!output.contains("secret"), "{output}");
+        }
+    }
+    #[test]
+    fn sender_timeline_has_one_offset_and_bounded_lead_and_drain() {
+        assert_eq!(SYNC_OFFSET_SAMPLES, 77175);
+        assert_eq!(STREAM_LATENCY_SAMPLES, 11025);
+        assert_eq!(
+            SYNC_OFFSET_SAMPLES + STREAM_LATENCY_SAMPLES,
+            PLAYBACK_LEAD_SAMPLES
+        );
+        let mono = Instant::now();
+        let clock = Clock {
+            mono,
+            ntp: 0xffff_fffe_8000_0000,
+        };
+        let origin = u32::MAX - 10;
+        // Initial sync and periodic syncs, including RTP and NTP era wrap.
+        // Periodic scheduling rounds up to a packet boundary just as Session does.
+        let interval = u64::from(RATE).div_ceil(SPF as u64) * SPF as u64;
+        for sent in [0, interval, 2 * interval, 3 * interval] {
+            let next = origin.wrapping_add(sent as u32);
+            let elapsed = sample_time(sent);
+            let ntp = clock.instant(mono + elapsed);
+            let packet = sync(sent == 0, next, ntp);
+            assert_eq!(packet[0], if sent == 0 { 0x90 } else { 0x80 });
+            assert_eq!(
+                u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+                origin.wrapping_sub(77175).wrapping_add(sent as u32)
+            );
+            assert_eq!(u32::from_be_bytes(packet[16..].try_into().unwrap()), next);
+            assert_eq!(u64::from_be_bytes(packet[8..16].try_into().unwrap()), ntp);
+            let ticks = ntp.wrapping_sub(clock.ntp);
+            let expected_ticks = ((u128::from(sent) << 32) / u128::from(RATE)) as u64;
+            // Nanosecond and NTP fixed-point truncation: < 6 NTP ticks.
+            assert!(expected_ticks.abs_diff(ticks) <= 5);
+            assert_eq!(next.wrapping_sub(origin), sent as u32);
+        }
+        for seconds in 1..=3_u64 {
+            let signal = seconds * u64::from(RATE);
+            let total = signal + u64::from(PLAYBACK_LEAD_SAMPLES);
+            let transmitted = total.div_ceil(SPF as u64) * SPF as u64;
+            assert!(transmitted >= total && transmitted - total < SPF as u64);
+            assert_eq!(sample_time(total), Duration::from_secs(seconds + 2));
+            // The signal's playback deadline is covered by the silence tail.
+            assert_eq!(
+                total - signal,
+                u64::from(SYNC_OFFSET_SAMPLES + STREAM_LATENCY_SAMPLES)
+            );
+            assert!(sample_time(transmitted) < Duration::from_millis((seconds + 2) * 1000 + 8));
         }
     }
     fn fixture_encoder() -> Encoder {
@@ -322,9 +364,12 @@ mod tests {
         assert!(timing_reply(&q[..31], 9, 10).is_err());
         q[1] = 0xd3;
         assert!(timing_reply(&q, 9, 10).is_err());
-        let s = sync(true, 10, 20, 123);
+        let s = sync(true, 10, 123);
         assert_eq!(&s[..4], &[0x90, 0xd4, 0, 7]);
-        assert_eq!(&s[4..8], &10_u32.wrapping_sub(20).to_be_bytes());
+        assert_eq!(
+            &s[4..8],
+            &10_u32.wrapping_sub(SYNC_OFFSET_SAMPLES).to_be_bytes()
+        );
         assert_eq!(&s[8..16], &123_u64.to_be_bytes());
         assert_eq!(&s[16..], &10_u32.to_be_bytes());
         assert_eq!(sample_time(u64::from(RATE)), Duration::from_secs(1));

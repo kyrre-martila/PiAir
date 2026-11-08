@@ -99,10 +99,10 @@ Startup uses production encoders/decoders and this fixed sequence:
    negotiation retains them until best-effort TEARDOWN and joined cleanup.
    Setup-only A retains deferred timing, B/C retain early timing and C's
    pre-verify info order. See [playback lifecycle migration](REALTIME_NTP_LIFECYCLE.md).
-4. Send RECORD and validate any Audio-Latency header within 11025..88200 samples.
-   Absent latency uses the sender default 11025; zero is rejected. These are
-   current sender policy bounds, not established protocol requirements; RECORD
-   precedes the stream offer. See [latency evidence](RECORD_LATENCY.md).
+4. Send RECORD; treat Audio-Latency as informational, including zero, absent,
+   malformed and out-of-offer values. Debug diagnostics expose only typed numbers
+   and fixed parse status. Sender timing is independent of this header.
+   See [latency evidence and sender model](RECORD_LATENCY.md).
 5. SETUP one stream: type=96, audioFormat=0x40000, ct=2, spf=352, sr=44100,
    isMedia=true, latencyMin=11025, latencyMax=88200, local controlPort, independent
    shk, session streamConnectionID, supportsDynamicStreamID=false. Validate one
@@ -157,7 +157,7 @@ The resend cache holds at most 256 authenticated datagrams (~372 KiB). The older
 A wall-clock NTP epoch is sampled once and advanced by monotonic elapsed time,
 avoiding later wall-clock steps. Timing d2 queries receive d3 replies with echoed
 origin and measured receive/transmit timestamps. Only the authenticated peer's
-negotiated port can obtain a reply. NTP traffic is protocol-defined plaintext;
+IP can obtain a reply, sent to the timing probe's source port. NTP traffic is protocol-defined plaintext;
 there is no plaintext control/media downgrade. At least one timing exchange is
 required before READY; silence over five seconds fails liveness.
 
@@ -171,8 +171,10 @@ or adaptive resampler here, and no claim of correcting an independent ADC clock.
 NTP sync d4 packets go to the negotiated control port initially and about once
 per sample second. They map rendering RTP position, NTP time and next RTP sample.
 As in OwnTone's NTP model, a two-second total output lead is represented by a
-sync gap of 88200 minus the accepted receiver latency; this profile offers
-11025 minimum and 88200 maximum. The diagnostic sends two seconds of silence
+fixed sender sync gap of 77175 samples (1750 ms), plus the separately offered
+11025-sample stream component. The offer maximum remains 88200. RECORD headers
+never change this calculation. OwnTone defaults to a different total buffer
+(2250 ms); see [the complete calculation](RECORD_LATENCY.md). The diagnostic sends two seconds of silence
 following the signal to drain latency before explicit stop. Exact physical
 render latency remains hardware dependent. PTP d7 and buffered rate anchors are
 not mixed into this NTP profile.

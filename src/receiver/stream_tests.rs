@@ -99,6 +99,7 @@ fn timing_probe(destination: u16) {
 #[derive(Clone, Copy)]
 enum Mode {
     Good,
+    RecordLatency(Option<&'static str>),
     NoRemoteTiming,
     BadCodec,
     UnsupportedTiming,
@@ -332,7 +333,12 @@ fn receiver_authenticated(
         &mut keys,
         &record,
         None,
-        "Audio-Latency: 11025\r\n",
+        &match mode {
+            Mode::Good | Mode::BadPort => "Audio-Latency: 0\r\n".into(),
+            Mode::RecordLatency(None) => String::new(),
+            Mode::RecordLatency(Some(value)) => format!("Audio-Latency: {value}\r\n"),
+            _ => "Audio-Latency: 11025\r\n".into(),
+        },
     );
     let stream = read_message(&mut socket, &mut keys);
     assert_eq!(stream.method, "SETUP");
@@ -622,6 +628,32 @@ fn full_authenticated_realtime_session_encodes_encrypts_synchronizes_and_tears_d
         assert_eq!(session.state(), State::Disconnected);
         server.join().unwrap();
         assert_eq!(seen.load(Ordering::Relaxed), sent);
+    }
+}
+#[test]
+fn informational_record_latency_always_proceeds_to_strict_stream_setup() {
+    for value in [
+        None,
+        Some("0"),
+        Some("11025"),
+        Some("88200"),
+        Some("1"),
+        Some("88201"),
+        Some("4294967295"),
+        Some("4294967296"),
+        Some("secret-token"),
+        Some("-1"),
+    ] {
+        let seen = Arc::new(AtomicU64::new(0));
+        let count = seen.clone();
+        let (wire, server) = local_mock(move |s| receiver(s, Mode::RecordLatency(value), count));
+        let mut session = Session::new();
+        session.start(|| Ok(wire), &credential()).unwrap();
+        session.negotiate_realtime().unwrap();
+        assert_eq!(session.state(), State::Ready);
+        session.stop().unwrap();
+        server.join().unwrap();
+        assert_eq!(seen.load(Ordering::Relaxed), 0);
     }
 }
 #[test]
