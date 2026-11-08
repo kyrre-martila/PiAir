@@ -19,11 +19,11 @@ No physical receiver was contacted for this audit.
 | Persistent PIN-display | HKP 3 PIN-start, method 0 M1–M6; verify SRP proof, M6 AEAD and signed identity before saving credentials | Apple TV enrollment reported successful in [PR #21 evidence](INITIAL_SETUP_DIAGNOSTICS.md). Requires supported PIN display or equivalent independently verified PIN delivery. Earlier HomePod PIN-start 403 does not establish incompatibility for every HomePod/firmware. |
 | Existing HAP setup code | Same persistent enrollment without PIN-start; genuine independently obtained `XXX-XX-XXX` code required | Mock-tested; no successful HomePod enrollment or usable code documented. AirPlay passwords are different and password-protected authentication is unsupported. Never invent codes. |
 | Legacy transient | Explicit `transient` selection; HTTP HKP 4 M1–M4, verified receiver SRP proof, same-socket control upgrade; no M5/M6 or pair-verify | Earlier HomePod M1 403; no successful legacy profile hardware result established. |
-| OwnTone-reference transient | Explicit authenticate-only flag; RTSP `/info`, policy validation, HKP 4 M1–M4, verified SRP proof and same-socket encryption | Later HomePod proof/channel success reported; OPTIONS initially encrypted 403, then reported successful after #20. No confirmed audible playback. |
+| OwnTone-reference transient | Explicit authenticate flag or [setup-only opt-in](OWNTONE_TRANSIENT_SETUP_CHECK.md); RTSP `/info`, policy validation, HKP 4 M1–M4, verified SRP proof and same-socket encryption | Later HomePod proof/channel success reported; OPTIONS initially encrypted 403, then reported successful after #20. No confirmed audible playback. |
 | pyatv diagnostic | Explicit authenticate-only flag; HTTP HKP 4 PIN-start preamble and pyatv M1/M3 envelope/order; still verifies M4 proof | Earlier preamble 200 followed by M1 403/400; no successful PiAir authentication documented for this profile. |
 | Persistent pair-verify | Stored signed receiver ID/key, fresh X25519, verified signature/AEAD, mutual exchange M1–M4; no credential replacement | Apple TV pair-verify success reported in PR #21 evidence. Not proof of HomePod persistent compatibility. |
 | Encrypted control check | One encrypted OPTIONS on authenticated socket; validate AEAD/framing, status, matching CSeq and response shape | HomePod encrypted 403 proves a channel but failed OPTIONS acceptance. Later post-#20 success is operator-reported, not a new workspace reproduction. |
-| Stream-test | Persistent pair-verify or explicitly selected legacy transient; separate GET/info, SETUP/RECORD and media negotiation | OwnTone/pyatv authenticate flags are unavailable here. Later Apple TV transport observations do not establish HomePod playback or audible output. |
+| Stream-test | Persistent pair-verify or explicitly selected legacy transient; separate GET/info, SETUP/RECORD and media negotiation | OwnTone is available only with exact ID + `--setup-check`; pyatv remains unavailable here. Later Apple TV transport observations do not establish HomePod playback or audible output. |
 
 `Capabilities::decide` checks the explicitly requested method, never searches for
 another. Persistent paths require bit 46; bit 51 alone is insufficient but is not
@@ -67,7 +67,16 @@ enrollment prerequisite, Home authorization/password/MFi requirements where
 applicable, subsequent playback negotiation, and physically confirmed audible
 output. No general HomePod compatibility or speculative protocol fix follows.
 
-## Next Raspberry Pi diagnostic: authentication and control only
+## Current authorized follow-up: initial SETUP only
+
+Operator confirmation on 2026-11-08 establishes GET `/info`, M1/M2, M3/M4 and
+encrypted OPTIONS 200 with validated CSeq 4 for the HomePod above at
+192.168.1.33:7000. No audio was sent. See the
+[PR #33 single-attempt setup-check procedure](OWNTONE_TRANSIENT_SETUP_CHECK.md).
+No physical SETUP success or audible playback is established. The earlier
+procedure below records the preceding authentication/control round.
+
+## Earlier Raspberry Pi diagnostic: authentication and control only
 
 1. Obtain explicit owner/operator authorization for **only** Even-Olai HomePod,
    `device:3ae5c9a302ad`, and this single OwnTone-reference authentication/control

@@ -304,10 +304,28 @@ fn pyatv_preamble_option_is_authenticate_only_and_disabled_by_default() {
 }
 
 #[test]
-fn owntone_experiment_is_authentication_only_and_mutually_exclusive() {
+fn owntone_experiment_is_authentication_or_explicit_setup_only_and_mutually_exclusive() {
     let flag = "--experimental-owntone-transient";
     let help = run(&["authenticate", "--help"]);
     assert!(String::from_utf8(help.stdout).unwrap().contains(flag));
+    let help = run(&["stream-test", "--help"]);
+    assert!(String::from_utf8(help.stdout).unwrap().contains(flag));
+    let allowed = run(&["stream-test", "device:aabbccddeeff", "--setup-check", flag]);
+    assert_eq!(allowed.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&allowed.stderr).contains("not approved"));
+    for extra in [
+        vec![],
+        vec!["--setup-profile", "a"],
+        vec!["--setup-profile", "b"],
+        vec!["--setup-profile", "c"],
+    ] {
+        let mut args = vec!["stream-test", "--setup-check", flag];
+        if !extra.is_empty() {
+            args.insert(1, "device:aabbccddeeff");
+        }
+        args.extend(extra);
+        assert_eq!(run(&args).status.code(), Some(2));
+    }
     for command in ["pair", "stream-test", "select"] {
         assert_eq!(
             run(&[command, "device:aabbccddeeff", flag]).status.code(),

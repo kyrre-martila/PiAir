@@ -9,7 +9,9 @@ HomePod transient authentication/control success is operator-reported for the te
 implementation; no OwnTone code, architecture, identity or credentials are used.
 The explicit option is `--experimental-owntone-transient`. Default CLI/config,
 persistent HAP enrollment/pair-verify, and the labeled pyatv diagnostic remain
-unchanged. This profile is restricted to `authenticate`, never `stream-test`.
+unchanged. This profile is available through `authenticate` and the explicitly opt-in
+[initial SETUP-only diagnostic](OWNTONE_TRANSIENT_SETUP_CHECK.md). Normal playback
+never uses this experimental profile.
 
 ## Local identity storage
 

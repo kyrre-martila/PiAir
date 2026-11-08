@@ -66,6 +66,9 @@ pub enum Command {
         /// Validate initial SETUP and tear down before RECORD or audio transmission.
         #[arg(long)]
         setup_check: bool,
+        /// OwnTone-reference transient authentication for initial SETUP only; no fallback.
+        #[arg(long, requires_all = ["setup_check", "receiver_id"], conflicts_with = "setup_profile")]
+        experimental_owntone_transient: bool,
         /// Diagnostic only: wait up to 15 seconds total for initial SETUP.
         #[arg(long, requires = "setup_check", value_parser = clap::value_parser!(u64).range(15..=15))]
         setup_timeout_seconds: Option<u64>,
@@ -214,5 +217,88 @@ mod interactive_tests {
         ] {
             assert!(Cli::try_parse_from(["piair", "stream-test", "--volume-db", v]).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod owntone_setup_tests {
+    use super::*;
+    #[test]
+    fn own_setup_requires_exact_id_and_setup_only_without_other_profiles() {
+        let base = [
+            "piair",
+            "stream-test",
+            "device:aabbccddeeff",
+            "--setup-check",
+            "--experimental-owntone-transient",
+        ];
+        let cli = Cli::try_parse_from(base).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::StreamTest {
+                experimental_owntone_transient: true,
+                setup_check: true,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--setup-timeout-seconds", "15"])).is_ok()
+        );
+        for profile in ["a", "b", "c"] {
+            assert!(
+                Cli::try_parse_from(base.into_iter().chain(["--setup-profile", profile])).is_err()
+            );
+        }
+        for args in [
+            vec![
+                "piair",
+                "stream-test",
+                "device:aabbccddeeff",
+                "--experimental-owntone-transient",
+            ],
+            vec![
+                "piair",
+                "stream-test",
+                "--setup-check",
+                "--experimental-owntone-transient",
+            ],
+            vec![
+                "piair",
+                "stream-test",
+                "device:aabbccddeeff",
+                "--setup-check",
+                "--experimental-owntone-transient",
+                "--experimental-pyatv-transient-preamble",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        for args in [
+            vec!["piair", "stream-test"],
+            vec!["piair", "stream-test", "device:aabbccddeeff"],
+            vec![
+                "piair",
+                "stream-test",
+                "device:aabbccddeeff",
+                "--setup-check",
+            ],
+        ] {
+            assert!(matches!(
+                Cli::try_parse_from(args).unwrap().command,
+                Command::StreamTest {
+                    experimental_owntone_transient: false,
+                    ..
+                }
+            ));
+        }
+        // The existing authentication-only command keeps its separate scope.
+        assert!(Cli::try_parse_from([
+            "piair",
+            "authenticate",
+            "device:aabbccddeeff",
+            "--experimental-owntone-transient",
+            "--control-check"
+        ])
+        .is_ok());
     }
 }

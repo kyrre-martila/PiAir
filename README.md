@@ -213,6 +213,27 @@ fail explicitly. No hardware testing was performed. See [session behavior,
 bounds and limitations](docs/AIRPLAY_SESSION.md).
 
 For an initial SETUP check without RECORD or audio, use `stream-test --setup-check`.
+
+For one explicitly authorized HomePod transient diagnostic, the new opt-in is:
+
+```sh
+CONFIG=/absolute/path/to/existing/piair.toml
+./target/release/piair --config "$CONFIG" -v stream-test device:3ae5c9a302ad --setup-check --experimental-owntone-transient
+```
+
+Use a separate checkout/binary and the existing configuration and receiver-state.
+It requires this exact receiver to be selected as transient, terminal confirmation,
+and unchanged allowlist/identity/endpoint checks. Do not contact Apple TV, change
+production services, or replace deployed binaries. Rejects playback, persistent
+selection and `--setup-profile` combinations, with no fallback. Read the
+[exact Raspberry Pi build, authorization and single-attempt procedure](docs/OWNTONE_TRANSIENT_SETUP_CHECK.md)
+before running. Operator evidence dated 2026-11-08 confirms authentication and
+encrypted OPTIONS on Even-Olai HomePod (192.168.1.33:7000, AudioAccessory5,1,
+firmware 27.2); **initial SETUP and audible playback remain unverified**.
+Successful SETUP validates the response and ports, then requires acknowledged
+TEARDOWN; it sends no RECORD, stream SETUP, audio or volume command. Transient
+SRP does not establish persistent receiver identity.
+
 The explicit `--setup-profile a|b|c` compares the existing lifecycle, early NTP
 readiness, and early NTP plus OwnTone-style pre-verify `/info`. Defaults remain
 unchanged. See [profile differences, tests and exact Raspberry Pi commands with
@@ -225,8 +246,9 @@ capability, not proof that MFi is mandatory. Unexpected MFi exchange fields fail
 No method is inferred from model/name and no fallback occurs. Explicit transient
 SRP authentication is implemented without persistent credentials or durable
 receiver identity verification. See [transient flow, trust model and verification](docs/TRANSIENT_AUTHENTICATION.md).
-No Apple TV/HomePod hardware/firmware is verified, and a usable HomePod HAP setup
-code is not assumed. See the [compatibility matrix and evidence ledger](docs/PAIRING.md#compatibility-matrix).
+General Apple TV/HomePod playback compatibility remains unverified; the limited
+HomePod authentication/control evidence above does not establish it. A usable
+HomePod HAP setup code is not assumed. See the [compatibility matrix and evidence ledger](docs/PAIRING.md#compatibility-matrix).
 Mock success proves the implemented protocol path, not hardware playback.
 
 Credentials live separately in `receiver-state/` next to config, with owned 0700
@@ -317,7 +339,8 @@ methods fail without fallback. Already-paired receivers return without connectio
 or credential replacement. Pairing saves cryptographically verified credentials;
 authentication verifies a new connection. Local pairing is not current
 authentication or playback readiness. Experimental authentication flags remain
-available only through the explicit advanced `authenticate` command.
+available through explicit advanced `authenticate` commands, plus the narrowly scoped
+OwnTone transient setup-check above.
 
 Omitting the stream-test ID opens a numbered chooser; no first-device default.
 A new selection requires an explicit method choice; receiver, method and endpoint
