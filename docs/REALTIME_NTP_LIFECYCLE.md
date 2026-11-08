@@ -1,5 +1,10 @@
 # Realtime playback NTP lifecycle (PR #26)
 
+The explicit OwnTone transient setup-only opt-in now starts its existing NTP
+responder before initial SETUP, retaining it through TEARDOWN/cleanup. This is
+separate from legacy A/B/C and playback; their lifecycle remains unchanged.
+See [the pinned comparison](OWNTONE_SETUP_TIMING_COMPARISON.md).
+
 Historical implementation record: PR #29 supersedes the event-traffic READY gate
 and its earlier uncertainty below; see [EVENT_LIFECYCLE.md](EVENT_LIFECYCLE.md).
 
