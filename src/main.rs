@@ -64,10 +64,7 @@ fn run_with_discovery(
             setup_profile,
         } => receiver::stream_test(
             &loaded,
-            &match receiver_id {
-                Some(id) => id,
-                None => receiver::interactive::choose_for_stream(&loaded)?,
-            },
+            receiver_id.as_deref(),
             seconds,
             volume_db,
             setup_check,

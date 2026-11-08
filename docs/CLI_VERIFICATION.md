@@ -68,9 +68,13 @@ because packets were sent.
 
 Cancellation checks: enter `q`, EOF (Ctrl+D) or Ctrl+C at a chooser; enter an
 empty line, `n`, `no` or another invalid answer at confirmation. Expect a failure
-exit status and no receiver contact. A selection may have been saved before a
-later cancellation, but credentials must not be created or replaced. An existing
-pairing must remain intact. No `--yes` bypass exists.
+exit status and no receiver contact. Receiver and method choices are provisional:
+cancellation must leave selection, pinned endpoints, credentials and the allowlist
+unchanged. Final y/yes confirmation authorizes saving the selection immediately
+before contact, after local validation. If the subsequent connection, authentication
+or playback fails, that explicitly authorized selection remains saved; no stale
+selection is restored. A concurrent selection change causes an explicit failure
+instead of overwriting it. An existing pairing must remain intact. No `--yes` bypass exists.
 
 Illustrative sessions (not hardware results):
 
@@ -84,13 +88,13 @@ Select receiver (or q to cancel): 1
 Receiver: "Living Room"
 Device ID: device:aabbccddeeff
 Address: {192.168.1.20}:7000
-Choose the persistent pairing method explicitly: 1. PIN displayed by receiver; 2. Existing HAP setup code. No protocol fallback.
+Choose an explicit method: 1. PIN-display; 2. Existing HAP setup code; no fallback. Selection is provisional until final confirmation.
 Select receiver (or q to cancel): 1
-Selected device:aabbccddeeff; endpoint and pairing ID pinned. No connection or playback started.
 Receiver: "Living Room"
 Device ID: device:aabbccddeeff
 Address: {192.168.1.20}:7000
 Operation: Pair and save verified credentials (no audio).
+Confirming saves device:aabbccddeeff with method PinDisplay and its pinned endpoint as the active receiver selection. It remains selected if the subsequent operation fails.
 Continue? [y/N]: n
 [receiver operation cancelled; no pairing performed]
 

@@ -305,8 +305,13 @@ authentication or playback readiness. Experimental authentication flags remain
 available only through the explicit advanced `authenticate` command.
 
 Omitting the stream-test ID opens a numbered chooser; no first-device default.
-A new selection requires an explicit method choice; persistent methods require
-stored credentials before connection. Transient SRP is an explicit choice with
+A new selection requires an explicit method choice; receiver, method and endpoint
+remain provisional until the final y/yes confirmation. Cancellation preserves
+existing selection, credentials and allowlist. After confirmation and revalidation,
+selection is saved immediately before receiver contact. A later operation failure
+leaves that authorized selection in place; no stale selection is restored.
+Concurrent selection changes cause an explicit failure instead of being overwritten.
+Persistent methods require stored credentials before connection. Transient SRP is an explicit choice with
 no persistent identity verification. Before connecting, existing allowlist,
 endpoint, capability and credential checks still apply. Explicit receiver IDs
 and advanced `select`, `pair`, `authenticate`, `unpair`, `--setup-check`,

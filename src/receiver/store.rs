@@ -183,8 +183,29 @@ impl Store {
             })
             .transpose()
     }
+    // Serialize all application selection writers across the compare and atomic rename.
+    // Lock the private directory, so cancellation creates no lock/state artifacts.
+    fn selection_lock(&self) -> Result<File> {
+        self.directory(true)?;
+        let lock = File::open(&self.root)?;
+        lock.try_lock()
+            .context("receiver selection is being changed; retry explicitly")?;
+        Ok(lock)
+    }
     pub fn select(&self, s: &Selection) -> Result<()> {
+        let _lock = self.selection_lock()?;
         self.write(&self.root.join("selected.toml"), &toml::to_string(s)?, true)
+    }
+    pub fn select_if_unchanged(&self, s: &Selection, expected: Option<&Selection>) -> Result<()> {
+        let _lock = self.selection_lock()?;
+        ensure!(
+            self.selection()?.as_ref() == expected,
+            "receiver selection changed during confirmation; review and retry explicitly"
+        );
+        if expected != Some(s) {
+            self.write(&self.root.join("selected.toml"), &toml::to_string(s)?, true)?;
+        }
+        Ok(())
     }
     pub fn remove(&self, id: &str) -> Result<()> {
         let path = self.path(id)?;
