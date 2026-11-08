@@ -1,5 +1,10 @@
 # Initial SETUP lifecycle experiments
 
+The explicit OwnTone transient setup-only opt-in now starts its existing NTP
+responder before initial SETUP, retaining it through TEARDOWN/cleanup. This is
+separate from legacy A/B/C and playback; their lifecycle remains unchanged.
+See [the pinned comparison](OWNTONE_SETUP_TIMING_COMPARISON.md).
+
 PR #25 corrects the [initial NTP response contract](INITIAL_NTP_RESPONSE.md):
 setup-only accepts an absent timingPort, while validating it strictly when present.
 

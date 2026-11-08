@@ -2,15 +2,16 @@
 
 This diagnostic is authentication plus **initial NTP SETUP only**. Successful
 SETUP is not audible playback, stream readiness, persistent pairing, or durable
-receiver identity verification. No hardware SETUP success is claimed.
+receiver identity verification. No physical success is claimed for this change.
 
-Operator-confirmed evidence on 2026-11-08: Even-Olai HomePod,
-`device:3ae5c9a302ad`, `192.168.1.33:7000`, AudioAccessory5,1 firmware 27.2.
-The existing `authenticate --experimental-owntone-transient --control-check`
-returned 200 for GET `/info`, SRP M1/M2, SRP M3/M4 and encrypted OPTIONS,
-with validated CSeq 4. No audio was sent. Transient SRP verifies the session
-proof; it does not establish persistent receiver identity. This evidence does
-not establish initial SETUP acceptance, current policy reproducibility, or playback.
+Operator-confirmed PR #33 evidence on 2026-11-08: Even-Olai HomePod,
+`device:3ae5c9a302ad`, `192.168.1.33:7000`, AudioAccessory5,1 firmware 27.2:
+transient SRP M1–M4, encrypted GET /info and initial NTP SETUP RTSP 200
+succeeded, including plist/timing-profile/port validation. Encrypted TEARDOWN
+CSeq 6 timed out after about three seconds with zero response bytes. No RECORD
+or audio was sent. Transient SRP does not establish persistent receiver identity.
+See the [pinned upstream comparison](OWNTONE_SETUP_TIMING_COMPARISON.md) for
+observations and unresolved hypotheses.
 
 ## Scope and validation
 
@@ -36,7 +37,7 @@ frame counters and CSeq through:
 1. Plaintext OwnTone-reference GET `/info` (CSeq 1), including strict policy checks.
 2. Transient M1/M2 (CSeq 2), M3/M4 (CSeq 3); verify M4 before installing keys.
 3. Encrypted GET `/info` (CSeq 4); validate existing audio/ALAC capabilities and NTP selection.
-4. Encrypted initial NTP SETUP (CSeq 5), using the existing four-field offer and profile A lifecycle.
+4. Encrypted initial NTP SETUP (CSeq 5), using the unchanged four-field offer, after the existing bounded NTP worker is ready.
 5. Encrypted TEARDOWN (CSeq 6 on the complete sequence), then release local resources.
 
 There is no OPTIONS in this setup-check sequence. A 200 alone is insufficient:
@@ -49,16 +50,16 @@ No persistent enrollment, credential replacement or service changes occur.
 
 ## One authorized Raspberry Pi attempt
 
-Obtain owner/operator authorization for this single setup-check against **only**
-the independently verified HomePod above. Do not contact Stua Apple TV or any
-other receiver. Keep production OwnTone/autostream, systemd units and deployed
+The already approved test target is **only** the independently verified HomePod
+above. Run the single operator attempt below without retries. Do not contact
+Stua Apple TV or any other receiver. Keep production OwnTone/autostream, systemd units and deployed
 binaries unchanged. Build in a separate checkout; never install over a service
 executable:
 
 ```sh
-git clone --branch feat/owntone-transient-setup-check --single-branch \
-  https://github.com/kyrre-martila/PiAir.git PiAir-pr33
-cd PiAir-pr33
+git clone --branch feat/owntone-setup-early-ntp --single-branch \
+  https://github.com/kyrre-martila/PiAir.git PiAir-pr34
+cd PiAir-pr34
 git rev-parse HEAD  # compare with the reviewed PR head
 cargo build --release --locked
 CONFIG=/absolute/path/to/existing/piair.toml
@@ -90,7 +91,7 @@ another profile. In an interactive terminal, run **once**:
 umask 077
 ./target/release/piair --config "$CONFIG" -v \
   stream-test device:3ae5c9a302ad --setup-check --experimental-owntone-transient \
-  2>piair-pr33-setup.jsonl
+  2>piair-pr34-setup.jsonl
 result=$?
 printf 'setup-check exit=%s\n' "$result"
 ```
@@ -115,7 +116,8 @@ these instructions.
 - Timeout: no response within the existing read/deadline bounds; it does not prove why the receiver stayed silent.
 - Authenticated framing: `response_bytes` and `authenticated_frames` distinguish no bytes, incomplete/invalid frames and authenticated data. Invalid framing/tag/CSeq closes and invalidates the socket.
 - Parsing/profile failure: authenticated RTSP 200 may still fail headers, plist, timing or ports. The existing cleanup attempts TEARDOWN on a usable connection.
-- TEARDOWN: diagnostics report acknowledged/failed or skipped because the control socket was invalidated. Local sockets/keys/workers are released in all cases. Skipped cleanup is not a receiver acknowledgement. Successful command output explicitly requires acknowledged TEARDOWN.
+- NTP: readiness is logged before initial SETUP. Request/reply events and the cleanup reply count distinguish traffic from no traffic; zero replies is permitted for setup-only.
+- TEARDOWN: diagnostics separate request attempted from acknowledged, rejected, timed_out, connection_closed, other failed validation/I/O, or skipped because the control socket was invalidated. Local sockets/keys/workers are released in all cases. Skipped cleanup is not a receiver acknowledgement. Successful command output explicitly requires acknowledged TEARDOWN.
 
 Share only reviewed phase/status/outcome summaries and sanitized application
 errors. Do not share receiver-state files, credentials, PINs, keys, raw crypto
@@ -129,4 +131,4 @@ strict response validation, rejection, cancellation, allowlist revocation after
 encrypted `/info`, credential preservation, timeout, framing and cleanup. Existing
 legacy transient/persistent playback and lifecycle tests remain regression gates.
 These tests establish implementation behavior only. Raspberry Pi ARM64 execution,
-physical HomePod SETUP acceptance and audible playback remain unverified.
+physical HomePod behavior with the earlier responder and audible playback remain unverified.

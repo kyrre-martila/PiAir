@@ -357,13 +357,15 @@ impl Session {
             let ports = self.ports.as_mut().unwrap();
             let control_port = ports.control()?;
             let timing_port = ports.timing()?;
-            let early_timing = !initial_only || self.setup_profile != SetupProfile::A;
+            let early_timing = self.owntone_setup_only
+                || !initial_only
+                || self.setup_profile != SetupProfile::A;
             if early_timing {
                 stage = "early NTP worker startup";
                 self.control.as_ref().unwrap().start_timing(
                     ports, self.clock.as_ref().unwrap().clone(),
                 )?;
-                tracing::info!(target: "piair::rtsp", timing_port, ready = true,
+                tracing::info!(target: "piair::rtsp", phase = "NTP", outcome = "started", timing_port, ready = true,
                     "NTP responder ready before initial SETUP");
             } else {
                 tracing::info!(target: "piair::rtsp", timing_port, ready = false,
@@ -407,8 +409,11 @@ impl Session {
                 profile::port(d, "timingPort")?;
             }
             tracing::debug!(target: "piair::rtsp", phase = "initial SETUP", status = 200,
-                timing_profile = "NTP", "initial SETUP profile and ports validated");
+                timing_profile = "NTP", outcome = "validated", "initial SETUP profile and ports validated");
             if initial_only {
+                if self.owntone_setup_only {
+                    ensure!(!self.cancel.load(Ordering::Relaxed), "diagnostic interrupted");
+                }
                 return Ok(());
             }
             status = None;
@@ -661,24 +666,38 @@ impl Session {
             return Ok(());
         }
         let body = profile::binary(&mut profile::dict([]))?;
+        tracing::debug!(target: "piair::rtsp", phase = "TEARDOWN", outcome = "attempted",
+            "TEARDOWN request attempted");
         let result = (|| {
             let reply = self.call("TEARDOWN", None, &body, &[])?;
             ensure!(reply.body.is_empty(), "unexpected TEARDOWN body");
             Ok(())
         })();
-        tracing::debug!(target: "piair::rtsp", phase = "TEARDOWN", success = result.is_ok(),
+        let outcome = match &result {
+            Ok(()) => "acknowledged",
+            Err(error) => error
+                .downcast_ref::<super::wire::ResponseFailure>()
+                .map_or("failed", super::wire::ResponseFailure::outcome),
+        };
+        tracing::debug!(target: "piair::rtsp", phase = "TEARDOWN", outcome, success = result.is_ok(),
             "TEARDOWN outcome; local resources will be released");
         result
     }
     fn release(&mut self) {
-        tracing::debug!(target: "piair::rtsp", "session cleanup: releasing sockets and joining workers");
+        tracing::debug!(target: "piair::rtsp", phase = "cleanup", outcome = "started", "session cleanup: releasing sockets and joining workers");
+        if self.owntone_setup_only {
+            if let Some(ports) = &self.ports {
+                tracing::debug!(target: "piair::rtsp", phase = "NTP", started = ports.has_timing_worker(),
+                    replies = ports.timing_replies(), "setup-only NTP responder cleanup");
+            }
+        }
         self.media = None;
         self.ports = None;
         self.events = None;
         self.encoder = None;
         self.clock = None;
         self.control = None;
-        tracing::debug!(target: "piair::rtsp", "session cleanup complete");
+        tracing::debug!(target: "piair::rtsp", phase = "cleanup", outcome = "complete", "session cleanup complete");
     }
     fn finish(&mut self, result: Result<()>) -> Result<()> {
         if let Err(error) = &result {

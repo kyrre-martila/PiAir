@@ -1366,6 +1366,10 @@ fn configured_volume_uses_existing_parameter_and_cleanup() {
 #[derive(Clone, Copy, Debug)]
 enum OwnSetup {
     Good,
+    NoTiming,
+    TeardownTimeout,
+    TeardownEof,
+    CancelAfterSetup,
     MissingPort,
     ZeroPort,
     OversizedPort,
@@ -1384,6 +1388,10 @@ enum OwnSetup {
     Cancelled,
 }
 fn own_setup_case(mode: OwnSetup) {
+    let timing_addr = Arc::new(std::sync::Mutex::new(None));
+    let observed_addr = timing_addr.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let server_cancel = cancel.clone();
     let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
         socket
             .set_read_timeout(Some(Duration::from_secs(8)))
@@ -1397,7 +1405,7 @@ fn own_setup_case(mode: OwnSetup) {
             PI,
             false,
             true,
-            |mut socket, shared| {
+            move |mut socket, shared| {
                 socket
                     .set_read_timeout(Some(Duration::from_secs(8)))
                     .unwrap();
@@ -1453,6 +1461,15 @@ fn own_setup_case(mode: OwnSetup) {
                     4
                 );
                 assert!(offer["timingPort"].as_unsigned_integer().unwrap() > 0);
+                let timing_port = profile::port(offer, "timingPort").unwrap();
+                *observed_addr.lock().unwrap() = Some(timing_port);
+                if !matches!(mode, OwnSetup::NoTiming) {
+                    // Must answer before the mock sends the initial SETUP response.
+                    timing_probe(timing_port);
+                }
+                if matches!(mode, OwnSetup::CancelAfterSetup) {
+                    server_cancel.store(true, Ordering::Relaxed);
+                }
                 let mut response = profile::dict([("eventPort", profile::uint(7001))]);
                 let d = response.as_dictionary_mut().unwrap();
                 match mode {
@@ -1511,6 +1528,17 @@ fn own_setup_case(mode: OwnSetup) {
                 assert_eq!(teardown.uri, setup.uri);
                 assert_eq!(teardown.headers["user-agent"], "AirPlay/999.0.0");
                 assert!(plist(&teardown).as_dictionary().unwrap().is_empty());
+                assert_eq!(teardown.headers["session"], setup.headers["session"]);
+                if !matches!(mode, OwnSetup::NoTiming) {
+                    timing_probe(timing_port); // Worker remains alive through TEARDOWN.
+                }
+                if matches!(mode, OwnSetup::TeardownTimeout) {
+                    assert_eof(&mut socket);
+                    return;
+                }
+                if matches!(mode, OwnSetup::TeardownEof) {
+                    return;
+                }
                 if matches!(mode, OwnSetup::TeardownRejected) {
                     socket.write_all(&keys.encrypt(b"RTSP/1.0 403 private-reason\r\nCSeq: 6\r\nContent-Length: 0\r\n\r\n").unwrap()).unwrap();
                 } else {
@@ -1528,6 +1556,7 @@ fn own_setup_case(mode: OwnSetup) {
     });
     wire.owntone_test_identity();
     let mut session = Session::new();
+    session.cancel = cancel;
     session
         .start_owntone_setup_selected(|| Ok(wire), &owntone_caps())
         .unwrap();
@@ -1537,7 +1566,7 @@ fn own_setup_case(mode: OwnSetup) {
     }
     let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
         let result = session.check_initial_setup_with_timeout(None);
-        if matches!(mode, OwnSetup::Good) {
+        if matches!(mode, OwnSetup::Good | OwnSetup::NoTiming) {
             result.unwrap();
             assert_eq!(session.state(), State::Disconnected);
         } else {
@@ -1554,10 +1583,11 @@ fn own_setup_case(mode: OwnSetup) {
                 OwnSetup::Rejected | OwnSetup::InfoRejected | OwnSetup::TeardownRejected => "403",
                 OwnSetup::WrongCseq => "CSeq",
                 OwnSetup::BadTag => "authentication tag invalid",
-                OwnSetup::Timeout => "receiver read timeout",
+                OwnSetup::Timeout | OwnSetup::TeardownTimeout => "receiver read timeout",
+                OwnSetup::TeardownEof => "truncated receiver response",
                 OwnSetup::TeardownBody => "unexpected TEARDOWN body",
-                OwnSetup::Cancelled => "diagnostic interrupted",
-                OwnSetup::Good => unreachable!(),
+                OwnSetup::Cancelled | OwnSetup::CancelAfterSetup => "diagnostic interrupted",
+                OwnSetup::Good | OwnSetup::NoTiming => unreachable!(),
             };
             assert!(error.contains(expected), "mode={mode:?}: {error}");
             assert!(!error.contains("private-reason"));
@@ -1565,7 +1595,7 @@ fn own_setup_case(mode: OwnSetup) {
         }
     });
     assert!(!output.contains("private-reason"));
-    if matches!(mode, OwnSetup::Good) {
+    if matches!(mode, OwnSetup::Good | OwnSetup::NoTiming) {
         assert!(output.contains("initial SETUP profile and ports validated"));
         assert!(output.contains("TEARDOWN outcome"));
     }
@@ -1576,14 +1606,42 @@ fn own_setup_case(mode: OwnSetup) {
         assert!(output.contains("\"outcome\":\"skipped\""));
         assert!(output.contains("authenticated_frames"));
     }
+    if matches!(mode, OwnSetup::NoTiming) {
+        assert!(output.contains("\"started\":true"), "{output}");
+        assert!(output.contains("\"replies\":0"), "{output}");
+    }
+    let expected_outcome = match mode {
+        OwnSetup::Good | OwnSetup::NoTiming => Some("acknowledged"),
+        OwnSetup::TeardownRejected => Some("rejected"),
+        OwnSetup::TeardownTimeout => Some("timed_out"),
+        OwnSetup::TeardownEof => Some("connection_closed"),
+        _ => None,
+    };
+    if let Some(outcome) = expected_outcome {
+        assert!(
+            output.contains(&format!("\"outcome\":\"{outcome}\"")),
+            "{output}"
+        );
+        if outcome != "acknowledged" {
+            assert!(!output.contains("\"outcome\":\"acknowledged\""));
+        }
+    }
     assert_eq!(session.packets_sent, 0);
     session.stop().unwrap();
     server.join().unwrap();
+    if let Some(port) = *timing_addr.lock().unwrap() {
+        // Joining Session cleanup must release the worker's exact UDP socket.
+        UdpSocket::bind(("127.0.0.1", port)).unwrap();
+    };
 }
 #[test]
 fn owntone_setup_same_socket_counters_validation_and_cleanup() {
     for mode in [
         OwnSetup::Good,
+        OwnSetup::NoTiming,
+        OwnSetup::TeardownTimeout,
+        OwnSetup::TeardownEof,
+        OwnSetup::CancelAfterSetup,
         OwnSetup::MissingPort,
         OwnSetup::ZeroPort,
         OwnSetup::OversizedPort,
@@ -1623,6 +1681,10 @@ fn owntone_setup_rejects_unsupported_policy_before_connect_and_persistent_before
 
 #[test]
 fn owntone_setup_reauthorizes_after_encrypted_info_and_preserves_credentials() {
+    own_setup_revocation(false);
+    own_setup_revocation(true);
+}
+fn own_setup_revocation(after_setup: bool) {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
     std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
@@ -1649,6 +1711,7 @@ fn owntone_setup_reauthorizes_after_encrypted_info_and_preserves_credentials() {
     let credential_path = dir.path().join("receiver-state/aabbccddeeff.toml");
     let before = std::fs::read(&credential_path).unwrap();
     let revoke = config.clone();
+    let (port_tx, port_rx) = std::sync::mpsc::channel();
     let server = thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
         owntone_info(&mut socket, 200, &info_body(0));
@@ -1660,13 +1723,15 @@ fn owntone_setup_reauthorizes_after_encrypted_info_and_preserves_credentials() {
             PI,
             false,
             true,
-            |mut socket, shared| {
+            move |mut socket, shared| {
                 let mut keys = ControlKeys::new(shared.as_ref());
                 keys.swap_directions_for_test();
                 let info = read_message(&mut socket, &mut keys);
                 assert_eq!(info.method, "GET");
                 assert_eq!(info.headers["cseq"], "4");
-                std::fs::write(revoke, "receiver_allowlist=[]").unwrap();
+                if !after_setup {
+                    std::fs::write(&revoke, "receiver_allowlist=[]").unwrap();
+                }
                 send_reply(
                     &mut socket,
                     &mut keys,
@@ -1677,7 +1742,31 @@ fn owntone_setup_reauthorizes_after_encrypted_info_and_preserves_credentials() {
                     )])),
                     "",
                 );
-                assert_eof(&mut socket); // Reauthorization fails: no SETUP or fallback.
+                if after_setup {
+                    let setup = read_message(&mut socket, &mut keys);
+                    assert_eq!(setup.method, "SETUP");
+                    let offer = plist(&setup);
+                    let port = profile::port(offer.as_dictionary().unwrap(), "timingPort").unwrap();
+                    timing_probe(port);
+                    port_tx.send(port).unwrap();
+                    std::fs::write(&revoke, "receiver_allowlist=[]").unwrap();
+                    // Valid peer IP no longer suffices after approval is revoked.
+                    let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+                    peer.set_read_timeout(Some(Duration::from_millis(250)))
+                        .unwrap();
+                    let mut query = [0; 32];
+                    query[..2].copy_from_slice(&[0x80, 0xd2]);
+                    peer.send_to(&query, ("127.0.0.1", port)).unwrap();
+                    assert!(peer.recv_from(&mut query).is_err());
+                    send_reply(
+                        &mut socket,
+                        &mut keys,
+                        &setup,
+                        Some(profile::dict([("eventPort", profile::uint(7001))])),
+                        "",
+                    );
+                }
+                assert_eof(&mut socket); // Revocation: no TEARDOWN, further SETUP or fallback.
             },
         );
     });
@@ -1698,4 +1787,7 @@ fn owntone_setup_reauthorizes_after_encrypted_info_and_preserves_credentials() {
     assert_eq!(std::fs::read(credential_path).unwrap(), before);
     assert!(store.selection().unwrap() == Some(selected));
     server.join().unwrap();
+    if after_setup {
+        UdpSocket::bind(("127.0.0.1", port_rx.recv().unwrap())).unwrap();
+    }
 }

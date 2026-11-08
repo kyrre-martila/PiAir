@@ -21,6 +21,33 @@ pub enum AuthProfile {
     OwnToneTransient,
 }
 
+// Typed transport outcomes keep cleanup reporting independent of error wording.
+#[derive(Debug)]
+pub(super) enum ResponseFailure {
+    Timeout,
+    Closed,
+    Rejected(u16),
+}
+impl ResponseFailure {
+    pub(super) fn outcome(&self) -> &'static str {
+        match self {
+            Self::Timeout => "timed_out",
+            Self::Closed => "connection_closed",
+            Self::Rejected(_) => "rejected",
+        }
+    }
+}
+impl std::fmt::Display for ResponseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout => f.write_str("receiver read timeout"),
+            Self::Closed => f.write_str("truncated receiver response"),
+            Self::Rejected(status) => write!(f, "receiver rejected request with status {status} (no FairPlay/MFi/password/redirect fallback)"),
+        }
+    }
+}
+impl std::error::Error for ResponseFailure {}
+
 pub struct Wire {
     socket: TcpStream,
     // Scoped by Session to the initial SETUP diagnostic only.
@@ -188,8 +215,12 @@ impl Wire {
         let remaining = self
             .deadline
             .checked_duration_since(Instant::now())
+            .ok_or(ResponseFailure::Timeout)
             .context("receiver operation timed out")?;
-        ensure!(!remaining.is_zero(), "receiver operation timed out");
+        if remaining.is_zero() {
+            return Err(anyhow::Error::new(ResponseFailure::Timeout)
+                .context("receiver operation timed out"));
+        }
         self.socket
             .set_read_timeout(Some(remaining.min(if self.polling_response {
                 Duration::from_millis(100)
@@ -238,7 +269,7 @@ impl Wire {
                     tracing::debug!(target: "piair::auth", phase = self.auth_phase, outcome = ?error.kind(), "connection read failed");
                     match error.kind() {
                     std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
-                        anyhow::anyhow!("receiver read timeout")
+                        anyhow::Error::new(ResponseFailure::Timeout)
                     }
                     _ => anyhow::anyhow!("receiver read failed: kind={:?}", error.kind()),
                     }
@@ -246,7 +277,9 @@ impl Wire {
             if n == 0 {
                 tracing::debug!(target: "piair::auth", phase = self.auth_phase, "peer closed connection");
             }
-            ensure!(n > 0, "truncated receiver response");
+            if n == 0 {
+                return Err(ResponseFailure::Closed.into());
+            }
             offset += n;
             self.response_bytes += n;
         }
@@ -824,11 +857,9 @@ impl Wire {
             tracing::debug!(target: "piair::auth", phase = self.auth_phase, status = %words[1],
                 "encrypted control response status");
         }
-        ensure!(
-            words[1] == "200",
-            "receiver rejected request with status {} (no FairPlay/MFi/password/redirect fallback)",
-            words[1]
-        );
+        if words[1] != "200" {
+            return Err(ResponseFailure::Rejected(words[1].parse()?).into());
+        }
         (|| {
             let mut headers = BTreeMap::new();
             for line in lines {
@@ -973,6 +1004,9 @@ pub(super) struct Ports {
     timing_worker: Option<Worker>,
 }
 impl Ports {
+    pub fn timing_replies(&self) -> u64 {
+        self.timing_worker.as_ref().map_or(0, Worker::count)
+    }
     pub fn has_timing_worker(&self) -> bool {
         self.timing_worker.is_some()
     }
@@ -1129,11 +1163,15 @@ impl Worker {
                             continue;
                         };
                         lease.check()?;
+                        tracing::debug!(target: "piair::rtsp", phase = "NTP", outcome = "request",
+                            "NTP request from approved control peer");
                         ensure!(
                             socket.send_to(&out, peer)? == out.len(),
                             "timing reply send failed"
                         );
-                        health.count.fetch_add(1, Ordering::Relaxed);
+                        let replies = health.count.fetch_add(1, Ordering::Relaxed) + 1;
+                        tracing::debug!(target: "piair::rtsp", phase = "NTP", outcome = "reply", replies,
+                            "NTP reply sent to approved control peer");
                         *health.last.lock().unwrap() = Instant::now();
                     }
                     Err(e)
