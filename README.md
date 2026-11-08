@@ -214,6 +214,13 @@ bounds and limitations](docs/AIRPLAY_SESSION.md).
 
 For an initial SETUP check without RECORD or audio, use `stream-test --setup-check`.
 
+For the explicit HomePod-only `--record-check --experimental-owntone-transient`
+diagnostic, read the [pinned contract and manually authorized one-attempt
+procedure](docs/OWNTONE_RECORD_CHECK.md). It opens events, validates an empty
+RECORD and tears down without stream SETUP, audio or volume changes. RECORD 200
+does not prove stream negotiation or audible playback. No physical test is
+authorized for Codex.
+
 For one explicitly authorized HomePod transient diagnostic, the new opt-in is:
 
 ```sh
@@ -229,7 +236,9 @@ selection and `--setup-profile` combinations, with no fallback. Read the
 [exact Raspberry Pi build, authorization and single-attempt procedure](docs/OWNTONE_TRANSIENT_SETUP_CHECK.md)
 before running. Operator evidence dated 2026-11-08 confirms authentication and
 encrypted OPTIONS on Even-Olai HomePod (192.168.1.33:7000, AudioAccessory5,1,
-firmware 27.2); **initial SETUP and audible playback remain unverified**.
+firmware 27.2). Task-supplied PR #34 evidence also confirms encrypted initial
+NTP SETUP, active timing responder and acknowledged TEARDOWN. RECORD and audible
+playback remain unverified.
 Successful SETUP validates the response and ports, then requires acknowledged
 TEARDOWN; it sends no RECORD, stream SETUP, audio or volume command. Transient
 SRP does not establish persistent receiver identity.

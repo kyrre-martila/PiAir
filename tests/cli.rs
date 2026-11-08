@@ -420,3 +420,25 @@ fn pairing_help_identifies_enrollment_prerequisites() {
         .unwrap()
         .contains("selected method"));
 }
+
+#[test]
+fn record_diagnostic_rejects_other_receivers_before_discovery_or_terminal() {
+    use std::fs;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("piair.toml");
+    fs::write(&config, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_piair"))
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "stream-test",
+            "device:aabbccddeeff",
+            "--record-check",
+            "--experimental-owntone-transient",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("approved HomePod exact ID"));
+    assert!(!dir.path().join("receiver-state").exists());
+}

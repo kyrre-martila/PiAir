@@ -36,7 +36,11 @@ pub enum State {
     Failed,
 }
 
+pub(super) const RECORD_RECEIVER_ID: &str = "device:3ae5c9a302ad";
+
 pub struct Session {
+    record_only: bool,
+    record_ok: bool,
     state: State,
     volume_db: i32,
     setup_profile: SetupProfile,
@@ -62,6 +66,8 @@ pub struct Session {
 impl Session {
     pub fn new() -> Self {
         Self {
+            record_only: false,
+            record_ok: false,
             state: State::Disconnected,
             volume_db: -30,
             setup_profile: SetupProfile::A,
@@ -116,6 +122,50 @@ impl Session {
             SetupProfile::A,
         )
     }
+    /// Explicit RECORD diagnostic is limited to the approved HomePod identity.
+    pub fn start_owntone_record_selected(
+        &mut self,
+        connect: impl FnOnce() -> Result<Wire>,
+        capabilities: &super::compatibility::Capabilities,
+    ) -> Result<()> {
+        ensure!(
+            self.state == State::Disconnected,
+            "session already started or failed"
+        );
+        self.record_only = true;
+        let cancel = self.cancel.clone();
+        self.start_owntone_setup_selected(
+            || {
+                let mut wire = connect()?;
+                wire.diagnostic_cancel = Some(cancel);
+                ensure!(
+                    wire.receiver_id() == RECORD_RECEIVER_ID,
+                    "RECORD receiver ID is not approved for this diagnostic"
+                );
+                Ok(wire)
+            },
+            capabilities,
+        )
+    }
+    pub fn record_succeeded(&self) -> bool {
+        self.record_ok
+    }
+    pub fn check_record(&mut self) -> Result<()> {
+        ensure!(
+            self.record_only && self.owntone_setup_only,
+            "explicit OwnTone RECORD diagnostic required"
+        );
+        self.negotiate(true, None)?;
+        self.stop()?;
+        let result = (|| {
+            ensure!(
+                !self.cancel.load(Ordering::Relaxed),
+                "diagnostic interrupted"
+            );
+            Ok(())
+        })();
+        self.finish(result)
+    }
     pub fn start_setup_selected(
         &mut self,
         connect: impl FnOnce() -> Result<Wire>,
@@ -139,7 +189,14 @@ impl Session {
             self.state == State::Disconnected,
             "session already started or failed"
         );
-        self.cancel.store(false, Ordering::Relaxed);
+        if self.record_only {
+            ensure!(
+                !self.cancel.load(Ordering::Relaxed),
+                "diagnostic interrupted"
+            );
+        } else {
+            self.cancel.store(false, Ordering::Relaxed);
+        }
         self.session_header = None;
         self.stream_id = None;
         self.uri.clear();
@@ -179,6 +236,9 @@ impl Session {
                     )?
                 },
             );
+            if self.record_only {
+                self.control.as_mut().unwrap().diagnostic_cancel = Some(self.cancel.clone());
+            }
             self.state = State::Negotiating;
             Ok(())
         })();
@@ -334,7 +394,8 @@ impl Session {
             ensure!(initial_only || !self.owntone_setup_only, "OwnTone transient is setup-only");
             ensure!(initial_only || !self.control.as_ref().is_some_and(Wire::uses_owntone_transient_profile),
                 "OwnTone transient is setup-only");
-            let encoder = realtime::Encoder::new()?;
+            // Diagnostics never initialize a media encoder or generate audio keys/packets.
+            let encoder = if initial_only { None } else { Some(realtime::Encoder::new()?) };
             self.clock = Some(Arc::new(realtime::Clock::new()?));
             let session_id = rand::random::<u32>();
             let local = self
@@ -410,7 +471,7 @@ impl Session {
             }
             tracing::debug!(target: "piair::rtsp", phase = "initial SETUP", status = 200,
                 timing_profile = "NTP", outcome = "validated", "initial SETUP profile and ports validated");
-            if initial_only {
+            if initial_only && !self.record_only {
                 if self.owntone_setup_only {
                     ensure!(!self.cancel.load(Ordering::Relaxed), "diagnostic interrupted");
                 }
@@ -418,14 +479,31 @@ impl Session {
             }
             status = None;
             stage = "event connection";
+            self.workers()?;
             self.events = Some(self.control.as_mut().unwrap().event(event_port)?);
+            tracing::debug!(target: "piair::rtsp", phase = "event connection", outcome = "connected", "event channel connected");
             // Timing probes are restricted to the verified control peer IP.
             // Stream ports arrive later; retain the bound sockets until then.
             status = None;
             stage = "RECORD";
+            self.workers()?;
+            tracing::debug!(target: "piair::rtsp", phase = "RECORD", outcome = "attempted", "RECORD request attempted");
             let record = self.call("RECORD", None, &[], &[])?;
             status = Some(200);
+            if self.record_only {
+                ensure!(record.body.is_empty(), "unexpected RECORD response body");
+                if let Some(latency) = record.headers.get("audio-latency") {
+                    ensure!(!latency.is_empty() && latency.bytes().all(|b| b.is_ascii_digit())
+                        && latency.parse::<u32>().is_ok(), "invalid RECORD Audio-Latency");
+                }
+                self.workers()?;
+                self.record_ok = true;
+                tracing::info!(target: "piair::rtsp", phase = "RECORD", outcome = "validated", status = 200,
+                    "RECORD validated; stream negotiation and playback unverified");
+                return Ok(());
+            }
             realtime::record_latency(&record.headers);
+            let encoder = encoder.context("playback encoder absent")?;
             status = None;
             stage = "stream SETUP";
             let offer = profile::stream_offer(encoder.key(), control_port, session_id)?;
@@ -486,6 +564,14 @@ impl Session {
                 None => format!("realtime negotiation stage={stage}{method}"),
             }
         });
+        if self.record_only {
+            if let Err(error) = &result {
+                let outcome = error
+                    .downcast_ref::<super::wire::ResponseFailure>()
+                    .map_or("failed", super::wire::ResponseFailure::outcome);
+                tracing::info!(target: "piair::rtsp", phase = stage, outcome, record_validated = self.record_ok, "RECORD diagnostic failed");
+            }
+        }
         self.finish(result)
     }
     fn workers(&self) -> Result<()> {
@@ -699,7 +785,7 @@ impl Session {
         self.control = None;
         tracing::debug!(target: "piair::rtsp", phase = "cleanup", outcome = "complete", "session cleanup complete");
     }
-    fn finish(&mut self, result: Result<()>) -> Result<()> {
+    fn finish(&mut self, mut result: Result<()>) -> Result<()> {
         if let Err(error) = &result {
             if self.failure.is_none() {
                 self.failure = Some(format!("{error:#}"));
@@ -708,8 +794,11 @@ impl Session {
             if let Some(control) = &mut self.control {
                 control.limit_cleanup();
             }
-            if self.teardown().is_err() {
+            if let Err(cleanup) = self.teardown() {
                 tracing::warn!("session cleanup failed; local resources will be released");
+                if self.record_only {
+                    result = result.context(format!("bounded TEARDOWN also failed: {cleanup:#}"));
+                }
             }
             self.release();
             self.state = State::Failed;

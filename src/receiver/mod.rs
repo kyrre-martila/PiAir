@@ -350,6 +350,7 @@ pub fn stream_test(
     seconds: u32,
     volume_db: i32,
     setup_check: bool,
+    record_check: bool,
     setup_timeout_seconds: Option<u64>,
     setup_profile: Option<SetupProfile>,
     experimental_owntone_transient: bool,
@@ -363,9 +364,13 @@ pub fn stream_test(
         "SETUP timeout experiment requires --setup-check and 15 seconds"
     );
     ensure!(
-        !experimental_owntone_transient || (setup_check && id.is_some() && setup_profile.is_none()),
-        "OwnTone transient requires an exact ID, --setup-check and no --setup-profile; no fallback"
+        !experimental_owntone_transient || ((setup_check || record_check) && id.is_some() && setup_profile.is_none()),
+        "OwnTone transient requires an exact ID, --setup-check or --record-check and no --setup-profile; no fallback"
     );
+    ensure!(!record_check || (!setup_check && experimental_owntone_transient
+        && id == Some(session::RECORD_RECEIVER_ID) && setup_profile.is_none()
+        && setup_timeout_seconds.is_none()),
+        "RECORD requires the approved HomePod exact ID, OwnTone transient and no other diagnostic profile");
     let proposed = if id.is_none() {
         Some(interactive::choose_for_stream(loaded)?)
     } else {
@@ -414,12 +419,16 @@ pub fn stream_test(
         );
         Some(credential)
     };
-    if experimental_owntone_transient {
+    if record_check {
+        println!("RECORD-only OwnTone transient diagnostic: event channel and empty RECORD, then TEARDOWN. No audio or volume change. RECORD 200 does not prove stream negotiation or audible playback.");
+    } else if experimental_owntone_transient {
         println!("Setup-only OwnTone-reference transient SRP selected; no persistent receiver identity verification; no fallback. Successful SETUP does not prove audible playback.");
     } else if selected.method == Method::Transient {
         println!("Stream-test uses the selected legacy transient SRP profile without persistent receiver identity verification. Experimental authenticate profiles are not used; no fallback. Successful authentication or transmission does not prove audible playback.");
     }
-    if setup_check {
+    if record_check {
+        println!("Receiver volume unchanged; no playback operations.");
+    } else if setup_check {
         println!("Initial NTP SETUP check: validate response and tear down; no RECORD or audio transmission. Receiver volume unchanged (--volume-db is playback-only).");
     } else {
         println!("The test includes a 2-second latency drain. Volume may persist after playback. Audible playback is unverified.");
@@ -430,7 +439,9 @@ pub fn stream_test(
     );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
     interactive::describe(&snapshot, id)?;
-    if setup_check {
+    if record_check {
+        println!("Operation: RECORD-only check");
+    } else if setup_check {
         println!("Operation: Setup-only check");
     } else {
         println!("Operation: Playback test\nDuration: {seconds} seconds\nVolume: {volume_db} dB");
@@ -440,7 +451,9 @@ pub fn stream_test(
         loaded,
         proposed.as_ref(),
         &snapshot,
-        if setup_check {
+        if record_check {
+            "Start RECORD-only check? [y/N]: "
+        } else if setup_check {
             "Start setup-only check? [y/N]: "
         } else {
             "Start playback test? [y/N]: "
@@ -449,7 +462,9 @@ pub fn stream_test(
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
     let connect = || wire::Wire::connect(&loaded.path, id, &selected, &snapshot);
-    if experimental_owntone_transient {
+    if record_check {
+        session.start_owntone_record_selected(connect, &selected.capabilities)?;
+    } else if experimental_owntone_transient {
         session.start_owntone_setup_selected(connect, &selected.capabilities)?;
     } else if setup_check {
         session.start_setup_selected(
@@ -464,6 +479,13 @@ pub fn stream_test(
         println!("Authentication: transient SRP proof verified; no persistent receiver identity verification");
     } else {
         println!("Authentication: persistent receiver identity cryptographically verified");
+    }
+    if record_check {
+        let result = session.check_record();
+        println!("RECORD validated: {}; audio packets transmitted: 0. Stream negotiation and audible playback unverified.", session.record_succeeded());
+        result?;
+        println!("TEARDOWN: acknowledged; local resources released.");
+        return Ok(());
     }
     if setup_check {
         session.check_initial_setup_with_timeout(

@@ -64,10 +64,13 @@ pub enum Command {
         #[arg(long, default_value_t=1, value_parser=clap::value_parser!(u32).range(1..=3))]
         seconds: u32,
         /// Validate initial SETUP and tear down before RECORD or audio transmission.
-        #[arg(long)]
+        #[arg(long, group = "owntone_diagnostic")]
         setup_check: bool,
-        /// OwnTone-reference transient authentication for initial SETUP only; no fallback.
-        #[arg(long, requires_all = ["setup_check", "receiver_id"], conflicts_with = "setup_profile")]
+        /// Validate RECORD after initial NTP SETUP, then tear down without audio.
+        #[arg(long, group = "owntone_diagnostic", requires_all = ["experimental_owntone_transient", "receiver_id"], conflicts_with_all = ["setup_check", "volume_db", "seconds", "setup_profile", "setup_timeout_seconds"])]
+        record_check: bool,
+        /// OwnTone-reference transient authentication for SETUP or RECORD diagnostics; no fallback.
+        #[arg(long, requires_all = ["receiver_id", "owntone_diagnostic"], conflicts_with = "setup_profile")]
         experimental_owntone_transient: bool,
         /// Diagnostic only: wait up to 15 seconds total for initial SETUP.
         #[arg(long, requires = "setup_check", value_parser = clap::value_parser!(u64).range(15..=15))]
@@ -300,5 +303,45 @@ mod owntone_setup_tests {
             "--control-check"
         ])
         .is_ok());
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+    #[test]
+    fn record_is_explicit_and_excludes_playback_and_other_diagnostics() {
+        let base = [
+            "piair",
+            "stream-test",
+            "device:3ae5c9a302ad",
+            "--record-check",
+            "--experimental-owntone-transient",
+        ];
+        assert!(Cli::try_parse_from(base).is_ok());
+        for extra in [
+            vec!["--setup-check"],
+            vec!["--seconds", "1"],
+            vec!["--volume-db", "-30"],
+            vec!["--setup-profile", "a"],
+            vec!["--setup-timeout-seconds", "15"],
+            vec!["--experimental-pyatv-transient-preamble"],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
+        }
+        assert!(Cli::try_parse_from([
+            "piair",
+            "stream-test",
+            "device:3ae5c9a302ad",
+            "--record-check"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "piair",
+            "stream-test",
+            "--record-check",
+            "--experimental-owntone-transient"
+        ])
+        .is_err());
     }
 }
