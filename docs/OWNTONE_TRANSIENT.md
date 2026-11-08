@@ -1,6 +1,11 @@
+> Current guidance and evidence: [receiver authentication audit and safe Pi diagnostic](RECEIVER_AUTHENTICATION.md).
+> Later operator evidence in [PR #21](INITIAL_SETUP_DIAGNOSTICS.md) reports HomePod
+> transient SRP and encrypted OPTIONS success after #20. Earlier 400/403 results
+> below are historical; no confirmed audible HomePod playback is documented.
+
 # OwnTone-reference transient authentication experiment
 
-HomePod compatibility is **unverified**. This is an independent Rust protocol
+HomePod transient authentication/control success is operator-reported for the tested receiver; playback remains unverified. This is an independent Rust protocol
 implementation; no OwnTone code, architecture, identity or credentials are used.
 The explicit option is `--experimental-owntone-transient`. Default CLI/config,
 persistent HAP enrollment/pair-verify, and the labeled pyatv diagnostic remain

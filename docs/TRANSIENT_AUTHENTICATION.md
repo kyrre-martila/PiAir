@@ -1,3 +1,8 @@
+> Current guidance and evidence: [receiver authentication audit and safe Pi diagnostic](RECEIVER_AUTHENTICATION.md).
+> Later operator evidence in [PR #21](INITIAL_SETUP_DIAGNOSTICS.md) reports HomePod
+> transient SRP and encrypted OPTIONS success after #20. Earlier 400/403 results
+> below are historical; no confirmed audible HomePod playback is documented.
+
 > Optional controlled experiment: [pyatv transient HTTP framing](PYATV_TRANSIENT_PREAMBLE.md).
 > The default flow described below remains unchanged.
 
@@ -6,7 +11,7 @@
 PiAir implements an explicitly selected, connection-scoped HomeKit SRP profile.
 This enables encrypted control and the existing realtime audio negotiation path;
 **successful authentication does not prove audio playback compatibility**.
-No HomePod or Apple TV hardware has been tested with this implementation.
+The original legacy profile has no documented HomePod success; later explicit OwnTone-reference authentication/control success is operator-reported (see the current audit).
 
 ## Architecture and missing capability
 
@@ -153,35 +158,9 @@ Tests cover proofs/keys, malformed fields, rejected states/flags/methods/status,
 timeout/disconnect, encrypted OPTIONS, terminal failure, cleanup, capability and
 endpoint authorization, no fallback, plus persistent pairing/media regressions.
 
-On the Raspberry Pi, after reviewing the receiver's policy and its discovery
-profile, build normally and preserve existing config/credential files. Do not
-modify system services. Add only the exact intended receiver ID to the existing
-`receiver_allowlist` if not already approved. Use the configured config path:
-
-```sh
-piair devices
-piair receivers
-piair select device:3ae5c9a302ad --method transient
-piair authenticate device:3ae5c9a302ad --control-check
-# Only after authentication/control success, with physical access to stop playback:
-piair stream-test device:3ae5c9a302ad --seconds 1
-```
-
-Confirm the exact ID at interactive prompts. `pair` in transient mode explains
-that no enrollment occurs and directs to `authenticate`; no PIN is requested.
-`authenticate` needs no stored credentials; each invocation creates a fresh SRP
-connection. Do not unpair just to try transient: persistent credentials remain
-available for later explicit persistent selection. `unpair` retains its existing
-meaning of deleting local persistent credentials only.
-
-Stop on 403/470, capability rejection, malformed response, bad proof or timeout.
-Do not try alternate methods automatically or relax receiver access controls.
-Report stage/status diagnostics and firmware/profile metadata, never PINs,
-private keys, secrets or authentication payloads. Stream-test sets volume to
--30 dB (which may persist), sends bounded test signal plus latency drain, and
-reports setup/transmission/teardown separately. Confirm audible output physically;
-an encrypted OPTIONS success alone is not audio compatibility. The supplied
-HomePod PIN-start 403 does not establish whether this transient flow is supported.
-PR #10 on the Apple TV also remains hardware-unverified.
-
-See the [OwnTone-reference RTSP authentication-only experiment](OWNTONE_TRANSIENT.md) for the new explicit profile, verified protocol comparison and current hardware evidence.
+For the next Raspberry Pi check, follow the [current authentication-only procedure](RECEIVER_AUTHENTICATION.md#next-raspberry-pi-diagnostic-authentication-and-control-only).
+It uses only independently verified `device:3ae5c9a302ad`, explicit owner approval,
+explicit transient selection and the OwnTone-reference authenticate flag. It does
+not enroll or replace credentials and does not attempt audio. Legacy transient
+and pyatv profiles are separate explicit experiments, with no automatic fallback.
+Existing persistent credentials remain available for later explicit persistent use.

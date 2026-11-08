@@ -30,7 +30,7 @@ pub enum Command {
     Devices,
     /// Full passive receiver details: IDs, addresses, services and local approval/pairing state.
     Receivers,
-    /// Discover and interactively pair an approved receiver; q/EOF/Ctrl+C cancels.
+    /// Enroll persistent credentials with an approved receiver; requires verified PIN delivery or a genuine HAP setup code.
     Pairing,
     /// Pin an already allowlisted receiver's discovered endpoint; no connection.
     Select {
@@ -39,7 +39,7 @@ pub enum Command {
         #[arg(long, value_enum, default_value = "pin-display")]
         method: crate::receiver::compatibility::Method,
     },
-    /// Interactively request a receiver PIN and establish persistent credentials.
+    /// Enroll persistent credentials using the selected method and its genuine PIN/setup code.
     Pair { receiver_id: String },
     /// Interactively authenticate the selected method; close without an audio session.
     Authenticate {

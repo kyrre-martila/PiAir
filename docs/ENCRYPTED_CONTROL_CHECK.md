@@ -1,3 +1,8 @@
+> Current guidance and evidence: [receiver authentication audit and safe Pi diagnostic](RECEIVER_AUTHENTICATION.md).
+> Later operator evidence in [PR #21](INITIAL_SETUP_DIAGNOSTICS.md) reports HomePod
+> transient SRP and encrypted OPTIONS success after #20. Earlier 400/403 results
+> below are historical; no confirmed audible HomePod playback is documented.
+
 # Encrypted control verification after transient SRP
 
 PR #20 hardware evidence supplied for this work: HomePod AudioAccessory5,1,
@@ -35,7 +40,7 @@ must remain byte-for-byte unchanged. No pairing cryptography, SETUP/RECORD logic
 codec or media transport changes are included. A 403 still closes the connection
 and fails the check without retries or fallback.
 
-## Raspberry Pi deployment
+## Historical PR #20 Raspberry Pi deployment
 
 Run these commands **on the Raspberry Pi**, from the same shell/configuration
 context used for the earlier successful transient authentication. Build a separate
@@ -94,7 +99,7 @@ PiAir intentionally fails closed rather than reproducing OwnTone's authenticatio
 fallback, encryption rollback or playback negotiation. Existing persistent
 pair-verify / Apple TV paths and cryptography are unchanged.
 
-## Exact hardware test
+## Historical PR #20 hardware test
 
 After building/installing this revision, use the same configuration, allowlisted
 receiver and explicit transient selection used for the successful PR #18 test.
@@ -140,8 +145,7 @@ fallback requests. Existing independent SRP/HKDF/framing fixtures check exact
 bytes in addition to the production-code loopback tests. Existing persistent
 pair-verify and CLI integration tests remain part of the full suite.
 
-No HomePod is available in this workspace: **encrypted OPTIONS on hardware has
-not been tested here**. OPTIONS is a non-playback RTSP capability query; OwnTone
+No HomePod was available in the PR #20 workspace; no hardware test was performed there. The later PR #21 operator report above records OPTIONS success. OPTIONS is a non-playback RTSP capability query; OwnTone
 recognizes its wildcard target, but this audit does not establish acceptance by
 HomePod firmware 27.2 after transient SRP. A rejection is evidence to investigate,
 not permission to try SETUP or change authentication. Whether the shared

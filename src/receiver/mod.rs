@@ -237,8 +237,14 @@ fn pair_with_selection(
     );
     match auth_profile {
         AuthProfile::Legacy => (),
-        AuthProfile::OwnToneTransient => println!("Controlled hardware experiment: OwnTone-reference RTSP transient authentication; HomePod compatibility unverified. No playback."),
+        AuthProfile::OwnToneTransient => println!("Controlled hardware experiment: OwnTone-reference RTSP transient authentication; receiver/firmware acceptance requires verification. No playback."),
         AuthProfile::PyatvDiagnostic => println!("Controlled hardware experiment: pyatv transient HTTP profile (preamble, M1, M3); no compatibility or HomePod support claim."),
+    }
+    if !authenticate {
+        println!("Persistent enrollment requires receiver-supported PIN delivery for pin-display, or a genuine independently obtained HAP setup code for setup-code. An AirPlay password is not a HAP setup code. Do not invent codes or guess methods. If neither prerequisite is available, cancel: enrollment cannot currently proceed through these methods.");
+    }
+    if transient {
+        println!("Transient authentication is session-scoped SRP without persistent receiver identity verification. No permanent pairing or credential enrollment. Authentication and encrypted control do not prove audible playback.");
     }
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
     interactive::describe(&snapshot, id)?;
@@ -395,6 +401,9 @@ pub fn stream_test(
         );
         Some(credential)
     };
+    if selected.method == Method::Transient {
+        println!("Stream-test uses the selected legacy transient SRP profile without persistent receiver identity verification. Experimental authenticate profiles are not used; no fallback. Successful authentication or transmission does not prove audible playback.");
+    }
     if setup_check {
         println!("Initial NTP SETUP check: validate response and tear down; no RECORD or audio transmission. Receiver volume unchanged (--volume-db is playback-only).");
     } else {
