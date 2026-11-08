@@ -89,11 +89,15 @@ Startup uses production encoders/decoders and this fixed sequence:
 2. Bind local UDP timing/control/data sockets. Send session SETUP binary plist:
    deviceID, fresh sessionUUID, timingPort and timingProtocol=NTP. The sender
    deviceID is a fresh locally administered identifier; no iOS/model impersonation.
-3. Validate eventPort and **timingPort** from the authenticated response. Reject
-   PTP/None timing. Start NTP on the authenticated timing endpoint and connect the
-   encrypted event channel to the same peer. No reply is sent to an unnegotiated
-   timing source. Missing/zero timingPort is explicitly unsupported, unlike
-   OwnTone's more permissive timing listener.
+3. Validate nonzero eventPort and, when present, timingPort (integer 1..65535)
+   from the authenticated initial NTP response. Reject explicit PTP/None timing.
+   Setup-only checks allow timingPort to be absent and proceed to TEARDOWN.
+   Full playback still requires timingPort before starting its connected NTP
+   worker or event connection; otherwise it fails explicitly before RECORD.
+   OwnTone instead replies to each timing probe's source port. PiAir's B/C
+   setup-only workers already use this model, restricted to the verified peer IP;
+   migrating full playback to that lifecycle remains separate work. See
+   [initial NTP response contract](INITIAL_NTP_RESPONSE.md).
 4. Send RECORD and validate any Audio-Latency header within 11025..88200 samples.
    Absent latency uses the explicitly offered minimum 11025; zero is rejected.
 5. SETUP one stream: type=96, audioFormat=0x40000, ct=2, spf=352, sr=44100,

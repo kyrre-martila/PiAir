@@ -342,12 +342,20 @@ impl Session {
                 );
             }
             let event_port = profile::port(d, "eventPort")?;
-            let receiver_timing = profile::port(d, "timingPort")?;
+            // OwnTone 29.3's initial NTP response requires only eventPort.
+            // Validate an optional timingPort without inventing a remote endpoint.
+            let receiver_timing = d
+                .contains_key("timingPort")
+                .then(|| profile::port(d, "timingPort"))
+                .transpose()?;
             tracing::debug!(target: "piair::rtsp", phase = "initial SETUP", status = 200,
                 timing_profile = "NTP", "initial SETUP profile and ports validated");
             if initial_only {
                 return Ok(());
             }
+            let receiver_timing = receiver_timing.context(
+                "full playback requires receiver timingPort; probe-source NTP lifecycle is not implemented for playback",
+            )?;
             status = None;
             stage = "NTP worker startup";
             self.control.as_ref().unwrap().start_timing(

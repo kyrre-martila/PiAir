@@ -121,7 +121,8 @@ claimed. Current exact implementation, limits and state transitions are in
 AIRPLAY_SESSION.md.
 
 Concrete differences/limits remain explicit: require an authenticated positive
-NTP timingPort (OwnTone accepts timing queries more permissively); require an
+NTP timingPort for full playback only (setup-only accepts its absence; OwnTone
+replies to the timing probe source endpoint); require an
 initial encrypted updateInfo and NTP exchange before READY; refuse zero/out-of-
 window Audio-Latency; do not implement OwnTone's PTP/libairptp branch, automatic
 transient fallback, password digest, metadata resurrection or long sessions.
