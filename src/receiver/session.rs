@@ -38,6 +38,8 @@ pub enum State {
 
 pub(super) const RECORD_RECEIVER_ID: &str = "device:3ae5c9a302ad";
 
+pub(super) const STUA_RECEIVER_ID: &str = "device:02d899c1833f";
+
 pub struct Session {
     record_only: bool,
     stream_check: bool,
@@ -160,6 +162,36 @@ impl Session {
         self.stream_check = true;
         self.playback_check = playback;
         self.start_owntone_record_selected(connect, capabilities)
+    }
+    /// Persistent HAP authentication feeds the same realtime diagnostic engine.
+    pub fn start_stua_stream_selected(
+        &mut self,
+        connect: impl FnOnce() -> Result<Wire>,
+        credential: &Credential,
+        playback: bool,
+    ) -> Result<()> {
+        credential.validate(STUA_RECEIVER_ID)?;
+        ensure!(
+            self.state == State::Disconnected,
+            "session already started or failed"
+        );
+        self.stream_check = true;
+        self.playback_check = playback;
+        self.record_only = true;
+        let cancel = self.cancel.clone();
+        self.start_selected(
+            || {
+                let mut wire = connect()?;
+                ensure!(
+                    wire.receiver_id() == STUA_RECEIVER_ID
+                        && wire.method() != super::compatibility::Method::Transient,
+                    "Stua diagnostic requires exact receiver and persistent HAP; no fallback"
+                );
+                wire.diagnostic_cancel = Some(cancel);
+                Ok(wire)
+            },
+            Some(credential),
+        )
     }
     pub fn check_stream(&mut self) -> Result<()> {
         ensure!(
@@ -403,6 +435,7 @@ impl Session {
         );
         ensure!(
             self.setup_profile == SetupProfile::A
+                && !self.stream_check
                 && !self.owntone_setup_only
                 && !self
                     .control

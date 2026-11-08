@@ -545,3 +545,81 @@ pub fn stream_test(
     println!("Teardown: FLUSH and TEARDOWN acknowledged; resources closed. Audible playback: unverified (requires physical confirmation).");
     Ok(())
 }
+
+/// Deliberate Stua-only diagnostics; never invoked by capture or production startup.
+pub fn stua_check(loaded: &Loaded, id: &str, playback: bool) -> Result<()> {
+    ensure!(
+        id == session::STUA_RECEIVER_ID,
+        "Stua diagnostic requires device:02d899c1833f; no other receiver contact"
+    );
+    ensure!(loaded.config.allows(id), "receiver is not approved");
+    let store = store::Store::new(&loaded.path)?;
+    let selected = store
+        .selection()?
+        .context("existing Stua selection required; diagnostic never changes selection")?;
+    let credential = stua_credential(&store, &selected)?;
+    ensure!(
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+        "Stua diagnostic requires an interactive terminal and explicit confirmation"
+    );
+    let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    // Validate the exact endpoint before confirmation as well as at Wire::connect.
+    let observed = validate_selection(loaded, id, selected.method, &snapshot)?;
+    ensure!(
+        selected.matches_observation(&observed),
+        "receiver identity/capability/endpoint changed"
+    );
+    interactive::describe(&snapshot, id)?;
+    println!("Persistent HAP pair-verify using existing stored keys; no pairing, credential writes, retries or receiver fallback. Only NTP realtime ALAC is supported; PTP/FairPlay/MFi requirements fail closed. Stua uses HomePod 2 as default output; routing and audible playback remain unverified.");
+    let prompt = if playback {
+        println!("One second original faded tone, fixed receiver volume -40 dB, two seconds silent drain. WARNING: volume may persist, including after failure; it is not restored. Packet transmission does not prove audible playback.");
+        "Authorize Stua tone and persistent -40 dB receiver volume? [y/N]: "
+    } else {
+        println!("Stream SETUP-only: authentication, NTP SETUP, event connection, RECORD, stream SETUP and TEARDOWN. Zero audio, zero sync packets, no volume changes. Negotiation does not prove audible playback.");
+        "Start Stua zero-audio stream SETUP-only check? [y/N]: "
+    };
+    interactive::confirm_operation(loaded, None, &snapshot, prompt)?;
+    let mut session = session::Session::new();
+    let cancel = session.cancel.clone();
+    ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
+    session.start_stua_stream_selected(
+        || wire::Wire::connect(&loaded.path, id, &selected, &snapshot),
+        &credential,
+        playback,
+    )?;
+    if playback {
+        session.prepare_playback_check()?;
+        session.transmit_test(1)?;
+        session.stop()?;
+        println!("Stua: {} RTP packets transmitted; TEARDOWN acknowledged; local cleanup complete. Volume -40 dB may persist. Audible playback unverified.", session.packets_sent);
+    } else {
+        session.check_stream()?;
+        println!("Stua stream SETUP validated; TEARDOWN acknowledged; local cleanup complete. Audio packets: 0; volume unchanged. Audible playback unverified.");
+    }
+    Ok(())
+}
+
+fn stua_credential(store: &store::Store, selected: &Selection) -> Result<store::Credential> {
+    ensure!(
+        selected.id == session::STUA_RECEIVER_ID,
+        "existing selection must be Stua; no selection changes or fallback"
+    );
+    ensure!(
+        selected.method != Method::Transient,
+        "Stua requires stored persistent HAP credentials; no transient fallback"
+    );
+    selected.capabilities.decide(selected.method)?;
+    ensure!(
+        selected.capabilities.features & ((1 << 9) | (1 << 19)) == ((1 << 9) | (1 << 19)),
+        "Stua must advertise audio and ALAC"
+    );
+    let credential = store
+        .credential(&selected.id)?
+        .context("existing Stua HAP credentials required; no automatic pairing")?;
+    credential.validate(session::STUA_RECEIVER_ID)?;
+    ensure!(
+        credential.advertised_pi == selected.advertised_pi,
+        "credential discovery binding differs from selection"
+    );
+    Ok(credential)
+}

@@ -389,3 +389,11 @@ sends a fixed one-second faded tone with receiver volume −40 dB (may persist).
 Both require existing approval/selection and interactive confirmation. See the
 [pinned comparison and two independently authorized Pi procedures](docs/OWNTONE_PLAYBACK_CHECK.md).
 Stream negotiation or packet transmission alone does not establish audible playback.
+
+Stua-only persistent HAP diagnostics reuse stored credentials and the same realtime
+engine: `stua-stream-setup-check device:02d899c1833f` (zero audio/volume changes)
+and separately `stua-playback-check device:02d899c1833f` (one second faded tone,
+-40 dB volume which may persist, two seconds silent drain). Both require existing
+approval/selection/credentials and interactive confirmation. See
+[Stua protocol limits and exact Pi commands](docs/STUA_REALTIME_DIAGNOSTICS.md).
+Automated tests do not establish physical routing or audible playback.

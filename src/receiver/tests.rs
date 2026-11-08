@@ -2580,3 +2580,148 @@ fn wizard_preserves_existing_pairing_and_rejects_unapproved_state() {
     assert!(store.save(&credential()).is_err());
     assert!(store.selection().unwrap().is_none());
 }
+
+#[test]
+fn stua_stored_credentials_reused_without_writes_or_method_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::Store::new(&dir.path().join("config.toml")).unwrap();
+    let mut selected = Selection::from_receiver(&snapshot(7000)[0], Method::PinDisplay).unwrap();
+    selected.id = session::STUA_RECEIVER_ID.into();
+    selected.capabilities.features |= (1 << 9) | (1 << 19);
+    assert!(stua_credential(&store, &selected).is_err());
+    let mut c = credential();
+    c.receiver_id = session::STUA_RECEIVER_ID.into();
+    store.save(&c).unwrap();
+    store.select(&selected).unwrap();
+    let path = dir.path().join("receiver-state/02d899c1833f.toml");
+    let before = std::fs::read(&path).unwrap();
+    for method in [Method::PinDisplay, Method::SetupCode] {
+        selected.method = method;
+        let reused = stua_credential(&store, &selected).unwrap();
+        assert_eq!(reused.seed, c.seed);
+        assert_eq!(reused.receiver_key, c.receiver_key);
+    }
+    selected.method = Method::Transient;
+    assert!(stua_credential(&store, &selected).is_err());
+    selected.method = Method::PinDisplay;
+    selected.advertised_pi = Some("changed".into());
+    assert!(stua_credential(&store, &selected).is_err());
+    selected.advertised_pi = c.advertised_pi.clone();
+    selected.id = ID.into();
+    assert!(stua_credential(&store, &selected).is_err());
+    selected.id = session::STUA_RECEIVER_ID.into();
+    selected.capabilities.features &= !(1 << 19);
+    assert!(stua_credential(&store, &selected).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        store.selection().unwrap().unwrap().method,
+        Method::PinDisplay
+    );
+    // A mismatched record in the exact credential path fails closed on read.
+    let mut wrong = credential();
+    wrong.receiver_id = ID.into();
+    std::fs::write(&path, toml::to_string(&wrong).unwrap()).unwrap();
+    selected.capabilities.features |= 1 << 19;
+    assert!(stua_credential(&store, &selected).is_err());
+}
+
+#[test]
+fn stua_session_gates_reject_before_authentication_or_connection() {
+    for playback in [false, true] {
+        let mut c = credential();
+        assert!(session::Session::new()
+            .start_stua_stream_selected(
+                || panic!("mismatched credential must not connect"),
+                &c,
+                playback
+            )
+            .is_err());
+        c.receiver_id = session::STUA_RECEIVER_ID.into();
+        c.version = 1;
+        assert!(session::Session::new()
+            .start_stua_stream_selected(
+                || panic!("unsupported credential must not connect"),
+                &c,
+                playback
+            )
+            .is_err());
+        c.version = 2;
+        for (id, method) in [
+            (ID, Method::PinDisplay),
+            (session::STUA_RECEIVER_ID, Method::Transient),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut peer = listener.accept().unwrap().0;
+            let wire = Wire::mock_method(socket, Duration::from_secs(1), id, method);
+            assert!(session::Session::new()
+                .start_stua_stream_selected(|| Ok(wire), &c, playback)
+                .is_err());
+            assert_eof(&mut peer);
+        }
+    }
+}
+
+#[test]
+fn stua_identity_and_endpoint_drift_never_opens_control_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let id = session::STUA_RECEIVER_ID;
+    std::fs::write(&config, format!("receiver_allowlist=['{id}']")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let advertisement = mdns_sd::ServiceInfo::new(
+        "_airplay._tcp.local.",
+        "StuaFixture",
+        "stua.local.",
+        "127.0.0.1",
+        listener.local_addr().unwrap().port(),
+        [
+            ("deviceid", "02:D8:99:C1:83:3F"),
+            ("pi", PI),
+            ("features", "0x80200,0x4000"),
+        ]
+        .as_slice(),
+    )
+    .unwrap();
+    let observed = [Receiver {
+        id: id.into(),
+        name: "StuaFixture".into(),
+        services: vec![discovery::Advertisement::test_from_info(&advertisement)],
+    }];
+    let selected = Selection::from_receiver(&observed[0], Method::PinDisplay).unwrap();
+    store::Store::new(&config)
+        .unwrap()
+        .select(&selected)
+        .unwrap();
+    for change in 0..5 {
+        let mut drifted = vec![Receiver {
+            id: observed[0].id.clone(),
+            name: observed[0].name.clone(),
+            services: observed[0].services.clone(),
+        }];
+        match change {
+            0 => drifted[0].services[0].port = 0,
+            1 => drifted[0].services[0].addresses = ["127.0.0.2".parse().unwrap()].into(),
+            2 => {
+                drifted[0].services = snapshot(listener.local_addr().unwrap().port())
+                    .remove(0)
+                    .services;
+            }
+            3 => {
+                let service = drifted[0].services[0].clone();
+                drifted[0].services.push(service);
+            }
+            _ => {
+                let other = Receiver {
+                    id: ID.into(),
+                    name: "other".into(),
+                    services: drifted[0].services.clone(),
+                };
+                drifted.push(other);
+            }
+        }
+        assert!(Wire::connect(&config, id, &selected, &drifted).is_err());
+        assert!(listener.accept().is_err());
+    }
+}

@@ -384,7 +384,7 @@ impl Wire {
             self.keys.is_some() && shared.len() >= 32,
             "verified pairing required"
         );
-        if self.uses_owntone_transient_profile() {
+        if self.uses_owntone_transient_profile() || self.method != Method::Transient {
             self.audio_key = Some(Zeroizing::new(shared[..32].try_into()?));
         }
         Ok(())

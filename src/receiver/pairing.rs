@@ -263,10 +263,15 @@ pub fn verify(mut wire: Wire, credential: &Credential) -> Result<Wire> {
         wire.method() != super::compatibility::Method::Transient,
         "transient method unsupported; no credential fallback"
     );
-    let (keys, events) = verify_inner(&mut wire, credential)?;
-    wire.secure(keys, events)
+    let (keys, events, shared) = verify_inner(&mut wire, credential)?;
+    let mut wire = wire.secure(keys, events)?;
+    wire.install_audio_key(shared.as_ref())?;
+    Ok(wire)
 }
-fn verify_inner(wire: &mut Wire, credential: &Credential) -> Result<(ControlKeys, ControlKeys)> {
+fn verify_inner(
+    wire: &mut Wire,
+    credential: &Credential,
+) -> Result<(ControlKeys, ControlKeys, Zeroizing<[u8; 32]>)> {
     credential.validate(&credential.receiver_id)?;
     wire.restart_deadline();
     let mut seed = Zeroizing::new([0; 32]);
@@ -334,6 +339,7 @@ fn verify_inner(wire: &mut Wire, credential: &Credential) -> Result<(ControlKeys
     Ok((
         ControlKeys::new(shared.as_bytes()),
         ControlKeys::events(shared.as_bytes()),
+        Zeroizing::new(*shared.as_bytes()),
     ))
 }
 

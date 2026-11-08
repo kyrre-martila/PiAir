@@ -85,6 +85,10 @@ pub enum Command {
         #[arg(long, requires = "setup_check", value_enum)]
         setup_profile: Option<crate::receiver::SetupProfile>,
     },
+    /// Stua only: reuse stored HAP credentials, validate stream SETUP, zero audio/volume changes.
+    StuaStreamSetupCheck { receiver_id: String },
+    /// Stua only: one second faded tone, -40 dB volume (may persist), two seconds silent drain.
+    StuaPlaybackCheck { receiver_id: String },
     /// Remove local credentials without contacting the receiver.
     Unpair { receiver_id: String },
     /// Validate or display effective configuration.
