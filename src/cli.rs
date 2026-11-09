@@ -87,8 +87,13 @@ pub enum Command {
     },
     /// Stua only: reuse stored HAP credentials, validate stream SETUP, zero audio/volume changes.
     StuaStreamSetupCheck { receiver_id: String },
-    /// Stua only: one second faded tone, -40 dB volume (may persist), two seconds silent drain.
-    StuaPlaybackCheck { receiver_id: String },
+    /// Stua only: one second faded tone, configurable receiver volume (may persist), two seconds silent drain.
+    StuaPlaybackCheck {
+        receiver_id: String,
+        /// Receiver volume in dB (-40 through -10); may persist after the test.
+        #[arg(long, default_value_t = -40, allow_negative_numbers = true, value_parser = clap::value_parser!(i32).range(-40..=-10))]
+        volume_db: i32,
+    },
     /// Remove local credentials without contacting the receiver.
     Unpair { receiver_id: String },
     /// Validate or display effective configuration.
@@ -400,5 +405,52 @@ mod playback_diagnostic_tests {
             "--experimental-owntone-transient"
         ])
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod stua_volume_tests {
+    use super::*;
+
+    #[test]
+    fn stua_playback_volume_defaults_and_valid_values() {
+        for (args, expected) in [
+            (vec![], -40),
+            (vec!["--volume-db", "-20"], -20),
+            (vec!["--volume-db", "-40"], -40),
+            (vec!["--volume-db", "-10"], -10),
+        ] {
+            let cli = Cli::try_parse_from(
+                ["piair", "stua-playback-check", "device:02d899c1833f"]
+                    .into_iter()
+                    .chain(args),
+            )
+            .unwrap();
+            assert!(
+                matches!(cli.command, Command::StuaPlaybackCheck { volume_db, .. } if volume_db == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn stua_playback_rejects_invalid_or_missing_volume() {
+        for args in [vec!["-41"], vec!["-9"], vec!["loud"], vec!["-20.5"], vec![]] {
+            let error = Cli::try_parse_from(
+                [
+                    "piair",
+                    "stua-playback-check",
+                    "device:02d899c1833f",
+                    "--volume-db",
+                ]
+                .into_iter()
+                .chain(args),
+            )
+            .err()
+            .expect("invalid volume must fail Clap validation");
+            assert!(matches!(
+                error.kind(),
+                clap::error::ErrorKind::ValueValidation | clap::error::ErrorKind::InvalidValue
+            ));
+        }
     }
 }

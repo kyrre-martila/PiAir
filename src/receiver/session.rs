@@ -207,11 +207,14 @@ impl Session {
         Ok(())
     }
     pub fn prepare_playback_check(&mut self) -> Result<()> {
+        self.prepare_playback_check_at_volume(-40)
+    }
+    pub fn prepare_playback_check_at_volume(&mut self, volume_db: i32) -> Result<()> {
         ensure!(
             self.stream_check && self.playback_check,
             "playback diagnostic required"
         );
-        self.volume_db = -40;
+        self.volume_db = volume_db;
         self.negotiate(false, None)
     }
     pub fn record_succeeded(&self) -> bool {

@@ -467,7 +467,7 @@ fn stream_diagnostics_reject_other_ids_without_state_or_contact() {
 }
 
 #[test]
-fn stua_diagnostics_require_exact_id_and_fixed_modes_without_contact() {
+fn stua_diagnostics_require_exact_id_and_explicit_modes_without_contact() {
     for mode in ["stua-stream-setup-check", "stua-playback-check"] {
         assert_eq!(run(&[mode]).status.code(), Some(2));
         for id in [
@@ -483,7 +483,6 @@ fn stua_diagnostics_require_exact_id_and_fixed_modes_without_contact() {
                 .contains("requires device:02d899c1833f"));
         }
         for flag in [
-            "--volume-db=-40",
             "--seconds=1",
             "--experimental-owntone-transient",
             "--setup-profile=a",
@@ -494,6 +493,11 @@ fn stua_diagnostics_require_exact_id_and_fixed_modes_without_contact() {
                 Some(2)
             );
         }
+        let output = run(&[mode, "device:02d899c1833f", "--volume-db=-40"]);
+        assert_eq!(
+            output.status.code(),
+            Some(if mode == "stua-playback-check" { 1 } else { 2 })
+        );
         let output = run(&[mode, "device:02d899c1833f"]);
         assert_eq!(output.status.code(), Some(1));
         assert!(String::from_utf8(output.stderr)

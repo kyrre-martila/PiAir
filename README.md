@@ -393,9 +393,15 @@ Stream negotiation or packet transmission alone does not establish audible playb
 Stua-only persistent HAP diagnostics reuse stored credentials and the same realtime
 engine: `stua-stream-setup-check device:02d899c1833f` (zero audio/volume changes)
 and separately `stua-playback-check device:02d899c1833f` (one second faded tone,
--40 dB volume which may persist, two seconds silent drain). Both require existing
-approval, valid stored HAP credentials and interactive confirmation. Stua uses a
+receiver volume defaulting to -40 dB which may persist, two seconds silent drain).
+Both require existing approval, valid stored HAP credentials and interactive confirmation. Stua uses a
 temporary operation selection from passive discovery; the selected default
 receiver remains unchanged. See
 [Stua protocol limits and exact Pi commands](docs/STUA_REALTIME_DIAGNOSTICS.md).
 Automated tests do not establish physical routing or audible playback.
+
+For Stua playback only, select an integer receiver volume from -40 through -10 dB
+with `piair stua-playback-check device:02d899c1833f --volume-db -20`.
+The default remains -40 dB. The confirmation displays the selected volume;
+receiver volume may persist after the test, including after failure, and is not
+restored. This changes only receiver volume, not the generated tone amplitude.

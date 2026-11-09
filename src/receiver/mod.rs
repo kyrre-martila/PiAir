@@ -547,7 +547,7 @@ pub fn stream_test(
 }
 
 /// Deliberate Stua-only diagnostics; never invoked by capture or production startup.
-pub fn stua_check(loaded: &Loaded, id: &str, playback: bool) -> Result<()> {
+pub fn stua_check(loaded: &Loaded, id: &str, playback: bool, volume_db: i32) -> Result<()> {
     ensure!(
         id == session::STUA_RECEIVER_ID,
         "Stua diagnostic requires device:02d899c1833f; no other receiver contact"
@@ -569,13 +569,13 @@ pub fn stua_check(loaded: &Loaded, id: &str, playback: bool) -> Result<()> {
     interactive::describe(&snapshot, id)?;
     println!("Persistent HAP pair-verify using existing stored keys; no pairing, credential writes, retries or receiver fallback. Only NTP realtime ALAC is supported; PTP/FairPlay/MFi requirements fail closed. Stua uses HomePod 2 as default output; routing and audible playback remain unverified.");
     let prompt = if playback {
-        println!("One second original faded tone, fixed receiver volume -40 dB, two seconds silent drain. WARNING: volume may persist, including after failure; it is not restored. Packet transmission does not prove audible playback.");
-        "Authorize Stua tone and persistent -40 dB receiver volume? [y/N]: "
+        println!("One second original faded tone, receiver volume {volume_db} dB, two seconds silent drain. WARNING: receiver volume may persist after the test, including after failure; it is not restored. Packet transmission does not prove audible playback.");
+        format!("Authorize Stua tone and persistent {volume_db} dB receiver volume? [y/N]: ")
     } else {
         println!("Stream SETUP-only: authentication, NTP SETUP, event connection, RECORD, stream SETUP and TEARDOWN. Zero audio, zero sync packets, no volume changes. Negotiation does not prove audible playback.");
-        "Start Stua zero-audio stream SETUP-only check? [y/N]: "
+        "Start Stua zero-audio stream SETUP-only check? [y/N]: ".to_owned()
     };
-    interactive::confirm_operation(loaded, None, &snapshot, prompt)?;
+    interactive::confirm_operation(loaded, None, &snapshot, &prompt)?;
     let mut session = session::Session::new();
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
@@ -585,10 +585,10 @@ pub fn stua_check(loaded: &Loaded, id: &str, playback: bool) -> Result<()> {
         playback,
     )?;
     if playback {
-        session.prepare_playback_check()?;
+        session.prepare_playback_check_at_volume(volume_db)?;
         session.transmit_test(1)?;
         session.stop()?;
-        println!("Stua: {} RTP packets transmitted; TEARDOWN acknowledged; local cleanup complete. Volume -40 dB may persist. Audible playback unverified.", session.packets_sent);
+        println!("Stua: {} RTP packets transmitted; TEARDOWN acknowledged; local cleanup complete. Volume {volume_db} dB may persist. Audible playback unverified.", session.packets_sent);
     } else {
         session.check_stream()?;
         println!("Stua stream SETUP validated; TEARDOWN acknowledged; local cleanup complete. Audio packets: 0; volume unchanged. Audible playback unverified.");
