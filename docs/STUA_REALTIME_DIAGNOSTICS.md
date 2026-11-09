@@ -101,9 +101,9 @@ sends no SET_PARAMETER, and never opens the media sending path. NTP responses
 and encrypted control/event traffic are expected; “zero audio” does not mean
 zero network traffic.
 
-`stua-playback-check` is a separate explicit gate. It requires acknowledged
-**-40 dB** receiver volume, then timing readiness; volume can persist even when
-later work fails and is not restored. The existing original faded triangle tone
+`stua-playback-check` is a separate explicit gate. It requires acknowledgement of
+the selected receiver volume (**-40 dB** by default), then timing readiness.
+Volume can persist even when later work fails and is not restored. The existing original faded triangle tone
 has one second of content, peak below -18 dBFS and 50 ms fades, followed by two
 seconds silent drain. Success sends the existing fixed 376-packet budget,
 including silent packet padding. There are no retransmissions or automatic
@@ -155,7 +155,7 @@ attempt and review the outcome. Do not infer sound from negotiation success.
 
 Playback is separately authorized by its own prompt. Be physically present to
 check Stua and its default HomePod 2 output, and ready to cancel. Receiver volume
-**may remain at -40 dB**. After reviewing the SETUP-only outcome, run once:
+**may remain at the selected volume after the test**. After reviewing the SETUP-only outcome, run once:
 
 ```sh
 ./target/release/piair --config "$CONFIG" -v stua-playback-check \
@@ -164,7 +164,14 @@ result=$?
 printf 'Stua playback diagnostic exit=%s\n' "$result"
 ```
 
-Do not add duration/volume flags or retry automatically. Record heard/not heard
+Optional `--volume-db <integer>` selects receiver volume from **-40 through -10 dB**
+inclusive; the default remains **-40 dB**. For example:
+`piair stua-playback-check device:02d899c1833f --volume-db -20`.
+The confirmation displays the selected volume and warns it may persist after the
+test, including after failure. Only receiver volume changes; generated signal
+amplitude, tone duration, silent drain and packet budget are unchanged.
+
+Do not add duration flags or retry automatically. Record heard/not heard
 separately from packet count, timing replies and TEARDOWN/cleanup. These commands
 do not stop any other audio source or guarantee availability of the receiver.
 

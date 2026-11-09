@@ -90,6 +90,14 @@ fn record_case_mode(case: Case, playback: Option<bool>) {
     authenticated_case(case, playback, false);
 }
 fn authenticated_case(case: Case, playback: Option<bool>, persistent: bool) {
+    authenticated_case_at_volume(case, playback, persistent, -40);
+}
+fn authenticated_case_at_volume(
+    case: Case,
+    playback: Option<bool>,
+    persistent: bool,
+    volume_db: i32,
+) {
     let receiver_id = if persistent {
         session::STUA_RECEIVER_ID
     } else {
@@ -595,7 +603,10 @@ fn authenticated_case(case: Case, playback: Option<bool>, persistent: bool) {
                             assert_eq!(volume.method, "SET_PARAMETER");
                             assert_eq!(volume.headers["cseq"], seq(8));
                             assert_eq!(volume.headers["content-type"], "text/parameters");
-                            assert_eq!(volume.body, b"volume: -40.000000\r\n");
+                            assert_eq!(
+                                volume.body,
+                                format!("volume: {volume_db}.000000\r\n").as_bytes()
+                            );
                             if case == Case::VolumeReject {
                                 socket.write_all(&keys.encrypt(b"RTSP/1.0 403 private-reason\r\nCSeq: 8\r\nContent-Length: 0\r\n\r\n").unwrap()).unwrap();
                                 assert_eof(&mut socket);
@@ -795,10 +806,16 @@ fn authenticated_case(case: Case, playback: Option<bool>, persistent: bool) {
         let result = match playback {
             None => session.check_record(),
             Some(false) => session.check_stream(),
-            Some(true) => session
-                .prepare_playback_check()
-                .and_then(|()| session.transmit_test(1))
-                .and_then(|()| session.stop()),
+            Some(true) => {
+                let prepared = if persistent {
+                    session.prepare_playback_check_at_volume(volume_db)
+                } else {
+                    session.prepare_playback_check()
+                };
+                prepared
+                    .and_then(|()| session.transmit_test(1))
+                    .and_then(|()| session.stop())
+            }
         };
         assert_eq!(result.is_ok(), case.success(), "{case:?}: {result:?}");
         if let Err(error) = result {
@@ -1057,5 +1074,12 @@ fn diagnostic_auth_mock(
             true,
             |socket, shared| continuation(socket, shared.as_ref()),
         );
+    }
+}
+
+#[test]
+fn stua_selected_volume_reaches_encrypted_receiver_without_changing_tone() {
+    for volume_db in [-40, -20, -10] {
+        authenticated_case_at_volume(Case::Good, Some(true), true, volume_db);
     }
 }

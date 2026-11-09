@@ -80,11 +80,12 @@ fn run_with_discovery(
             experimental_owntone_transient,
         )?,
         Command::StuaStreamSetupCheck { receiver_id } => {
-            receiver::stua_check(&loaded, &receiver_id, false)?
+            receiver::stua_check(&loaded, &receiver_id, false, -40)?
         }
-        Command::StuaPlaybackCheck { receiver_id } => {
-            receiver::stua_check(&loaded, &receiver_id, true)?
-        }
+        Command::StuaPlaybackCheck {
+            receiver_id,
+            volume_db,
+        } => receiver::stua_check(&loaded, &receiver_id, true, volume_db)?,
         Command::Unpair { receiver_id } => receiver::unpair(&loaded, &receiver_id)?,
         Command::Audio { command } => audio::run(command, &loaded)?,
         Command::Status => {
