@@ -728,3 +728,145 @@ fn implemented_buffered_codec_coexists_with_unknown_formats_without_enabling_pla
             .any(|r| r.contains("not authorized")));
     }
 }
+
+#[test]
+fn buffered_format_projection_compares_only_legacy_representable_indices() {
+    use super::super::profile::{dict, uint};
+    // Independently specified wire values: bit21 is 2097152; index72 has
+    // no representation in a 64-bit legacy mask.
+    let info = dict([
+        ("supportedFormats", dict([("bufferStream", uint(2097152))])),
+        (
+            "supportedAudioFormatsExtended",
+            dict([("bufferStream", Value::Array(vec![uint(21), uint(72)]))]),
+        ),
+    ]);
+    assert_eq!(
+        Evidence::authenticated_info(&info).buffered_formats,
+        Claim::Observed([21, 72].into())
+    );
+    let mut conflict = info.clone();
+    conflict.as_dictionary_mut().unwrap().insert(
+        "supportedFormats".into(),
+        dict([("bufferStream", uint(8388608))]),
+    );
+    assert_eq!(
+        Evidence::authenticated_info(&conflict).buffered_formats,
+        Claim::Conflict
+    );
+    assert!(buffered_format_diagnostic(&conflict).contains("result=contradictory"));
+}
+
+#[test]
+fn bounded_format_diagnostics_and_rejections() {
+    use super::super::profile::{dict, uint};
+    let cases = [
+        (
+            Value::Array(vec![uint(21)]),
+            Claim::Observed([21].into()),
+            "supported",
+        ),
+        (
+            Value::Array(vec![]),
+            Claim::Observed([].into()),
+            "unsupported",
+        ),
+        (
+            Value::Array(vec![uint(23)]),
+            Claim::Observed([23].into()),
+            "unsupported",
+        ),
+        (
+            Value::Array(vec![uint(999)]),
+            Claim::Observed([999].into()),
+            "unsupported",
+        ),
+        (
+            Value::Array(vec![uint(21), uint(21)]),
+            Claim::Invalid,
+            "malformed",
+        ),
+        (
+            Value::Array(vec![Value::Integer((-1i64).into())]),
+            Claim::Invalid,
+            "malformed",
+        ),
+        (
+            Value::Array(vec![uint(u64::MAX)]),
+            Claim::Observed([u64::MAX].into()),
+            "unsupported",
+        ),
+        (
+            Value::Array(vec![uint(21); 65]),
+            Claim::Invalid,
+            "malformed",
+        ),
+        (
+            Value::Array(vec![Value::String("PRIVATE".into())]),
+            Claim::Invalid,
+            "malformed",
+        ),
+        (Value::String("PRIVATE".into()), Claim::Invalid, "malformed"),
+        (Value::Boolean(true), Claim::Invalid, "malformed"),
+        (Value::Data(vec![42; 100000]), Claim::Invalid, "malformed"),
+        (dict([]), Claim::Invalid, "malformed"),
+    ];
+    for (v, expected, state) in cases {
+        let info = dict([
+            ("supportedAudioFormatsExtended", dict([("bufferStream", v)])),
+            ("shk", Value::String("SECRET".into())),
+            ("name", Value::String("PRIVATE".into())),
+        ]);
+        assert_eq!(
+            Evidence::authenticated_info(&info).buffered_formats,
+            expected
+        );
+        let diagnostic = buffered_format_diagnostic(&info);
+        assert!(
+            diagnostic.contains(&format!("result={state}")),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains("PRIVATE"));
+        assert!(!diagnostic.contains("SECRET"));
+        assert!(diagnostic.len() < 4096);
+    }
+    let missing = dict([]);
+    assert_eq!(
+        Evidence::authenticated_info(&missing).buffered_formats,
+        Claim::Unknown
+    );
+    assert!(buffered_format_diagnostic(&missing).contains("result=missing"));
+    for info in [
+        dict([("supportedFormats", Value::Boolean(false))]),
+        dict([("supportedAudioFormatsExtended", Value::Boolean(false))]),
+        dict([(
+            "supportedFormats",
+            dict([("bufferStream", Value::Integer((-1i64).into()))]),
+        )]),
+    ] {
+        assert_eq!(
+            Evidence::authenticated_info(&info).buffered_formats,
+            Claim::Invalid
+        );
+        assert!(buffered_format_diagnostic(&info).contains("result=malformed"));
+    }
+}
+
+#[test]
+fn diagnostic_bounds_both_fields_even_when_their_types_are_wrong() {
+    use super::super::profile::{dict, uint};
+    let large = Value::Array(vec![uint(u64::MAX); 10000]);
+    let value = dict([
+        ("supportedFormats", dict([("bufferStream", large.clone())])),
+        (
+            "supportedAudioFormatsExtended",
+            dict([("bufferStream", large)]),
+        ),
+    ]);
+    let diagnostic = buffered_format_diagnostic(&value);
+    assert!(diagnostic.len() < 4096);
+    assert!(diagnostic.contains("count=10000"));
+    assert!(diagnostic.contains("truncated=true"));
+    assert!(diagnostic.contains("duplicates=true"));
+    assert!(diagnostic.contains("result=malformed"));
+}

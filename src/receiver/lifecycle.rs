@@ -496,7 +496,8 @@ fn validate_info(value: &Value, receiver_id: &str) -> Result<()> {
     );
     ensure!(
         matches!(evidence.buffered_formats, Claim::Observed(ref formats) if formats.contains(&21)),
-        "authenticated ALAC24/48000/stereo format unavailable or contradictory"
+        "authenticated ALAC24/48000/stereo format unavailable or contradictory: {}",
+        super::planning::buffered_format_diagnostic(value)
     );
     // Conservative diagnostic policy. No password/FairPlay or policy guessing.
     ensure!(
