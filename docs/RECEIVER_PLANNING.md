@@ -3,7 +3,8 @@
 Current foundation update: [BUFFERED_TRANSPORT.md](BUFFERED_TRANSPORT.md) supersedes
 historical statements below that all buffered encoders/transport are absent.
 ALAC24 and type103 TCP components are implemented; complete sessions and live
-buffered playback remain disabled pending PR #41. AAC remains unavailable.
+buffered playback remain disabled pending PR #42. The [PR #41 timing foundation](PTP_TIMING.md)
+is implemented separately. AAC remains unavailable.
 
 
 Audit baseline: PiAir `f24b447` (PR #38 merge), 2026-11-10. This is original
@@ -152,3 +153,13 @@ Even authenticated /info format support and media-send success are insufficient.
 Hardware validation must separately establish audible output, channel mapping,
 synchronization, startup/stop behavior and recovery on each tested firmware and
 access policy. Synthetic fixtures prove conservative policy, not hardware support.
+
+
+### PR #41 timing capability update
+
+[PTP timing and control](PTP_TIMING.md) are independently testable foundations.
+BufferedPtp remains FoundationOnly and ineligible for live playback. RealtimePtp
+is not activated; realtime NTP stays unchanged. Sender-grandmaster peer traffic
+is not a verified receiver servo lock, and no RuntimeResults hardware success is
+recorded. Complete single-receiver negotiation, feedback, revocable media grants,
+Apple extension validation and hardware trials remain PR #42 dependencies.

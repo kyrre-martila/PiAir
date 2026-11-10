@@ -414,5 +414,7 @@ See [capability planning and remaining gaps](docs/RECEIVER_PLANNING.md).
 
 The [buffered AirPlay 2 foundation](docs/BUFFERED_TRANSPORT.md) implements
 type103 encrypted TCP framing and an independently decoded ALAC24 stereo codec.
-Complete buffered sessions remain disabled pending PR #41 timing/lifecycle work;
+The [PTP timing foundation](docs/PTP_TIMING.md) adds a session-owned grandmaster,
+precise 48 kHz anchors and authenticated timing-control requests. Complete buffered
+sessions remain disabled pending PR #42 lifecycle and hardware validation;
 no buffered hardware playback is claimed.

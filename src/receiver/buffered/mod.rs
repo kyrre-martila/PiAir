@@ -1,5 +1,5 @@
-//! Type103 transport foundation. No live session entry point or timing clock.
-//! See docs/BUFFERED_TRANSPORT.md for evidence and PR #41 prerequisites.
+//! Type103 transport foundation. No live session entry point.
+//! See docs/BUFFERED_TRANSPORT.md and docs/PTP_TIMING.md for lifecycle gates.
 mod codec;
 use super::{
     crypto,
@@ -101,7 +101,8 @@ impl Prepared {
 }
 
 /// Typed future engine boundary. Implementations must bind these values to the
-/// same authenticated session. No implementation is supplied until PR #41.
+/// same authenticated session. PTP mapping/control exist in `ptp`; the complete
+/// authorized lifecycle and media grant remain gated until PR #42.
 pub struct PtpAnchor {
     pub clock_id: u64,
     pub seconds: u64,

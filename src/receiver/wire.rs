@@ -552,6 +552,8 @@ impl Wire {
             "TEARDOWN" => "encrypted TEARDOWN",
             "FLUSH" => "encrypted FLUSH",
             "SET_PARAMETER" => "encrypted SET_PARAMETER",
+            "SETPEERS" => "encrypted SETPEERS",
+            "SETRATEANCHORTIME" => "encrypted SETRATEANCHORTIME",
             _ => "encrypted POST",
         };
         let result = (|| {
@@ -570,7 +572,9 @@ impl Wire {
                         "RECORD",
                         "FLUSH",
                         "TEARDOWN",
-                        "SET_PARAMETER"
+                        "SET_PARAMETER",
+                        "SETPEERS",
+                        "SETRATEANCHORTIME"
                     ]
                     .contains(&method),
                     "unsupported RTSP method"
@@ -788,6 +792,54 @@ impl Wire {
             body,
             self.auth_profile == AuthProfile::PyatvDiagnostic,
         )
+    }
+    /// No production caller until PR #42 owns authenticated buffered setup.
+    /// Binding standard PTP ports may fail without local bind permission: fail closed.
+    #[allow(dead_code)]
+    pub(super) fn start_ptp(
+        &self,
+        clock_id: u64,
+        peer_clock_id: u64,
+        timeout: Duration,
+    ) -> Result<super::ptp::Service> {
+        self.reauthorize()?;
+        ensure!(
+            !self.failed && self.keys.is_some(),
+            "authenticated control required"
+        );
+        let peer = self.socket.peer_addr()?.ip();
+        let local = self.socket.local_addr()?.ip();
+        let event = UdpSocket::bind(SocketAddr::new(local, 319))?;
+        event.connect(SocketAddr::new(peer, 319))?;
+        let general = UdpSocket::bind(SocketAddr::new(local, 320))?;
+        general.connect(SocketAddr::new(peer, 320))?;
+        self.reauthorize()?;
+        super::ptp::Service::attach(
+            super::ptp::Grandmaster::new(clock_id, peer_clock_id, Instant::now(), timeout)?,
+            event,
+            general,
+        )?
+        .authorize(self.lease())
+    }
+    /// Foundation only: exclusive same-receiver authenticated timing control.
+    #[allow(dead_code)]
+    pub(super) fn buffered_timing(
+        &mut self,
+        uri: String,
+        clock: &super::ptp::Grandmaster,
+    ) -> Result<super::ptp::control::Control<'_>> {
+        self.reauthorize()?;
+        ensure!(
+            !self.failed && self.keys.is_some(),
+            "authenticated control required"
+        );
+        ensure!(
+            uri.starts_with("rtsp://") && uri.len() < 256 && uri.bytes().all(|b| b > 32 && b < 127),
+            "invalid session URI"
+        );
+        let receiver = self.socket.peer_addr()?.ip();
+        let local = self.socket.local_addr()?.ip();
+        super::ptp::control::Control::new(self, uri, receiver, local, clock)
     }
     pub(super) fn uses_owntone_transient_profile(&self) -> bool {
         self.auth_profile == AuthProfile::OwnToneTransient
