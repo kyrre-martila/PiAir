@@ -1,5 +1,11 @@
 # Buffered-profile research update (Prompt 4b)
 
+Current foundation update: [BUFFERED_TRANSPORT.md](BUFFERED_TRANSPORT.md) supersedes
+historical statements below that all buffered encoders/transport are absent.
+ALAC24 and type103 TCP components are implemented; complete sessions and live
+buffered playback remain disabled pending PR #41. AAC remains unavailable.
+
+
 Historical revision scope: see [the newer fork audit and gap matrix](RECEIVER_PLANNING.md).
 The newer `owntone-mini/minimal` fork has active buffered transport; the older
 pinned source conclusions below do not describe that fork.

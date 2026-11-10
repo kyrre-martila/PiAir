@@ -411,3 +411,8 @@ provenance, group/stereo/proxy candidates and transport rejection reasons withou
 receiver connections or state writes. Optional `--method setup-code` (also
 `pin-display`/`transient`) expresses planning intent only; it does not pair or play.
 See [capability planning and remaining gaps](docs/RECEIVER_PLANNING.md).
+
+The [buffered AirPlay 2 foundation](docs/BUFFERED_TRANSPORT.md) implements
+type103 encrypted TCP framing and an independently decoded ALAC24 stereo codec.
+Complete buffered sessions remain disabled pending PR #41 timing/lifecycle work;
+no buffered hardware playback is claimed.

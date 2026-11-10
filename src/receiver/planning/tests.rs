@@ -419,7 +419,7 @@ fn unknown_extended_format_ids_remain_evidence_without_enabling_streaming() {
     assert!(candidates
         .iter()
         .filter(|c| c.transport == Transport::BufferedPtp)
-        .all(|c| c.implementation == Implementation::Unsupported && !c.rejections.is_empty()));
+        .all(|c| c.implementation == Implementation::FoundationOnly && !c.rejections.is_empty()));
 }
 
 fn buffered_receiver() -> Receiver {
@@ -482,13 +482,19 @@ fn buffered_formats_and_codecs_are_independent_of_realtime_alac() {
                     && !reason.contains("buffered audio claim")),
             "{buffered:?}"
         );
-        assert_eq!(buffered.implementation, Implementation::Unsupported);
+        assert_eq!(buffered.implementation, Implementation::FoundationOnly);
         assert!(!buffered.rejections.is_empty());
-        assert_ne!(expected.codec_available(), Claim::Observed(true));
-        assert!(buffered
-            .rejections
-            .iter()
-            .any(|r| r.contains("codec/format")));
+        assert_eq!(
+            expected.codec_available() == Claim::Observed(true),
+            id == 21
+        );
+        assert_eq!(
+            buffered
+                .rejections
+                .iter()
+                .any(|r| r.contains("codec/format")),
+            id != 21
+        );
         assert!(candidate(&candidates, Transport::RealtimeNtp)
             .rejections
             .iter()
@@ -655,11 +661,18 @@ fn shared_authorization_still_blocks_every_profile_and_no_transport_is_enabled()
     }
     for c in plan(&r, authorized(), &t, Some(&info)) {
         if c.transport != Transport::RealtimeNtp {
-            assert_eq!(c.implementation, Implementation::Unsupported);
+            assert_eq!(
+                c.implementation,
+                if c.transport == Transport::BufferedPtp {
+                    Implementation::FoundationOnly
+                } else {
+                    Implementation::Unsupported
+                }
+            );
             assert!(c
                 .rejections
                 .iter()
-                .any(|r| r.contains("transport is not implemented")));
+                .any(|r| r.contains("not implemented for streaming")));
         }
     }
     let mut restricted = r;
@@ -674,5 +687,44 @@ fn shared_authorization_still_blocks_every_profile_and_no_transport_is_enabled()
             .rejections
             .iter()
             .any(|r| r.contains("password-protected")));
+    }
+}
+
+#[test]
+fn implemented_buffered_codec_coexists_with_unknown_formats_without_enabling_playback() {
+    let r = buffered_receiver();
+    let t = topology(std::slice::from_ref(&r));
+    let info = buffered_info(&[99, 23, 21, 22]);
+    let candidates = plan(&r, authorized(), &t, Some(&info));
+    let c = candidate(&candidates, Transport::BufferedPtp);
+    assert!(!c.rejections.iter().any(|r| r.contains("codec/format")));
+    assert_eq!(
+        c.local_buffered_format,
+        Some(BufferedFormat::Alac48000Stereo24)
+    );
+    assert_eq!(
+        c.implementation,
+        if c.transport == Transport::BufferedPtp {
+            Implementation::FoundationOnly
+        } else {
+            Implementation::Unsupported
+        }
+    );
+    assert!(c
+        .rejections
+        .iter()
+        .any(|r| r.contains("not implemented for streaming")));
+    for auth in [
+        Authorization::default(),
+        Authorization {
+            allowlisted: false,
+            ..authorized()
+        },
+    ] {
+        let candidates = plan(&r, auth, &t, Some(&info));
+        assert!(candidate(&candidates, Transport::BufferedPtp)
+            .rejections
+            .iter()
+            .any(|r| r.contains("not authorized")));
     }
 }
