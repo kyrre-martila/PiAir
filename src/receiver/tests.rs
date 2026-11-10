@@ -2851,3 +2851,160 @@ fn stua_operation_rejects_ambiguous_state_and_changed_confirmation_before_socket
     assert!(store.selection().unwrap().is_none());
     assert!(toml::to_string(&selected).is_err()); // Operation method cannot be persisted.
 }
+
+// Exercise the actual buffered entry point, rather than selecting a profile in
+// the test factory. All network traffic is confined to an authorized loopback.
+fn buffered_transient_fixture(wire: &mut Wire) -> tempfile::TempDir {
+    let dir = wire.ptp_test_authorization().unwrap();
+    let identity = dir.path().join("receiver-state/client-identity.toml");
+    std::fs::write(&identity, "client='123456789ABCDEF0'\nremote=123456789\n").unwrap();
+    std::fs::set_permissions(identity, std::fs::Permissions::from_mode(0o600)).unwrap();
+    store::Store::new(&dir.path().join("config.toml"))
+        .unwrap()
+        .save(&credential())
+        .unwrap();
+    dir
+}
+fn buffered_files(dir: &tempfile::TempDir) -> std::collections::BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(dir.path().join("receiver-state"))
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (
+                entry.file_name().into_string().unwrap(),
+                std::fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect()
+}
+#[test]
+fn buffered_transient_reuses_rtsp_srp_and_enters_encrypted_negotiation() {
+    let (mut wire, server) = local_mock_method(Method::Transient, |mut socket| {
+        owntone_info(&mut socket, 200, &info_body(0));
+        setup_mock_transport(
+            socket,
+            Fault::None,
+            Method::Transient,
+            "3939",
+            PI,
+            false,
+            true,
+            |mut socket, shared| {
+                let mut keys = ControlKeys::new(shared.as_ref());
+                keys.swap_directions_for_test();
+                // Successful M4 must lead to encrypted GET /info, never PTP,
+                // audio, volume, or a second authentication attempt.
+                let mut length = [0; 2];
+                socket.read_exact(&mut length).unwrap();
+                let mut frame = vec![0; usize::from(u16::from_le_bytes(length)) + 18];
+                frame[..2].copy_from_slice(&length);
+                socket.read_exact(&mut frame[2..]).unwrap();
+                let request = String::from_utf8(keys.decrypt(&frame).unwrap().to_vec()).unwrap();
+                assert_eq!(request, "GET /info RTSP/1.0\r\nCSeq: 4\r\nUser-Agent: AirPlay/999.0.0\r\nX-Apple-ProtocolVersion: 1\r\nContent-Length: 0\r\nClient-Instance: 123456789ABCDEF0\r\nDACP-ID: 123456789ABCDEF0\r\nActive-Remote: 123456789\r\nX-Apple-Client-Name: PiAir\r\n\r\n");
+                encrypted_reply(
+                    &mut socket,
+                    &mut keys,
+                    b"RTSP/1.0 403 Forbidden\r\nCSeq: 4\r\nContent-Length: 0\r\n\r\n",
+                );
+                assert_eof(&mut socket);
+            },
+        );
+    });
+    let dir = buffered_transient_fixture(&mut wire);
+    let before = buffered_files(&dir);
+    let mut owner = lifecycle::Session::new();
+    let error = format!("{:#}", owner.start(|| Ok(wire), None).unwrap_err());
+    assert!(error.contains("403"), "{error}");
+    assert_eq!(owner.state(), lifecycle::State::Failed);
+    assert_eq!(before, buffered_files(&dir));
+    server.join().unwrap();
+}
+#[test]
+fn buffered_transient_authentication_failures_close_without_fallback_or_writes() {
+    for fault in [
+        "info403",
+        "m1-403",
+        "proof",
+        "interrupt",
+        "revoked",
+        "changed",
+    ] {
+        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
+            if matches!(fault, "revoked" | "changed") {
+                assert_eof(&mut socket);
+                return;
+            }
+            owntone_info(
+                &mut socket,
+                if fault == "info403" { 403 } else { 200 },
+                &info_body(0),
+            );
+            match fault {
+                "info403" => assert_eof(&mut socket),
+                "m1-403" => {
+                    request_method(&mut socket, "/pair-setup", Method::Transient);
+                    socket
+                        .write_all(
+                            b"RTSP/1.0 403 Forbidden\r\nCSeq: 2\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .unwrap();
+                    assert_eof(&mut socket);
+                }
+                "interrupt" => {
+                    request_method(&mut socket, "/pair-setup", Method::Transient);
+                    // Closing mid-authentication must release the owned socket.
+                }
+                "proof" => setup_mock_transport(
+                    socket,
+                    Fault::Proof,
+                    Method::Transient,
+                    "3939",
+                    PI,
+                    false,
+                    true,
+                    |_, _| panic!("invalid proof must not establish a session"),
+                ),
+                _ => unreachable!(),
+            }
+        });
+        let dir = buffered_transient_fixture(&mut wire);
+        if fault == "revoked" {
+            std::fs::write(dir.path().join("config.toml"), "receiver_allowlist=[]").unwrap();
+        } else if fault == "changed" {
+            let store = store::Store::new(&dir.path().join("config.toml")).unwrap();
+            let mut selection = store.selection().unwrap().unwrap();
+            selection.port += 1;
+            store.select(&selection).unwrap();
+        }
+        let before = buffered_files(&dir);
+        let mut owner = lifecycle::Session::new();
+        assert!(owner.start(|| Ok(wire), None).is_err(), "{fault}");
+        assert_eq!(owner.state(), lifecycle::State::Failed);
+        assert_eq!(before, buffered_files(&dir), "{fault}");
+        assert!(owner
+            .start(|| panic!("failed owner must not reconnect"), None)
+            .is_err());
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn buffered_transient_cancellation_during_srp_closes_before_setup() {
+    let mut owner = lifecycle::Session::new();
+    let cancel = owner.cancel.clone();
+    let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
+        owntone_info(&mut socket, 200, &info_body(0));
+        request_method(&mut socket, "/pair-setup", Method::Transient);
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        socket.write_all(b"R").unwrap();
+        assert_eof(&mut socket);
+    });
+    let dir = buffered_transient_fixture(&mut wire);
+    let before = buffered_files(&dir);
+    let error = format!("{:#}", owner.start(|| Ok(wire), None).unwrap_err());
+    assert!(error.contains("interrupted"), "{error}");
+    assert_eq!(owner.state(), lifecycle::State::Failed);
+    assert_eq!(before, buffered_files(&dir));
+    drop(owner);
+    server.join().unwrap();
+}

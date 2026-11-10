@@ -805,3 +805,42 @@ fn pending_record_cancel_revocation_timing_loss_and_tcp_close_fail_closed() {
         server.join().unwrap();
     }
 }
+
+#[test]
+fn transient_rejection_never_allocates_ptp_events_or_stream_resources() {
+    let listener = TcpListener::bind("127.0.0.2:0").unwrap();
+    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let server = thread::spawn(move || {
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            peer.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        assert!(request.starts_with(b"GET /info RTSP/1.0\r\n"));
+        peer.write_all(b"RTSP/1.0 403 Forbidden\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    });
+    let mut wire = Wire::mock_method(
+        socket,
+        Duration::from_secs(1),
+        "device:112233445566",
+        crate::receiver::compatibility::Method::Transient,
+    );
+    let _authorization = wire.ptp_test_authorization().unwrap();
+    let mut owner = Session::new();
+    assert!(owner.start(|| Ok(wire), None).is_err());
+    assert_eq!(owner.state(), State::Failed);
+    assert!(!owner.attempted_setup);
+    assert!(owner.control.is_none());
+    assert!(owner.timing.is_none());
+    assert!(owner.events.is_none());
+    assert!(owner.prepared.is_none());
+    assert!(owner.stream.is_none());
+    assert!(!owner.anchor_accepted);
+    assert!(owner.request_playback().is_err());
+    server.join().unwrap();
+}

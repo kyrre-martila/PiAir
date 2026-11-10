@@ -7,6 +7,9 @@ session diagnostics and an explicit AirPlay 2 realtime UDP/ALAC/NTP audio test.
 **Real Apple TV/HomePod playback compatibility remains unverified.** Audio tools never discover or contact receivers. Existing Autostream
 and OwnTone services are never modified.
 
+Buffered transient diagnostics reuse the hardware-validated OwnTone-reference RTSP
+authentication profile by default; see [evidence and remaining hardware checks](docs/BUFFERED_LIFECYCLE.md#prompt-44-transient-authentication-compatibility-2026-11-10).
+
 Buffered AirPlay 2 has an explicit, non-playing `buffered-test --setup-check`
 diagnostic for one already selected and authorized receiver. Additional separately
 confirmed `--control-check record|stream|anchor` stages exercise control negotiation

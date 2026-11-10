@@ -801,6 +801,21 @@ impl Wire {
         );
         self.reauthorize()
     }
+    /// Buffered transient diagnostics use the hardware-validated RTSP profile.
+    /// Policy comes from the pinned authorization, never caller-supplied evidence.
+    pub(super) fn buffered_transient(&mut self) -> Result<()> {
+        self.buffered_authorization()?;
+        let selected = match &self
+            .authorization
+            .as_ref()
+            .context("authorization absent")?
+            .1
+        {
+            Authorization::Persisted(selected) => selected.capabilities.clone(),
+            _ => bail!("buffered transient requires persisted receiver selection"),
+        };
+        self.owntone_transient(&selected)
+    }
     /// Issue a PTP capability only from a live authenticated, authorized Wire.
     /// The legacy Lease's optional mock authorization is never accepted here.
     pub(super) fn ptp_lease(&self) -> Result<PtpLease> {
@@ -839,8 +854,8 @@ impl Wire {
             addresses: [peer.ip()].into_iter().collect(),
             port: peer.port(),
             capabilities: super::compatibility::Capabilities {
-                features: (1 << 9) | (1 << 19),
-                flags: None,
+                features: (1 << 9) | (1 << 19) | (1 << 40) | (1 << 41) | (1 << 48),
+                flags: Some(0),
                 password: None,
                 access_control: None,
                 access_control_type: None,
