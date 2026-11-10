@@ -122,6 +122,15 @@ it is not a pairing decision, verified compatibility, or successful audio sessio
 HKP 3 is an AirPlay header choice, HAP R2 is the referenced specification revision,
 and advertised `protovers` is another field. They are not interchangeable versions.
 
+Buffered transport foundation update (PR #40):
+
+| Buffered format | Advertised /info support | Local encoder / transport | Complete session | Hardware playback |
+| --- | --- | --- | --- | --- |
+| ALAC 48k/24 stereo ID21 | Requires authenticated compatible format evidence | Implemented encoder and type103 TCP foundation | Disabled pending PR #41 PTP/lifecycle | Unverified |
+| AAC-LC 44.1/48k stereo, surround, other formats | Claims only | No matching local encoder | Disabled | Unverified |
+
+See [buffered transport architecture and evidence](BUFFERED_TRANSPORT.md).
+
 ## Explicit method decision and wire behavior
 
 `compatibility::Capabilities` parses feature aliases numerically, bounded status

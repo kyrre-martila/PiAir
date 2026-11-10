@@ -1,5 +1,11 @@
 # Receiver capability and transport planning foundation
 
+Current foundation update: [BUFFERED_TRANSPORT.md](BUFFERED_TRANSPORT.md) supersedes
+historical statements below that all buffered encoders/transport are absent.
+ALAC24 and type103 TCP components are implemented; complete sessions and live
+buffered playback remain disabled pending PR #41. AAC remains unavailable.
+
+
 Audit baseline: PiAir `f24b447` (PR #38 merge), 2026-11-10. This is original
 Apache-2.0 Rust policy/model code. GPL sources were inspected for protocol facts;
 no GPL code was copied, translated, vendored, linked, or used as a code skeleton.

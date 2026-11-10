@@ -214,3 +214,8 @@ new `receiver-plan` command and the distinction between historical upstream
 OwnTone research and the newer `owntone-mini/minimal` fork. Planning never opens
 receiver connections or changes selection. Buffered/PTP remain unsupported for
 streaming. Advertised buffered support and RTSP success do not prove audible playback.
+
+Buffered type103 TCP ownership, bounded writes, fresh media-key lifetime and
+original ALAC24 encoding now live in `receiver/buffered/`, independently of
+realtime/NTP. See [the foundation and PR #41 boundaries](BUFFERED_TRANSPORT.md).
+The session/CLI playback gate remains closed; no PTP clock is fabricated.

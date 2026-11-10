@@ -194,6 +194,7 @@ pub enum Transport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Implementation {
     DiagnosticOnly,
+    FoundationOnly,
     Unsupported,
 }
 /// Format IDs are protocol evidence, not codec implementation support.
@@ -215,11 +216,11 @@ impl BufferedFormat {
             other => Self::Unknown(other),
         }
     }
-    /// No AAC encoder or matching buffered ALAC24 encoder is implemented.
-    /// The realtime ALAC encoder is not evidence for either buffered codec.
+    /// Encoder availability is separate from session/timing and verified playback.
     pub fn codec_available(self) -> Claim<bool> {
         match self {
             Self::Unknown(_) => Claim::Unknown,
+            Self::Alac48000Stereo24 => Claim::Observed(true),
             _ => Claim::Observed(false),
         }
     }
@@ -235,6 +236,7 @@ pub struct Candidate {
     pub transport: Transport,
     pub media: MediaProfile,
     pub implementation: Implementation,
+    pub local_buffered_format: Option<BufferedFormat>,
     pub rejections: Vec<String>,
 }
 /// No runtime result is inferred from discovery, /info or successful RTSP.
@@ -489,14 +491,20 @@ pub fn plan(
             },
             implementation: if transport == Transport::RealtimeNtp {
                 Implementation::DiagnosticOnly
+            } else if transport == Transport::BufferedPtp {
+                Implementation::FoundationOnly
             } else {
                 Implementation::Unsupported
             },
+            local_buffered_format: None,
             rejections: Vec::new(),
         };
         if !authorization.allowlisted {
             c.rejections
                 .push("receiver is not authorized by allowlist".into());
+        }
+        if c.implementation == Implementation::FoundationOnly {
+            c.rejections.push("buffered transport foundation only; PTP/session activation is not implemented for streaming".into());
         }
         if c.implementation == Implementation::Unsupported {
             c.rejections
@@ -565,12 +573,9 @@ pub fn plan(
                         Claim::Invalid | Claim::Conflict => c.rejections.push("authenticated buffered format claims malformed or contradictory".into()),
                         Claim::Observed(formats) if formats.is_empty() => c.rejections.push("authenticated info offers no buffered formats".into()),
                         Claim::Observed(formats) => {
-                            for format in formats {
-                                match format.codec_available() {
-                                    Claim::Observed(true) => (),
-                                    Claim::Observed(false) => c.rejections.push(format!("buffered codec/format is not implemented: {format:?}")),
-                                    _ => c.rejections.push(format!("unknown buffered codec/format: {format:?}")),
-                                }
+                            c.local_buffered_format = super::buffered::select_format(&Claim::Observed(formats.clone()));
+                            if c.local_buffered_format.is_none() {
+                                c.rejections.push("no locally implemented buffered codec/format offered".into());
                             }
                         }
                     }
@@ -720,10 +725,11 @@ pub fn diagnostic(
         ) {
             writeln!(
                 text,
-                "  {:?}: {:?}; media={:?}; eligible={}; rejection reasons={:?}",
+                "  {:?}: {:?}; media={:?}; local_buffered_format={:?}; eligible={}; rejection reasons={:?}",
                 c.transport,
                 c.implementation,
                 c.media,
+                c.local_buffered_format,
                 c.rejections.is_empty(),
                 c.rejections
             )

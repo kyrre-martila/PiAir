@@ -237,3 +237,9 @@ Some are target/feature resolution dependencies rather than compiled runtime
 code. Existing locked package versions are preserved. Symphonia remains test-only.
 No FFmpeg executable/library or AirPlay sender library is added to production.
 As before, assemble exact license notices before binary redistribution.
+
+Buffered foundation (PR #40): no new production dependencies. `socket2` 0.5.10
+(MIT OR Apache-2.0), already locked transitively, is now an explicit dev dependency
+for safe loopback fault injection. Existing MPL-2.0 Symphonia packages remain
+test-only ALAC decoders; no native AAC/FFmpeg/FDK or GPL codec is linked.
+See [codec/security licensing decisions](BUFFERED_TRANSPORT.md).
