@@ -117,3 +117,10 @@ procedure below records the preceding authentication/control round.
    diagnostics omit those values but contain local device metadata; review before
    sharing. The OwnTone profile may initialize its existing public sender identity
    file; it does not create receiver pairing credentials.
+
+
+PR #41 adds a [PTP/timing-control foundation](PTP_TIMING.md), while the table's
+complete-session and hardware-playback results remain disabled/unverified.
+Only an authenticated selected receiver can obtain timing sockets or typed
+SETPEERS/SETRATEANCHORTIME control. Peer traffic does not prove receiver servo
+lock; no additional receiver or group member is automatically authorized.

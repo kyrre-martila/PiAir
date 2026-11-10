@@ -146,16 +146,19 @@ writer forces partial/Interrupted/WouldBlock writes; loopback receivers test
 bounded backpressure, actual TCP stalls/deadlines, reset, orderly close and cleanup.
 All automated sockets are loopback. No physical receivers are contacted.
 
-## PR #41 activation prerequisites
+## Historical PR #40 activation prerequisites
 
-PR #41 must provide the same-session authenticated engine, revalidate current
+The following was the PR #40 prerequisite list. The [PR #41 timing update](PTP_TIMING.md)
+implements timing/control components; the complete lifecycle is PR #42.
+
+The future activation PR must provide the same-session authenticated engine, revalidate current
 allowlist/selection and bind /info plus format selection to that session; create
 the authorized data connection with bounded connect/cancellation; retain the
 single Prepared key owner through negotiation; manage event/control sockets;
 and tear down partial setup on every failure. It must implement actual PTP
 clock identity, domain/peer policy, signaling, lock/holdover/discontinuity rules
 and conversion to the 48 kHz sample timeline. `BufferedLifecycle`/`PtpAnchor` are
-typed seams, not working SETPEERS or SETRATEANCHORTIME implementations.
+typed seams; PR #41 now supplies timing-control components but no complete lifecycle.
 
 The engine must serialize the network seconds, full 64-bit fractional second
 and timeline ID correctly (including signed plist bit-pattern requirements),
@@ -167,3 +170,12 @@ Sanitized independent protocol/hardware evidence must resolve marker policy,
 receiver format/key acceptance and teardown/feedback semantics before enabling
 live playback. Audible output requires explicit physical verification on each
 claimed receiver/firmware; mock success cannot substitute for it.
+
+## PR #41 timing update
+
+The [PTP timing foundation](PTP_TIMING.md) now supplies bounded packet handling,
+a single-peer sender grandmaster, an independent offset/drift estimator, precise
+48 kHz sample mapping and typed authenticated SETPEERS/SETRATEANCHORTIME requests
+using this module's PtpAnchor boundary. Delay traffic is not receiver lock and
+successful control is not a playback grant. Full BufferedLifecycle/session
+ownership, feedback, media activation and hardware validation remain PR #42.

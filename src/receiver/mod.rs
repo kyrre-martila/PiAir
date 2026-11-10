@@ -1,5 +1,5 @@
 //! Explicit receiver operations. Discovery/audio never depend on this module.
-#[allow(dead_code)] // Reusable foundation; activation requires PR #41 timing/session engine.
+#[allow(dead_code)] // Reusable foundation; activation requires PR #42 authorized session lifecycle.
 mod buffered;
 pub(crate) mod compatibility;
 mod crypto;
@@ -12,6 +12,8 @@ pub(crate) mod planning;
 mod media;
 mod pairing;
 mod profile;
+#[allow(dead_code)] // Timing foundation remains inactive until PR #42.
+mod ptp;
 mod realtime;
 mod session;
 mod srp;

@@ -1,0 +1,967 @@
+use super::control::{acknowledgement, AnchorRequest, Peers, Rate};
+use super::*;
+use crate::receiver::profile;
+use std::net::{Ipv4Addr, SocketAddr};
+use time::{SampleTimeline, Timestamp};
+fn ts(ns: i128) -> Timestamp {
+    Timestamp::from_ns(ns).unwrap()
+}
+fn request(kind: Kind, seq: u16) -> Packet {
+    Packet::new(
+        kind,
+        0x1122334455667788,
+        seq,
+        vec![0; if kind == Kind::PdelayReq { 20 } else { 10 }],
+    )
+}
+fn peer(clock: &mut Grandmaster, now: Instant, seq: u16) {
+    clock
+        .receive(&request(Kind::DelayReq, seq).encode().unwrap(), now)
+        .unwrap();
+}
+#[test]
+fn ieee_known_answer_and_malformed() {
+    // Hand assembled from IEEE 1588-2008 tables 18/26, not encoder output.
+    let bytes = [
+        0x11, 2, 0, 44, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x22, 0x33, 0x44,
+        0x55, 0x66, 0x77, 0x88, 0x80, 5, 0xff, 0xff, 1, 0, 0, 1, 2, 3, 4, 5, 0x3b, 0x9a, 0xc9,
+        0xff,
+    ];
+    let p = Packet::decode(&bytes).unwrap();
+    assert_eq!(
+        p.timestamp().unwrap(),
+        Timestamp::new(0x000102030405, 999_999_999).unwrap()
+    );
+    assert_eq!(p.sequence, 65535);
+    assert_eq!(p.encode().unwrap(), bytes);
+    for n in 0..bytes.len() {
+        assert!(Packet::decode(&bytes[..n]).is_err());
+    }
+    for (index, val) in [
+        (0, 0x21),
+        (1, 1),
+        (2, 1),
+        (4, 1),
+        (5, 1),
+        (16, 1),
+        (28, 0),
+        (40, 255),
+    ] {
+        let mut b = bytes;
+        b[index] = val;
+        if index == 28 {
+            b[29] = 0;
+        }
+        assert!(Packet::decode(&b).is_err(), "index {index}");
+    }
+    let mut b = bytes.to_vec();
+    b.extend_from_slice(&[0, 3, 0, 8]);
+    b[3] += 4;
+    assert!(Packet::decode(&b).is_err());
+}
+#[test]
+fn all_message_layouts_and_signed_correction() {
+    for kind in [
+        Kind::Sync,
+        Kind::DelayReq,
+        Kind::PdelayReq,
+        Kind::PdelayResp,
+        Kind::FollowUp,
+        Kind::DelayResp,
+        Kind::PdelayFollowUp,
+        Kind::Announce,
+        Kind::Signaling,
+    ] {
+        let n = match kind {
+            Kind::Sync | Kind::DelayReq | Kind::FollowUp | Kind::Signaling => 10,
+            Kind::Announce => 30,
+            _ => 20,
+        };
+        let mut p = Packet::new(kind, 42, 7, vec![0; n]);
+        p.correction = -65537;
+        assert_eq!(Packet::decode(&p.encode().unwrap()).unwrap(), p);
+    }
+}
+#[test]
+fn precision_rollover_and_absolute_sample_mapping() {
+    assert_eq!(
+        Timestamp::new(7, 500_000_000).unwrap().network(),
+        NetworkTime {
+            seconds: 7,
+            fraction: 1 << 63
+        }
+    );
+    let t = Timestamp::new((1 << 48) - 1, 999_999_999).unwrap();
+    assert_eq!(Timestamp::decode(&t.encode().unwrap()).unwrap(), t);
+    assert!(Timestamp::new(1 << 48, 0).is_err());
+    assert!(Timestamp::new(0, 1_000_000_000).is_err());
+    let timeline = SampleTimeline::new(
+        42,
+        0,
+        NetworkTime {
+            seconds: 7,
+            fraction: 1 << 63,
+        },
+        u64::from(u32::MAX) - 100,
+    )
+    .unwrap();
+    let sample = u64::from(u32::MAX) - 100 + 48_000;
+    assert_eq!(
+        timeline.at(sample).unwrap(),
+        NetworkTime {
+            seconds: 8,
+            fraction: 1 << 63
+        }
+    );
+    assert_eq!(sample as u32, 47_899);
+    assert_eq!(
+        timeline.sample_at(timeline.at(sample).unwrap()).unwrap(),
+        sample
+    );
+    // Direct rational conversion retains the fractional low word.
+    let one = timeline.at(u64::from(u32::MAX) - 99).unwrap();
+    assert_eq!(one.fraction - (1 << 63), ((1u128 << 64) / 48_000) as u64);
+    assert_ne!(one.fraction & 0xffff_ffff, 0);
+    assert!(timeline.at(u64::MAX).is_err());
+    assert!(SampleTimeline::new(
+        42,
+        0,
+        NetworkTime {
+            seconds: 0,
+            fraction: 0
+        },
+        100
+    )
+    .unwrap()
+    .at(0)
+    .is_err());
+}
+#[test]
+fn offset_drift_lock_loss_discontinuity_recovery() {
+    // Independent analytical exchange: 1ms path each way, local +2ms.
+    let mut e = Estimator::new();
+    for i in 0..4 {
+        let master = 10_000_000_000 + i * 400_000_000;
+        let drift = i * 40_000; // +100 ppm
+        let m = Measurement::solve(
+            [
+                ts(master),
+                ts(master + 3_000_000 + drift),
+                ts(master + 4_000_000 + drift),
+                ts(master + 3_000_000),
+            ],
+            [0, 0],
+        )
+        .unwrap();
+        assert_eq!(m.delay_scaled, 1_000_000 * 65_536);
+        assert_eq!(m.offset_scaled, (2_000_000 + drift) * 65_536);
+        e.observe(m).unwrap();
+        assert_eq!(
+            e.state,
+            if i == 3 {
+                State::Locked
+            } else {
+                State::Synchronizing
+            }
+        );
+    }
+    assert!((e.drift_ppb - 100_000).abs() < 11);
+    let last = e.last.unwrap();
+    let synchronized = e.network_at(last.local_ns).unwrap();
+    assert_eq!(
+        synchronized.ns(),
+        last.local_ns - last.offset_scaled / 65_536
+    );
+    assert!(e.network_at(last.local_ns + 3_000_000_001).is_err());
+    assert_eq!(e.state, State::Lost);
+    for i in 0..4 {
+        e.observe(Measurement {
+            local_ns: 20_000_000_000 + i * 400_000_000,
+            offset_scaled: 0,
+            delay_scaled: 0,
+        })
+        .unwrap();
+    }
+    assert_eq!(e.state, State::Locked);
+    assert!(e
+        .observe(Measurement {
+            local_ns: 21_600_000_000,
+            offset_scaled: 10_000_000 * 65_536,
+            delay_scaled: 0
+        })
+        .is_err());
+    assert_eq!(e.state, State::Lost);
+    e.shutdown();
+    assert!(e.observe(last).is_err());
+    assert!(Measurement::solve([ts(3), ts(1), ts(0), ts(2)], [0, 0]).is_err());
+}
+#[test]
+fn grandmaster_liveness_is_not_receiver_lock() {
+    let now = Instant::now();
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+    assert_eq!(c.state(), State::Initializing);
+    assert!(!c.media_permitted());
+    let packets = c.due(now).unwrap();
+    assert_eq!(packets.len(), 2);
+    let sync = &packets[1];
+    assert_eq!(sync.kind, Kind::Sync);
+    assert_eq!(sync.flags, 0x0600);
+    let fup = c.follow_up(sync, now + Duration::from_nanos(123)).unwrap();
+    assert_eq!(fup.sequence, sync.sequence);
+    assert_eq!(fup.timestamp().unwrap().nanos, 123);
+    assert!(c.follow_up(sync, now + Duration::from_nanos(124)).is_err());
+    assert_eq!(packets[0].body[14], 248); // never claims GPS quality
+    peer(&mut c, now + Duration::from_millis(1), 65535);
+    peer(&mut c, now + Duration::from_millis(2), 0); // sequence wrap
+    assert_eq!(c.state(), State::PeerObserved);
+    assert!(!c.media_permitted());
+    assert!(c
+        .receive(
+            &request(Kind::DelayReq, 0).encode().unwrap(),
+            now + Duration::from_millis(3)
+        )
+        .is_err());
+    assert!(c
+        .receive(
+            &request(Kind::DelayReq, 65534).encode().unwrap(),
+            now + Duration::from_millis(4)
+        )
+        .is_err());
+    let mut changed = request(Kind::DelayReq, 1);
+    changed.source[0] ^= 1;
+    assert!(c
+        .receive(&changed.encode().unwrap(), now + Duration::from_millis(5))
+        .is_err());
+    assert!(c.check(now + Duration::from_secs(4), false).is_err());
+    assert_eq!(c.state(), State::Lost);
+    assert!(c.network_time(now + Duration::from_secs(4)).is_err());
+    // Fresh clock/session required, never silently rebase a timeline.
+    assert!(c
+        .receive(
+            &request(Kind::DelayReq, 1).encode().unwrap(),
+            now + Duration::from_secs(4)
+        )
+        .is_err());
+}
+#[test]
+fn timeout_cancel_clock_reversal_and_pdelay() {
+    let now = Instant::now();
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
+    assert!(c.check(now + Duration::from_secs(1), false).is_err());
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
+    assert!(c.check(now, true).is_err());
+    assert_eq!(c.state(), State::Shutdown);
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
+    assert!(c.check(now - Duration::from_nanos(1), false).is_err());
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
+    let response = c
+        .receive(&request(Kind::PdelayReq, 12).encode().unwrap(), now)
+        .unwrap();
+    assert_eq!(response[0].flags, 0x0600);
+    assert_eq!(response[0].kind, Kind::PdelayResp);
+    assert_eq!(response[0].body[10..], request(Kind::PdelayReq, 12).source);
+}
+#[test]
+fn control_bplist_precision_acknowledgements_and_anchor_generation() {
+    let peers = Peers::new("192.0.2.2".parse().unwrap(), "192.0.2.1".parse().unwrap()).unwrap();
+    assert_eq!(
+        profile::parse(&peers.encode().unwrap()).unwrap(),
+        plist::Value::Array(vec!["192.0.2.2".into(), "192.0.2.1".into()])
+    );
+    assert!(Peers::new("0.0.0.0".parse().unwrap(), "192.0.2.1".parse().unwrap()).is_err());
+    let now = Instant::now();
+    let mut c = Grandmaster::new(
+        0xffff112233445566,
+        0x1122334455667788,
+        now,
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let mapping = SampleTimeline::new(
+        c.clock_id,
+        c.generation(),
+        NetworkTime {
+            seconds: 1,
+            fraction: (1 << 63) + 123,
+        },
+        0,
+    )
+    .unwrap();
+    assert!(AnchorRequest::generate(&mut c, &mapping, 0, Rate::Play, now).is_err());
+    peer(&mut c, now, 1);
+    let a = AnchorRequest::generate(&mut c, &mapping, 0, Rate::Play, now).unwrap();
+    let bytes = a.encode().unwrap();
+    let v = profile::parse(&bytes).unwrap();
+    let d = v.as_dictionary().unwrap();
+    assert_eq!(
+        d["networkTimeFrac"].as_signed_integer().unwrap() as u64,
+        (1 << 63) + 123
+    );
+    assert_eq!(
+        d["networkTimeTimelineID"].as_signed_integer().unwrap() as u64,
+        c.clock_id
+    );
+    assert_eq!(d["rate"].as_unsigned_integer(), Some(1));
+    // Object marker 0x13 + exact eight bytes, never a 16-byte unsigned integer.
+    assert!(bytes
+        .windows(9)
+        .any(|b| b[0] == 0x13 && b[1..] == c.clock_id.to_be_bytes()));
+    assert!(acknowledgement(&[], None).is_ok());
+    let mut ack = profile::dict([("status", profile::uint(0))]);
+    assert!(acknowledgement(&profile::binary(&mut ack).unwrap(), None).is_ok());
+    let mut ack = profile::dict([("status", profile::uint(1))]);
+    assert!(acknowledgement(&profile::binary(&mut ack).unwrap(), None).is_err());
+    assert!(acknowledgement(b"garbage", None).is_err());
+    assert!(acknowledgement(&bytes, Some(&v)).is_ok());
+    let mut bad = v.clone();
+    bad.as_dictionary_mut()
+        .unwrap()
+        .insert("rate".into(), profile::uint(2));
+    assert!(acknowledgement(&profile::binary(&mut bad).unwrap(), Some(&v)).is_err());
+    let stale = SampleTimeline::new(
+        c.clock_id,
+        c.generation() + 1,
+        NetworkTime {
+            seconds: 1,
+            fraction: 0,
+        },
+        0,
+    )
+    .unwrap();
+    assert!(AnchorRequest::generate(&mut c, &stale, 0, Rate::Pause, now).is_err());
+}
+fn udp_pair() -> (UdpSocket, UdpSocket) {
+    let a = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let b = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    a.connect(b.local_addr().unwrap()).unwrap();
+    b.connect(a.local_addr().unwrap()).unwrap();
+    b.set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    (a, b)
+}
+#[test]
+fn loopback_service_and_socket_cleanup() {
+    let (event, peer_event) = udp_pair();
+    let (general, peer_general) = udp_pair();
+    let event_addr = event.local_addr().unwrap();
+    let general_addr = general.local_addr().unwrap();
+    let now = Instant::now();
+    let c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+    let fixture = authorized_ptp_fixture();
+    let mut s = Service::attach(c, event, general, fixture.wire.ptp_lease().unwrap()).unwrap();
+    let cancel = AtomicBool::new(false);
+    peer_event
+        .send(&request(Kind::DelayReq, 1).encode().unwrap())
+        .unwrap();
+    s.poll(&cancel).unwrap();
+    assert_eq!(s.state(), State::PeerObserved);
+    let mut b = [0; 512];
+    let n = peer_event.recv(&mut b).unwrap();
+    assert_eq!(Packet::decode(&b[..n]).unwrap().kind, Kind::Sync);
+    let mut kinds = vec![];
+    for _ in 0..3 {
+        let n = peer_general.recv(&mut b).unwrap();
+        kinds.push(Packet::decode(&b[..n]).unwrap().kind);
+    }
+    assert_eq!(kinds, vec![Kind::Announce, Kind::FollowUp, Kind::DelayResp]);
+    cancel.store(true, Ordering::Relaxed);
+    assert!(s.poll(&cancel).is_err());
+    assert_eq!(s.state(), State::Shutdown);
+    // Cancellation closes sockets immediately, even while the service owner lives.
+    let _e = UdpSocket::bind(event_addr).unwrap();
+    let _g = UdpSocket::bind(general_addr).unwrap();
+    drop(_e);
+    drop(_g);
+    drop(s);
+    drop(peer_event);
+    drop(peer_general);
+    let _e = UdpSocket::bind(event_addr).unwrap();
+    let _g = UdpSocket::bind(general_addr).unwrap();
+}
+#[test]
+fn socket_peer_mismatch_rejected() {
+    let fixture = authorized_ptp_fixture();
+    let (e, _) = udp_pair();
+    let g = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    g.connect(SocketAddr::from(([127, 0, 0, 2], 320))).unwrap();
+    assert!(Service::attach(
+        Grandmaster::new(
+            42,
+            0x1122334455667788,
+            Instant::now(),
+            Duration::from_secs(1)
+        )
+        .unwrap(),
+        e,
+        g,
+        fixture.wire.ptp_lease().unwrap(),
+    )
+    .is_err());
+}
+
+use crate::receiver::{crypto::ControlKeys, wire::Wire};
+use std::{
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    thread,
+};
+fn read_control(socket: &mut TcpStream, keys: &mut ControlKeys) -> (String, Vec<u8>) {
+    let mut bytes = Vec::new();
+    loop {
+        let mut len = [0; 2];
+        socket.read_exact(&mut len).unwrap();
+        let size = usize::from(u16::from_le_bytes(len));
+        assert!((1..=1024).contains(&size));
+        let mut frame = vec![0; size + 18];
+        frame[..2].copy_from_slice(&len);
+        socket.read_exact(&mut frame[2..]).unwrap();
+        bytes.extend_from_slice(&keys.decrypt(&frame).unwrap());
+        if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+            let header = String::from_utf8(bytes[..i + 4].to_vec()).unwrap();
+            let length = header
+                .lines()
+                .find_map(|l| l.strip_prefix("Content-Length: "))
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            if bytes.len() == i + 4 + length {
+                return (header, bytes[i + 4..].to_vec());
+            }
+        }
+        assert!(bytes.len() < 8192);
+    }
+}
+fn control_reply(
+    socket: &mut TcpStream,
+    keys: &mut ControlKeys,
+    seq: u32,
+    body: &[u8],
+    status: u16,
+) {
+    let mut raw = format!(
+        "RTSP/1.0 {status} response\r\nCSeq: {seq}\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    raw.extend_from_slice(body);
+    for chunk in raw.chunks(23) {
+        socket.write_all(&keys.encrypt(chunk).unwrap()).unwrap();
+    }
+}
+fn mock_timing(server: impl FnOnce(TcpStream) + Send + 'static) -> (Wire, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind((Ipv4Addr::new(127, 0, 0, 2), 0)).unwrap();
+    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let t = thread::spawn(move || {
+        let (s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        server(s);
+    });
+    let wire = Wire::mock(socket, Duration::from_millis(100), "device:112233445566");
+    (wire, t)
+}
+#[test]
+fn authenticated_timing_control_same_socket_and_failure_semantics() {
+    // 0: accepted; 1: in-band rejection; 2: bad CSeq; 3: RTSP rejection;
+    // 4: contradictory rate; 5: malformed plist; 6: timeout.
+    for fault in 0..7 {
+        let (wire, t) = mock_timing(move |mut socket| {
+            let mut keys = ControlKeys::new(b"timing-test");
+            keys.swap_directions_for_test();
+            let (head, body) = read_control(&mut socket, &mut keys);
+            assert!(head.starts_with("SETPEERS rtsp://127.0.0.2/session RTSP/1.0\r\n"));
+            assert!(head.contains("Content-Type: /peer-list-changed\r\n"));
+            assert_eq!(
+                profile::parse(&body).unwrap(),
+                plist::Value::Array(vec!["127.0.0.2".into(), "127.0.0.1".into()])
+            );
+            control_reply(&mut socket, &mut keys, 1, &[], 200);
+            let (head, body) = read_control(&mut socket, &mut keys);
+            assert!(head.starts_with("SETRATEANCHORTIME rtsp://127.0.0.2/session RTSP/1.0\r\n"));
+            assert!(head.contains("Content-Type: application/x-apple-binary-plist\r\n"));
+            let anchor = profile::parse(&body).unwrap();
+            assert_eq!(
+                anchor.as_dictionary().unwrap()["rate"].as_unsigned_integer(),
+                Some(1)
+            );
+            let response = match fault {
+                1 => profile::binary(&mut profile::dict([("status", profile::uint(1))]))
+                    .unwrap()
+                    .to_vec(),
+                4 => profile::binary(&mut profile::dict([("rate", profile::uint(0))]))
+                    .unwrap()
+                    .to_vec(),
+                5 => b"garbage".to_vec(),
+                _ => Vec::new(),
+            };
+            if fault != 6 {
+                control_reply(
+                    &mut socket,
+                    &mut keys,
+                    if fault == 2 { 3 } else { 2 },
+                    &response,
+                    if fault == 3 { 500 } else { 200 },
+                );
+            }
+            let mut b = [0; 1];
+            assert_eq!(socket.read(&mut b).unwrap(), 0);
+        });
+        let mut wire = wire
+            .secure(
+                ControlKeys::new(b"timing-test"),
+                ControlKeys::events(b"timing-test"),
+            )
+            .unwrap();
+        let _approval = wire.ptp_test_authorization().unwrap();
+        let now = Instant::now();
+        let mut clock =
+            Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+        peer(&mut clock, now, 1);
+        let timeline = SampleTimeline::new(
+            42,
+            clock.generation(),
+            NetworkTime {
+                seconds: 1,
+                fraction: 1 << 63,
+            },
+            0,
+        )
+        .unwrap();
+        let a = AnchorRequest::generate(&mut clock, &timeline, 0, Rate::Play, now).unwrap();
+        {
+            let mut control = wire
+                .buffered_timing("rtsp://127.0.0.2/session".into(), &clock)
+                .unwrap();
+            control.set_peers().unwrap();
+            let result = control.set_rate_anchor_time(&mut clock, a, Instant::now());
+            assert_eq!(result.is_ok(), fault == 0, "fault {fault}");
+            assert!(control.set_peers().is_err());
+        }
+        if fault != 0 {
+            assert!(wire.is_invalidated());
+        }
+        drop(wire);
+        t.join().unwrap();
+    }
+}
+#[test]
+fn unauthenticated_timing_is_rejected_before_io() {
+    let clock = Grandmaster::new(
+        42,
+        0x1122334455667788,
+        Instant::now(),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let (mut wire, t) = mock_timing(|mut socket| {
+        let mut b = [0; 1];
+        assert_eq!(socket.read(&mut b).unwrap(), 0);
+    });
+    assert!(wire
+        .buffered_timing("rtsp://127.0.0.2/session".into(), &clock)
+        .is_err());
+    assert!(wire
+        .start_ptp(42, 0x1122334455667788, Duration::from_secs(1))
+        .is_err());
+    drop(wire);
+    t.join().unwrap();
+}
+#[test]
+fn every_timing_state_keeps_buffered_playback_disabled() {
+    let now = Instant::now();
+    let mut clock = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
+    for state in [
+        State::Initializing,
+        State::Synchronizing,
+        State::PeerObserved,
+        State::Locked,
+        State::Lost,
+        State::Shutdown,
+    ] {
+        clock.state = state;
+        assert!(!clock.media_permitted());
+        let mut session = crate::receiver::session::Session::new();
+        assert!(session.start_buffered_audio().is_err());
+    }
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    s.trim()
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
+        .collect()
+}
+#[test]
+fn independent_python_plist_fixtures() {
+    let peer_bytes = unhex(include_str!("fixtures/peers.hex"));
+    let peers = Peers::new("192.0.2.2".parse().unwrap(), "192.0.2.1".parse().unwrap()).unwrap();
+    assert_eq!(peers.encode().unwrap().as_slice(), peer_bytes);
+    let anchor_bytes = unhex(include_str!("fixtures/anchor.hex"));
+    let clock_id = (-26263587901610i64) as u64;
+    let now = Instant::now();
+    let mut clock =
+        Grandmaster::new(clock_id, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+    peer(&mut clock, now, 1);
+    let timeline = SampleTimeline::new(
+        clock_id,
+        clock.generation(),
+        NetworkTime {
+            seconds: 1,
+            fraction: (1 << 63) + 123,
+        },
+        0,
+    )
+    .unwrap();
+    let a = AnchorRequest::generate(&mut clock, &timeline, 0, Rate::Play, now).unwrap();
+    // Same independent encoding byte for byte, including signed 8-byte values.
+    assert_eq!(a.encode().unwrap().as_slice(), anchor_bytes);
+}
+#[test]
+fn timeline_owner_recreation_and_expired_evidence() {
+    let now = Instant::now();
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
+    peer(&mut c, now, 1);
+    let stale = SampleTimeline::new(
+        42,
+        c.generation(),
+        NetworkTime {
+            seconds: 1,
+            fraction: 0,
+        },
+        0,
+    )
+    .unwrap();
+    let mut replacement =
+        Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
+    peer(&mut replacement, now, 1);
+    assert_ne!(c.generation(), replacement.generation());
+    assert!(AnchorRequest::generate(&mut replacement, &stale, 0, Rate::Play, now).is_err());
+    assert!(c.network_time(now + Duration::from_secs(4)).is_err());
+    assert!(c.network_time(now - Duration::from_nanos(1)).is_err());
+    let mut e = Estimator::new();
+    let m = Measurement::solve([ts(1000), ts(1010), ts(1020), ts(1030)], [1, -1]).unwrap();
+    assert_eq!(m.offset_scaled, -1); // correction fractions not truncated to ns
+    e.observe(m).unwrap();
+    assert!(e.observe(m).is_err());
+    assert_eq!(e.state, State::Lost);
+}
+
+#[test]
+fn malformed_flood_cannot_create_or_extend_timing_readiness() {
+    let now = Instant::now();
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
+    let mut wrong = request(Kind::DelayReq, 1);
+    wrong.source[0] ^= 1;
+    assert!(c.receive(&wrong.encode().unwrap(), now).is_err());
+    assert_eq!(c.state(), State::Synchronizing);
+    let mut signaling = Packet::new(Kind::Signaling, 0x1122334455667788, 1, vec![0; 10]);
+    signaling.body.extend_from_slice(&[0, 3, 0, 2, 0, 0]);
+    assert!(c
+        .receive(
+            &signaling.encode().unwrap(),
+            now + Duration::from_millis(500)
+        )
+        .is_err());
+    assert!(c.check(now + Duration::from_secs(1), false).is_err());
+    assert_eq!(c.state(), State::Lost);
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
+    peer(&mut c, now, 1);
+    for i in 1..4 {
+        assert!(c
+            .receive(
+                &request(Kind::DelayReq, 1).encode().unwrap(),
+                now + Duration::from_secs(i)
+            )
+            .is_err());
+    }
+    assert!(c.check(now + Duration::from_secs(4), false).is_err());
+}
+#[test]
+fn rejected_setpeers_closes_control_without_anchor_or_retry() {
+    let (wire, t) = mock_timing(|mut socket| {
+        let mut keys = ControlKeys::new(b"timing-test");
+        keys.swap_directions_for_test();
+        let (head, _) = read_control(&mut socket, &mut keys);
+        assert!(head.starts_with("SETPEERS "));
+        let body = profile::binary(&mut profile::dict([("status", profile::uint(7))])).unwrap();
+        control_reply(&mut socket, &mut keys, 1, &body, 200);
+        let mut b = [0; 1];
+        assert_eq!(socket.read(&mut b).unwrap(), 0);
+    });
+    let mut wire = wire
+        .secure(
+            ControlKeys::new(b"timing-test"),
+            ControlKeys::events(b"timing-test"),
+        )
+        .unwrap();
+    let _approval = wire.ptp_test_authorization().unwrap();
+    let clock = Grandmaster::new(
+        42,
+        0x1122334455667788,
+        Instant::now(),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    {
+        let mut control = wire
+            .buffered_timing("rtsp://127.0.0.2/session".into(), &clock)
+            .unwrap();
+        assert!(control.set_peers().is_err());
+        assert!(control.set_peers().is_err());
+    }
+    assert!(wire.is_invalidated());
+    drop(wire);
+    t.join().unwrap();
+}
+
+/// Network fixtures opt in to real allowlist/selection checks. Mock encryption
+/// keys alone never grant PTP authorization. Keep the Wire and config owner alive.
+struct AuthorizedPtpFixture {
+    wire: Wire,
+    approval: tempfile::TempDir,
+    _receiver: TcpStream,
+}
+fn authorized_ptp_fixture() -> AuthorizedPtpFixture {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (receiver, _) = listener.accept().unwrap();
+    let mut wire = Wire::mock(socket, Duration::from_secs(1), "device:112233445566")
+        .secure(
+            ControlKeys::new(b"ptp-fixture"),
+            ControlKeys::events(b"ptp-fixture"),
+        )
+        .unwrap();
+    let approval = wire.ptp_test_authorization().unwrap();
+    AuthorizedPtpFixture {
+        wire,
+        approval,
+        _receiver: receiver,
+    }
+}
+impl AuthorizedPtpFixture {
+    fn revoke(&self) {
+        std::fs::write(
+            self.approval.path().join("config.toml"),
+            "receiver_allowlist=[]",
+        )
+        .unwrap();
+    }
+}
+fn fixture_clock() -> Grandmaster {
+    Grandmaster::new(
+        42,
+        0x1122334455667788,
+        Instant::now(),
+        Duration::from_secs(2),
+    )
+    .unwrap()
+}
+fn no_datagram(socket: &UdpSocket) {
+    socket.set_nonblocking(true).unwrap();
+    let error = socket.recv(&mut [0; 513]).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+}
+fn assert_service_closed(
+    service: &Service,
+    event: std::net::SocketAddr,
+    general: std::net::SocketAddr,
+) {
+    assert_eq!(service.state(), State::Shutdown);
+    assert!(service.event.is_none() && service.general.is_none());
+    let _event = UdpSocket::bind(event).unwrap();
+    let _general = UdpSocket::bind(general).unwrap();
+}
+#[test]
+fn ptp_requires_both_authentication_and_concrete_authorization() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (_receiver, _) = listener.accept().unwrap();
+    let mut wire = Wire::mock(socket, Duration::from_secs(1), "device:112233445566");
+    let _approval = wire.ptp_test_authorization().unwrap();
+    assert!(wire.ptp_lease().is_err()); // allowlist alone is not authentication
+    assert!(wire
+        .start_ptp(42, 0x1122334455667788, Duration::from_secs(1))
+        .is_err());
+    let mut wire = wire
+        .secure(
+            ControlKeys::new(b"ptp-fixture"),
+            ControlKeys::events(b"ptp-fixture"),
+        )
+        .unwrap();
+    assert!(wire.ptp_lease().is_ok());
+    wire.close();
+    assert!(wire.ptp_lease().is_err());
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (_receiver, _) = listener.accept().unwrap();
+    let mut wire = Wire::mock(socket, Duration::from_secs(1), "device:112233445566")
+        .secure(
+            ControlKeys::new(b"ptp-fixture"),
+            ControlKeys::events(b"ptp-fixture"),
+        )
+        .unwrap();
+    assert!(wire.ptp_lease().is_err()); // keys alone cannot use legacy None leases
+    assert!(wire
+        .start_ptp(42, 0x1122334455667788, Duration::from_secs(1))
+        .is_err());
+    assert!(wire
+        .buffered_timing("rtsp://127.0.0.1/session".into(), &fixture_clock())
+        .is_err());
+    // Direct control construction cannot bypass the same mandatory boundary.
+    assert!(super::control::Control::new(
+        &mut wire,
+        "rtsp://127.0.0.1/session".into(),
+        &fixture_clock()
+    )
+    .is_err());
+}
+#[test]
+fn revoked_capability_rejects_attachment_and_releases_sockets_without_traffic() {
+    let fixture = authorized_ptp_fixture();
+    let lease = fixture.wire.ptp_lease().unwrap();
+    let (event, peer_event) = udp_pair();
+    let (general, peer_general) = udp_pair();
+    let event_addr = event.local_addr().unwrap();
+    let general_addr = general.local_addr().unwrap();
+    fixture.revoke();
+    assert!(fixture.wire.ptp_lease().is_err());
+    assert!(Service::attach(fixture_clock(), event, general, lease).is_err());
+    let _event = UdpSocket::bind(event_addr).unwrap();
+    let _general = UdpSocket::bind(general_addr).unwrap();
+    no_datagram(&peer_event);
+    no_datagram(&peer_general);
+}
+#[test]
+fn polling_revocation_blocks_scheduled_and_reply_datagrams_and_closes_immediately() {
+    for change in 0..4 {
+        let fixture = authorized_ptp_fixture();
+        let (event, peer_event) = udp_pair();
+        let (general, peer_general) = udp_pair();
+        let event_addr = event.local_addr().unwrap();
+        let general_addr = general.local_addr().unwrap();
+        let mut service = Service::attach(
+            fixture_clock(),
+            event,
+            general,
+            fixture.wire.ptp_lease().unwrap(),
+        )
+        .unwrap();
+        peer_event
+            .send(&request(Kind::DelayReq, 1).encode().unwrap())
+            .unwrap();
+        match change {
+            0 => fixture.revoke(),
+            1 => std::fs::remove_file(fixture.approval.path().join("receiver-state/selected.toml"))
+                .unwrap(),
+            2 => {
+                std::fs::write(fixture.approval.path().join("config.toml"), "invalid = [").unwrap()
+            }
+            _ => std::fs::write(
+                fixture.approval.path().join("receiver-state/selected.toml"),
+                "invalid = [",
+            )
+            .unwrap(),
+        }
+        assert!(service.poll(&AtomicBool::new(false)).is_err());
+        no_datagram(&peer_event);
+        no_datagram(&peer_general);
+        assert_service_closed(&service, event_addr, general_addr);
+        assert!(service.clock.last_peer.is_none()); // queued traffic was never processed
+    }
+}
+#[test]
+fn authorization_is_rechecked_for_each_outbound_datagram() {
+    for kind in [
+        Kind::Sync,
+        Kind::FollowUp,
+        Kind::DelayResp,
+        Kind::PdelayResp,
+        Kind::PdelayFollowUp,
+        Kind::Announce,
+    ] {
+        let fixture = authorized_ptp_fixture();
+        let (event, peer_event) = udp_pair();
+        let (general, peer_general) = udp_pair();
+        let event_addr = event.local_addr().unwrap();
+        let general_addr = general.local_addr().unwrap();
+        let mut service = Service::attach(
+            fixture_clock(),
+            event,
+            general,
+            fixture.wire.ptp_lease().unwrap(),
+        )
+        .unwrap();
+        // A prior successful send must not cache permission for the next datagram.
+        let first = Packet::new(Kind::Sync, 42, 0, vec![0; 10]);
+        service.send(&first).unwrap();
+        let mut received = [0; 512];
+        let n = peer_event.recv(&mut received).unwrap();
+        assert_eq!(Packet::decode(&received[..n]).unwrap().kind, Kind::Sync);
+        fixture.revoke();
+        let length = match kind {
+            Kind::Sync | Kind::FollowUp => 10,
+            Kind::Announce => 30,
+            _ => 20,
+        };
+        let packet = Packet::new(kind, 42, 1, vec![0; length]);
+        assert!(service.send(&packet).is_err());
+        no_datagram(&peer_event);
+        no_datagram(&peer_general);
+        assert_service_closed(&service, event_addr, general_addr);
+        // Restoring approval cannot resurrect an owner whose sockets were closed.
+        std::fs::write(
+            fixture.approval.path().join("config.toml"),
+            "receiver_allowlist=['device:112233445566']",
+        )
+        .unwrap();
+        assert!(service.poll(&AtomicBool::new(false)).is_err());
+        assert!(service.send(&packet).is_err());
+        no_datagram(&peer_event);
+        no_datagram(&peer_general);
+    }
+}
+#[test]
+fn matching_socket_peers_cannot_target_another_receiver_with_a_valid_capability() {
+    let fixture = authorized_ptp_fixture();
+    let event = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let general = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    event.connect((Ipv4Addr::new(127, 0, 0, 2), 319)).unwrap();
+    general.connect((Ipv4Addr::new(127, 0, 0, 2), 320)).unwrap();
+    assert!(Service::attach(
+        fixture_clock(),
+        event,
+        general,
+        fixture.wire.ptp_lease().unwrap()
+    )
+    .is_err());
+}
+
+#[test]
+fn timing_control_revocation_closes_without_sending_a_request() {
+    let (wire, receiver) = mock_timing(|mut socket| {
+        let mut byte = [0; 1];
+        assert_eq!(socket.read(&mut byte).unwrap(), 0);
+    });
+    let mut wire = wire
+        .secure(
+            ControlKeys::new(b"timing-test"),
+            ControlKeys::events(b"timing-test"),
+        )
+        .unwrap();
+    let approval = wire.ptp_test_authorization().unwrap();
+    let clock = fixture_clock();
+    {
+        let mut control = wire
+            .buffered_timing("rtsp://127.0.0.2/session".into(), &clock)
+            .unwrap();
+        std::fs::write(approval.path().join("config.toml"), "receiver_allowlist=[]").unwrap();
+        assert!(control.set_peers().is_err());
+        assert!(control.set_peers().is_err());
+    }
+    assert!(wire.is_invalidated());
+    drop(wire);
+    receiver.join().unwrap();
+}

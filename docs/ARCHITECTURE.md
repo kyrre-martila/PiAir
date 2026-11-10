@@ -219,3 +219,11 @@ Buffered type103 TCP ownership, bounded writes, fresh media-key lifetime and
 original ALAC24 encoding now live in `receiver/buffered/`, independently of
 realtime/NTP. See [the foundation and PR #41 boundaries](BUFFERED_TRANSPORT.md).
 The session/CLI playback gate remains closed; no PTP clock is fabricated.
+
+
+The [PR #41 PTP foundation](PTP_TIMING.md) lives in `receiver/ptp/`, independently
+of realtime NTP: bounded PTP packets, a polled fixed sender grandmaster, precise
+integer sample anchors, offset/drift analysis and typed timing control. Only
+Wire creates production timing sockets after authentication/authorization; no
+production caller exists before PR #42. The complete buffered lifecycle and
+media gate remain disabled. Peer timing activity never asserts remote clock lock.
