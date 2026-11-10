@@ -97,6 +97,9 @@ pub enum Command {
         /// Opt in to initial SETUP and one second of PTP observation, with terminal confirmation.
         #[arg(long, conflicts_with = "confirm_audio")]
         setup_check: bool,
+        /// Opt in through RECORD, stream/audioMode, or paused-anchor diagnostics; confirms every stage in a terminal.
+        #[arg(long, value_enum, conflicts_with_all = ["setup_check", "confirm_audio"])]
+        control_check: Option<crate::receiver::lifecycle::Stage>,
         /// Explicit audio intent; currently fails locally because the live timing gate is closed.
         #[arg(long)]
         confirm_audio: bool,

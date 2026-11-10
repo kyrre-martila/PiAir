@@ -656,13 +656,12 @@ fn malformed_flood_cannot_create_or_extend_timing_readiness() {
     wrong.source[0] ^= 1;
     assert!(c.receive(&wrong.encode().unwrap(), now).is_err());
     assert_eq!(c.state(), State::Synchronizing);
-    let mut signaling = Packet::new(Kind::Signaling, 0x1122334455667788, 1, vec![0; 10]);
-    signaling.body.extend_from_slice(&[0, 3, 0, 2, 0, 0]);
+    let signaling = Packet::new(Kind::Signaling, 0x1122334455667788, 1, vec![0; 10]);
+    let mut malformed = signaling.encode().unwrap();
+    malformed.extend_from_slice(&[0, 3, 0, 2, 0, 0]);
+    malformed[3] = malformed.len() as u8;
     assert!(c
-        .receive(
-            &signaling.encode().unwrap(),
-            now + Duration::from_millis(500)
-        )
+        .receive(&malformed, now + Duration::from_millis(500))
         .is_err());
     assert!(c.check(now + Duration::from_secs(1), false).is_err());
     assert_eq!(c.state(), State::Lost);
@@ -964,4 +963,92 @@ fn timing_control_revocation_closes_without_sending_a_request() {
     assert!(wire.is_invalidated());
     drop(wire);
     receiver.join().unwrap();
+}
+
+#[test]
+fn apple_follow_up_known_answer_and_conflicting_extensions() {
+    // Independent literal: 34-byte header, timestamp 1.5 s, IEEE TLV (28)
+    // then Apple OUI/subtype 4 (16): clock identity + two padding bytes.
+    let hex = concat!(
+        "1802006000000400000000000000000000000000",
+        "11223344556677888005123402fd",
+        "0000000000011dcd6500",
+        "0003001c0080c200000100000000000000000000000000000000000000000000",
+        "00030010000d9300000411223344556677880000"
+    );
+    let bytes: Vec<u8> = hex
+        .as_bytes()
+        .chunks(2)
+        .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
+        .collect();
+    let p = Packet::decode(&bytes).unwrap();
+    assert_eq!(p.kind, Kind::FollowUp);
+    assert_eq!(p.sequence, 0x1234);
+    assert_eq!(
+        p.timestamp().unwrap(),
+        Timestamp::new(1, 500_000_000).unwrap()
+    );
+    assert_eq!(p.encode().unwrap(), bytes);
+    for (index, byte) in [(79, 14), (86, 0xff), (95, 1), (32, 4)] {
+        let mut bad = bytes.clone();
+        bad[index] = byte;
+        assert!(Packet::decode(&bad).is_err(), "index {index}");
+    }
+    let mut duplicate = p.clone();
+    duplicate
+        .body
+        .extend_from_slice(&p.body[p.body.len() - 20..]);
+    assert!(duplicate.encode().is_err());
+    let now = Instant::now();
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+    c.check(now, false).unwrap();
+    c.receive_general(&bytes).unwrap();
+    assert_eq!(c.state(), State::Synchronizing);
+    assert!(!c.media_permitted());
+    peer(&mut c, now, 1);
+    let mut wrong_port = p;
+    wrong_port.source[9] ^= 1;
+    assert!(c.receive_general(&wrong_port.encode().unwrap()).is_err());
+}
+
+#[test]
+fn apple_signaling_is_bounded_opaque_and_cannot_register_peers() {
+    let mut body = vec![0xff; 10]; // IEEE wildcard target; no timestamp
+                                   // Empirical Apple subtypes, kept opaque. No assertion about their meaning.
+    for (subtype, size) in [(1, 22), (5, 32)] {
+        body.extend_from_slice(&[0, 3, 0, size, 0, 0x0d, 0x93, 0, 0, subtype]);
+        body.extend_from_slice(&[0, 0, 3, 1]);
+        body.resize(body.len() + usize::from(size) - 10, 0);
+    }
+    let p = Packet::new(Kind::Signaling, 0x1122334455667788, 9, body);
+    let encoded = p.encode().unwrap();
+    assert_eq!(encoded.len(), 106);
+    let now = Instant::now();
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
+    c.check(now, false).unwrap();
+    c.receive_general(&encoded).unwrap();
+    assert!(c.peer_identity.is_none());
+    assert!(c.last_peer.is_none());
+    assert!(c.check(now + Duration::from_secs(1), false).is_err());
+    let mut bad = p.clone();
+    bad.body[13] = 20;
+    assert!(bad.encode().is_err());
+    bad = p;
+    bad.body[..10].copy_from_slice(&[0x22; 10]);
+    assert!(c.receive_general(&bad.encode().unwrap()).is_err());
+}
+
+#[test]
+fn announce_sequence_is_independent_and_quality_is_truthful() {
+    let now = Instant::now();
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+    let first = c.due(now).unwrap();
+    assert_eq!(first[0].body[14..18], [248, 0xfe, 0xff, 0xff]);
+    assert_eq!(first[0].body[29], 0xa0);
+    assert_eq!(first[0].flags & 0x003f, 0); // no UTC/traceability/timescale claims
+    c.due(now + Duration::from_millis(125)).unwrap();
+    let second = c.due(now + Duration::from_secs(1)).unwrap();
+    assert_eq!(second[0].kind, Kind::Announce);
+    assert_eq!(second[0].sequence, 1);
+    assert_eq!(second[1].sequence, 2);
 }

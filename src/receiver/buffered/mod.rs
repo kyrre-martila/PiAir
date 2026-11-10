@@ -118,6 +118,12 @@ impl NegotiatedStream {
     /// Optional echoes must agree; exactly one type103 stream is required.
     pub fn parse(value: &plist::Value, connection_id: i64) -> Result<Self> {
         let root = profile::dictionary(value)?;
+        if root.contains_key("status") {
+            ensure!(
+                profile::integer(root, "status")? == 0,
+                "stream SETUP rejected in-band"
+            );
+        }
         let streams = root
             .get("streams")
             .and_then(plist::Value::as_array)
@@ -149,8 +155,48 @@ impl NegotiatedStream {
                 "changed stream connection ID"
             );
         }
+        if stream.contains_key("status") {
+            ensure!(
+                profile::integer(stream, "status")? == 0,
+                "stream rejected in-band"
+            );
+        }
+        let flat = stream
+            .get("dataPort")
+            .map(|_| profile::port(stream, "dataPort"))
+            .transpose()?;
+        let nested = stream
+            .get("streamConnections")
+            .map(|connections| -> Result<u16> {
+                let connections = profile::dictionary(connections)?;
+                ensure!(connections.len() == 1, "unsupported stream connections");
+                let rtp = profile::dictionary(
+                    connections
+                        .get("streamConnectionTypeRTP")
+                        .context("RTP connection absent")?,
+                )?;
+                ensure!(
+                    rtp.keys().all(|k| matches!(
+                        k.as_str(),
+                        "streamConnectionKeyPort" | "streamConnectionKeyUseStreamEncryptionKey"
+                    )),
+                    "unsupported stream connection attributes"
+                );
+                if let Some(key) = rtp.get("streamConnectionKeyUseStreamEncryptionKey") {
+                    ensure!(
+                        key.as_boolean() == Some(true),
+                        "changed stream encryption key policy"
+                    );
+                }
+                profile::port(rtp, "streamConnectionKeyPort")
+            })
+            .transpose()?;
+        ensure!(
+            flat.is_none() || nested.is_none() || flat == nested,
+            "conflicting buffered data ports"
+        );
         Ok(Self {
-            data_port: std::num::NonZeroU16::new(profile::port(stream, "dataPort")?)
+            data_port: std::num::NonZeroU16::new(nested.or(flat).context("data port absent")?)
                 .context("zero data port")?,
         })
     }

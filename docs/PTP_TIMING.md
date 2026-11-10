@@ -1,5 +1,7 @@
 # AirPlay 2 PTP and authenticated timing foundation
 
+> PR #43 update: see [current compatibility evidence, staged controls and remaining blockers](AIRPLAY2_COMPATIBILITY.md). The body below records the earlier foundation; its future-work statements are historical. Audio remains gated.
+
 Current single-receiver status: [BUFFERED_LIFECYCLE.md](BUFFERED_LIFECYCLE.md)
 implements an opt-in authenticated initial PTP SETUP diagnostic and bounded
 cleanup. Live buffered playback remains closed because receiver clock adoption

@@ -1,6 +1,7 @@
 //! Single-receiver buffered lifecycle foundation. Live media remains fail-closed.
 //! No public way to assert receiver clock adoption exists. See the evidence ledger.
 use super::{
+    buffered::{NegotiatedStream, Prepared},
     pairing,
     planning::{Claim, Evidence},
     profile, ptp,
@@ -61,8 +62,17 @@ impl State {
     }
 }
 
-/// Owns the authenticated connection, PTP sockets and event worker. No background
-/// timing thread, queued PCM, imported media key or reusable playback grant.
+/// Explicit diagnostic progression. An accepted stage is never media readiness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+pub enum Stage {
+    Record,
+    Stream,
+    Anchor,
+}
+
+/// Owns authenticated control, timing and event resources, plus a fresh stream
+/// key after negotiation. Scoped timing workers cannot outlive control calls.
+/// No media socket, queued PCM or reusable playback grant exists.
 pub struct Session {
     state: State,
     control: Option<Wire>,
@@ -72,6 +82,10 @@ pub struct Session {
     token: Option<String>,
     attempted_setup: bool,
     observed: bool,
+    stage: Option<Stage>,
+    prepared: Option<Prepared>,
+    stream: Option<NegotiatedStream>,
+    anchor_accepted: bool,
     clock_id: u64,
     uuid: uuid::Uuid,
     pub cancel: Arc<AtomicBool>,
@@ -93,6 +107,10 @@ impl Session {
             token: None,
             attempted_setup: false,
             observed: false,
+            stage: None,
+            prepared: None,
+            stream: None,
+            anchor_accepted: false,
             clock_id,
             uuid: uuid::Uuid::new_v4(),
             cancel: Arc::new(AtomicBool::new(false)),
@@ -165,7 +183,9 @@ impl Session {
             self.check()?;
         }
         let mut headers = Vec::new();
-        if !body.is_empty() {
+        if method == "SETPEERS" {
+            headers.push(("Content-Type", "/peer-list-changed".to_owned()));
+        } else if !body.is_empty() {
             headers.push((
                 "Content-Type",
                 "application/x-apple-binary-plist".to_owned(),
@@ -174,12 +194,32 @@ impl Session {
         if let Some(token) = &self.token {
             headers.push(("Session", token.clone()));
         }
-        let reply = self.control.as_mut().context("control absent")?.request(
-            method,
-            path.unwrap_or(&self.uri),
-            &headers,
-            body,
-        )?;
+        // A scoped worker services the owned timing sockets throughout blocking
+        // control I/O. Join before interpreting the response or advancing state.
+        let wire = self.control.as_mut().context("control absent")?;
+        let uri = path.unwrap_or(&self.uri);
+        let done = AtomicBool::new(false);
+        let reply = std::thread::scope(|scope| -> Result<_> {
+            let worker = self.timing.as_mut().map(|timing| {
+                let done = &done;
+                let cancel = &self.cancel;
+                scope.spawn(move || -> Result<()> {
+                    while !done.load(Ordering::Acquire) {
+                        timing.poll(cancel)?;
+                        std::thread::park_timeout(Duration::from_millis(2));
+                    }
+                    timing.poll(cancel)
+                })
+            });
+            let response = wire.request(method, uri, &headers, body);
+            done.store(true, Ordering::Release);
+            if let Some(worker) = worker {
+                worker
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("timing worker panicked"))??;
+            }
+            response
+        })?;
         if let Some(token) = reply.headers.get("session") {
             // Strict diagnostic subset: parameterized sessions are unsupported.
             ensure!(
@@ -211,7 +251,7 @@ impl Session {
     fn negotiate(&mut self) -> Result<()> {
         self.negotiate_with(|wire, setup, clock_id| {
             let events = wire.event(setup.event_port)?;
-            let timing = wire.start_ptp(clock_id, setup.clock_id, Duration::from_secs(2))?;
+            let timing = wire.start_ptp(clock_id, setup.clock_id, Duration::from_secs(30))?;
             Ok((Some(events), timing))
         })
     }
@@ -242,8 +282,82 @@ impl Session {
         self.timing = Some(timing);
         self.state.advance(State::Timing)
     }
-    /// Timing is serviced on the owning thread. No RTSP request is made while
-    /// it is active, so a blocking control read cannot starve the PTP service.
+    /// All stages require a separately confirmed CLI opt-in. Never opens a media
+    /// socket or exposes a playback grant, even after anchor acknowledgement.
+    pub fn progress(&mut self, target: Stage) -> Result<()> {
+        let result = self.progress_inner(target);
+        self.finish(result)
+    }
+    fn ack(&mut self, method: &str, path: Option<&str>, body: &[u8]) -> Result<()> {
+        let reply = self.call(method, path, body)?;
+        ptp::control::validate_reply(&reply, None)
+    }
+    fn progress_inner(&mut self, target: Stage) -> Result<()> {
+        ensure!(
+            self.state == State::Timing && self.stage.is_none(),
+            "control stages already used or unavailable"
+        );
+        ensure!(
+            self.token.is_some(),
+            "initial SETUP session token required for progression"
+        );
+        self.ack("RECORD", None, &[])?;
+        self.stage = Some(Stage::Record);
+        if target == Stage::Record {
+            return Ok(());
+        }
+        let wire = self.control.as_ref().context("control absent")?;
+        let peers =
+            ptp::control::Peers::new(wire.ptp_lease()?.peer(), wire.local_ip()?)?.encode()?;
+        self.ack("SETPEERS", None, &peers)?;
+        // This CLI implements no MediaRemote remote-control commands. Register
+        // an honest empty table rather than advertising unsupported operations.
+        let commands = command_registration()?;
+        self.ack("POST", Some("/command"), &commands)?;
+        let mut prepared = Prepared::new()?;
+        let connection_id = rand::random::<i64>();
+        let offer = prepared.setup_offer(connection_id)?;
+        let response = Self::plist(&self.call("SETUP", None, &offer)?)?;
+        let stream = NegotiatedStream::parse(&response, connection_id)?;
+        self.prepared = Some(prepared);
+        self.stream = Some(stream);
+        let mode = profile::binary(&mut profile::dict([(
+            "audioMode",
+            Value::String("default".into()),
+        )]))?;
+        self.ack("POST", Some("/audioMode"), &mode)?;
+        self.stage = Some(Stage::Stream);
+        if target == Stage::Stream {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let clock = self.timing.as_mut().context("timing absent")?.clock_mut();
+        clock.check(now, false)?;
+        let origin = clock.network_time(now + Duration::from_secs(1))?;
+        let mapping = ptp::time::SampleTimeline::new(self.clock_id, clock.generation(), origin, 0)?;
+        // A paused anchor tests acceptance without activating a decode timeline.
+        let anchor = ptp::control::AnchorRequest::generate(
+            clock,
+            &mapping,
+            0,
+            ptp::control::Rate::Pause,
+            now,
+        )?;
+        let body = anchor.encode()?;
+        let reply = self.call("SETRATEANCHORTIME", None, &body)?;
+        ptp::control::validate_reply(&reply, Some(&profile::parse(&body)?))?;
+        let clock = self.timing.as_mut().context("timing absent")?.clock_mut();
+        clock.check(Instant::now(), false)?;
+        ensure!(
+            clock.state() == ptp::State::PeerObserved,
+            "timing lost during anchor request"
+        );
+        anchor.validate(clock, Instant::now())?;
+        self.anchor_accepted = true;
+        self.stage = Some(Stage::Anchor);
+        Ok(())
+    }
+    /// Observe timing on the owning thread between control requests.
     /// Peer traffic is reported only as activity, never synchronization.
     pub fn observe(&mut self, duration: Duration) -> Result<ptp::State> {
         ensure!(
@@ -299,10 +413,19 @@ impl Session {
         if !matches!(self.state, State::Closed | State::Failed | State::Stopping) {
             self.state.advance(State::Stopping)?;
         }
-        // Stop PTP before bounded control cleanup. Neither timing nor events
-        // can survive the owner; event Drop closes its socket and joins.
-        self.timing.take();
-        self.events.take();
+        // Healthy timing continues during bounded teardown. A cancelled/lost
+        // service must not prevent an otherwise authorized cleanup request.
+        if self.cancel.load(Ordering::Relaxed)
+            || self
+                .timing
+                .as_ref()
+                .is_some_and(|s| matches!(s.state(), ptp::State::Lost | ptp::State::Shutdown))
+        {
+            self.timing.take();
+        }
+        self.prepared.take();
+        self.stream.take();
+        self.anchor_accepted = false;
         let result = (|| {
             if self.attempted_setup {
                 self.attempted_setup = false;
@@ -318,6 +441,8 @@ impl Session {
             }
             Ok(())
         })();
+        self.timing.take();
+        self.events.take();
         if let Some(mut wire) = self.control.take() {
             wire.close();
         }
@@ -340,6 +465,16 @@ impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.cleanup();
     }
+}
+
+fn command_registration() -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    profile::binary(&mut profile::dict([
+        ("type", Value::String("updateMRSupportedCommands".into())),
+        (
+            "params",
+            profile::dict([("mrSupportedCommandsFromSender", Value::Array(vec![]))]),
+        ),
+    ]))
 }
 
 fn validate_info(value: &Value, receiver_id: &str) -> Result<()> {
@@ -467,7 +602,7 @@ impl InitialSetup {
             .get("ClockID")
             .and_then(Value::as_signed_integer)
             .map(|v| v as u64)
-            .context("receiver ClockID unavailable; cannot safely bind PTP")?;
+            .context("receiver ClockID unavailable; authenticated PTP identity binding unsupported; UDP trust-on-first-use disabled")?;
         ensure!(
             clock != 0 && clock != u64::MAX && clock != local_clock,
             "invalid receiver clock identity"

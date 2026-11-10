@@ -8,7 +8,10 @@ session diagnostics and an explicit AirPlay 2 realtime UDP/ALAC/NTP audio test.
 and OwnTone services are never modified.
 
 Buffered AirPlay 2 has an explicit, non-playing `buffered-test --setup-check`
-diagnostic for one already selected and authorized receiver. Live audio stays
+diagnostic for one already selected and authorized receiver. Additional separately
+confirmed `--control-check record|stream|anchor` stages exercise control negotiation
+and a paused anchor without a media connection. See the [PR #43 evidence and
+remaining roadmap](docs/AIRPLAY2_COMPATIBILITY.md). Live audio stays
 blocked pending receiver clock-adoption evidence. See the [lifecycle, limitations
 and manual hardware instructions](docs/BUFFERED_LIFECYCLE.md). No diagnostic runs
 automatically; no buffered audible playback is claimed.
@@ -195,8 +198,9 @@ See [session implementation, research and precise blockers](docs/AIRPLAY_SESSION
 The active sender follows the [source-traced OwnTone NTP profile](docs/AIRPLAY_REFERENCE_ANALYSIS.md):
 AirPlay 2 persistent HAP, realtime UDP type 96, ALAC 44100/16/stereo, 352 frames,
 encrypted events/media, NTP sync, feedback/retransmit and FLUSH/TEARDOWN.
-OwnTone's inspected sender does not implement buffered TCP type 103. PiAir's
-older 48 kHz buffered packet components remain separate and disabled.
+That historical OwnTone inspection did not cover the pinned OwnTone-mini
+buffered implementation. See the [current comparison](docs/AIRPLAY2_COMPATIBILITY.md)
+for type103 protocol evidence and PiAir's closed audio gate.
 
 Normal realtime playback now uses the [early NTP responder lifecycle](docs/REALTIME_NTP_LIFECYCLE.md)
 verified for setup-only profile B. READY requires NTP synchronization and a healthy
@@ -422,5 +426,6 @@ The [buffered AirPlay 2 foundation](docs/BUFFERED_TRANSPORT.md) implements
 type103 encrypted TCP framing and an independently decoded ALAC24 stereo codec.
 The [PTP timing foundation](docs/PTP_TIMING.md) adds a session-owned grandmaster,
 precise 48 kHz anchors and authenticated timing-control requests. Complete buffered
-sessions remain disabled pending PR #42 lifecycle and hardware validation;
+playback remains disabled pending receiver clock-adoption evidence and media
+lifecycle integration; staged control diagnostics are mock-tested only;
 no buffered hardware playback is claimed.

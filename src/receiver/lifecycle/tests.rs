@@ -82,7 +82,7 @@ fn fixture(
             .unwrap();
         server(socket);
     });
-    let mut wire = Wire::mock(socket, Duration::from_millis(200), "device:112233445566");
+    let mut wire = Wire::mock(socket, Duration::from_millis(500), "device:112233445566");
     let authorization = wire.ptp_test_authorization().unwrap();
     let wire = wire
         .secure(ControlKeys::new(b"lifecycle"), ControlKeys::new(b"events"))
@@ -470,4 +470,338 @@ fn authorization_is_mandatory_before_authentication_or_any_control_request() {
     assert_eq!(owner.state(), State::Failed);
     let mut byte = [0];
     assert_eq!(peer.read(&mut byte).unwrap(), 0);
+}
+
+#[test]
+fn control_stages_validate_order_payloads_and_never_connect_media() {
+    for target in [Stage::Record, Stage::Stream, Stage::Anchor] {
+        let media = TcpListener::bind("127.0.0.2:0").unwrap();
+        media.set_nonblocking(true).unwrap();
+        let port = media.local_addr().unwrap().port();
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            let mut keys = server_keys();
+            read_request(&mut socket, &mut keys);
+            reply(&mut socket, &mut keys, 1, Some(info()));
+            read_request(&mut socket, &mut keys);
+            reply(&mut socket, &mut keys, 2, Some(setup(123)));
+            let (head, body) = read_request(&mut socket, &mut keys);
+            assert!(head.starts_with("RECORD "));
+            assert!(body.is_empty());
+            // PTP must continue while this response is pending.
+            thread::sleep(Duration::from_millis(160));
+            reply(&mut socket, &mut keys, 3, None);
+            let mut next = 4;
+            if target >= Stage::Stream {
+                let (head, body) = read_request(&mut socket, &mut keys);
+                assert!(head.starts_with("SETPEERS "));
+                assert!(head.contains("Content-Type: /peer-list-changed\r\n"));
+                assert_eq!(
+                    profile::parse(&body).unwrap(),
+                    Value::Array(vec!["127.0.0.2".into(), "127.0.0.1".into()])
+                );
+                reply(&mut socket, &mut keys, 4, None);
+                let (head, body) = read_request(&mut socket, &mut keys);
+                assert!(head.starts_with("POST /command "));
+                let value = profile::parse(&body).unwrap();
+                let value = value.as_dictionary().unwrap();
+                assert_eq!(value["type"].as_string(), Some("updateMRSupportedCommands"));
+                assert!(
+                    value["params"].as_dictionary().unwrap()["mrSupportedCommandsFromSender"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+                reply(
+                    &mut socket,
+                    &mut keys,
+                    5,
+                    Some(profile::dict([("status", profile::uint(0))])),
+                );
+                let (head, body) = read_request(&mut socket, &mut keys);
+                assert!(head.starts_with("SETUP "));
+                let value = profile::parse(&body).unwrap();
+                let stream = value.as_dictionary().unwrap()["streams"]
+                    .as_array()
+                    .unwrap()[0]
+                    .as_dictionary()
+                    .unwrap();
+                assert_eq!(stream["type"].as_unsigned_integer(), Some(103));
+                assert_eq!(stream["audioFormatIndex"].as_unsigned_integer(), Some(21));
+                assert_eq!(stream["shk"].as_data().unwrap().len(), 32);
+                assert_eq!(
+                    stream["streamConnections"].as_dictionary().unwrap()["streamConnectionTypeRTP"]
+                        .as_dictionary()
+                        .unwrap()["streamConnectionKeyUseStreamEncryptionKey"]
+                        .as_boolean(),
+                    Some(true)
+                );
+                let response = profile::dict([(
+                    "streams",
+                    Value::Array(vec![profile::dict([
+                        ("type", profile::uint(103)),
+                        ("streamConnectionID", stream["streamConnectionID"].clone()),
+                        (
+                            "streamConnections",
+                            profile::dict([(
+                                "streamConnectionTypeRTP",
+                                profile::dict([(
+                                    "streamConnectionKeyPort",
+                                    profile::uint(u64::from(port)),
+                                )]),
+                            )]),
+                        ),
+                    ])]),
+                )]);
+                reply(&mut socket, &mut keys, 6, Some(response));
+                let (head, body) = read_request(&mut socket, &mut keys);
+                assert!(head.starts_with("POST /audioMode "));
+                assert_eq!(
+                    profile::parse(&body).unwrap(),
+                    profile::dict([("audioMode", "default".into())])
+                );
+                reply(&mut socket, &mut keys, 7, None);
+                next = 8;
+            }
+            if target == Stage::Anchor {
+                let (head, body) = read_request(&mut socket, &mut keys);
+                assert!(head.starts_with("SETRATEANCHORTIME "));
+                let value = profile::parse(&body).unwrap();
+                assert_eq!(
+                    value.as_dictionary().unwrap()["rate"].as_unsigned_integer(),
+                    Some(0)
+                );
+                assert_eq!(
+                    value.as_dictionary().unwrap()["rtpTime"].as_unsigned_integer(),
+                    Some(0)
+                );
+                reply(&mut socket, &mut keys, 8, Some(value));
+                next = 9;
+            }
+            let (head, _) = read_request(&mut socket, &mut keys);
+            assert!(head.starts_with("TEARDOWN "));
+            assert!(head.contains("Session: test-session\r\n"));
+            reply(&mut socket, &mut keys, next, None);
+        });
+        let (event, peer_event) = udp_pair();
+        let (general, _peer_general) = udp_pair();
+        owner
+            .negotiate_with(|wire, setup, id| {
+                let clock = ptp::Grandmaster::new(
+                    id,
+                    setup.clock_id,
+                    Instant::now(),
+                    Duration::from_secs(30),
+                )?;
+                Ok((
+                    None,
+                    ptp::Service::attach(clock, event, general, wire.ptp_lease()?)?,
+                ))
+            })
+            .unwrap();
+        peer_event
+            .send(
+                &ptp::packet::Packet::new(ptp::packet::Kind::DelayReq, 123, 1, vec![0; 10])
+                    .encode()
+                    .unwrap(),
+            )
+            .unwrap();
+        owner.observe(Duration::from_millis(1)).unwrap();
+        owner.progress(target).unwrap();
+        assert_eq!(owner.stage, Some(target));
+        assert_eq!(owner.anchor_accepted, target == Stage::Anchor);
+        assert!(!owner.timing.as_ref().unwrap().clock().media_permitted());
+        // Initial Sync and at least one more while the RECORD reply stalled.
+        peer_event.set_nonblocking(true).unwrap();
+        let mut count = 0;
+        let mut bytes = [0; 512];
+        while peer_event.recv(&mut bytes).is_ok() {
+            count += 1;
+        }
+        assert!(count >= 2);
+        assert!(media.accept().is_err());
+        owner.stop().unwrap();
+        assert!(owner.prepared.is_none());
+        assert!(owner.stream.is_none());
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn rejected_record_never_advances_and_attempts_teardown() {
+    let (mut owner, _approval, server) = fixture(|mut socket| {
+        let mut keys = server_keys();
+        read_request(&mut socket, &mut keys);
+        reply(&mut socket, &mut keys, 1, Some(info()));
+        read_request(&mut socket, &mut keys);
+        reply(&mut socket, &mut keys, 2, Some(setup(123)));
+        assert!(read_request(&mut socket, &mut keys)
+            .0
+            .starts_with("RECORD "));
+        reply(
+            &mut socket,
+            &mut keys,
+            3,
+            Some(profile::dict([("status", profile::uint(1))])),
+        );
+        assert!(read_request(&mut socket, &mut keys)
+            .0
+            .starts_with("TEARDOWN "));
+        reply(&mut socket, &mut keys, 4, None);
+    });
+    let (event, _event_peer) = udp_pair();
+    let (general, _general_peer) = udp_pair();
+    owner
+        .negotiate_with(|wire, setup, id| {
+            let clock =
+                ptp::Grandmaster::new(id, setup.clock_id, Instant::now(), Duration::from_secs(30))?;
+            Ok((
+                None,
+                ptp::Service::attach(clock, event, general, wire.ptp_lease()?)?,
+            ))
+        })
+        .unwrap();
+    assert!(owner.progress(Stage::Stream).is_err());
+    assert_eq!(owner.state(), State::Failed);
+    assert!(owner.prepared.is_none());
+    assert!(owner.control.is_none());
+    server.join().unwrap();
+}
+
+#[test]
+fn inband_rejections_at_every_control_stage_discard_session_and_key() {
+    for rejected_seq in 3..=8 {
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            let mut keys = server_keys();
+            read_request(&mut socket, &mut keys);
+            reply(&mut socket, &mut keys, 1, Some(info()));
+            read_request(&mut socket, &mut keys);
+            reply(&mut socket, &mut keys, 2, Some(setup(123)));
+            for seq in 3..=rejected_seq {
+                let (head, body) = read_request(&mut socket, &mut keys);
+                assert!(!head.starts_with("TEARDOWN "));
+                let value = if seq == rejected_seq {
+                    Some(profile::dict([("status", profile::uint(7))]))
+                } else if seq == 6 {
+                    let value = profile::parse(&body).unwrap();
+                    let stream = value.as_dictionary().unwrap()["streams"]
+                        .as_array()
+                        .unwrap()[0]
+                        .as_dictionary()
+                        .unwrap();
+                    Some(profile::dict([(
+                        "streams",
+                        Value::Array(vec![profile::dict([
+                            ("type", profile::uint(103)),
+                            ("dataPort", profile::uint(12345)),
+                            ("streamConnectionID", stream["streamConnectionID"].clone()),
+                        ])]),
+                    )]))
+                } else {
+                    None
+                };
+                reply(&mut socket, &mut keys, seq, value);
+            }
+            assert!(read_request(&mut socket, &mut keys)
+                .0
+                .starts_with("TEARDOWN "));
+            reply(&mut socket, &mut keys, rejected_seq + 1, None);
+        });
+        let (event, peer_event) = udp_pair();
+        let (general, _general_peer) = udp_pair();
+        owner
+            .negotiate_with(|wire, setup, id| {
+                let clock = ptp::Grandmaster::new(
+                    id,
+                    setup.clock_id,
+                    Instant::now(),
+                    Duration::from_secs(30),
+                )?;
+                Ok((
+                    None,
+                    ptp::Service::attach(clock, event, general, wire.ptp_lease()?)?,
+                ))
+            })
+            .unwrap();
+        peer_event
+            .send(
+                &ptp::packet::Packet::new(ptp::packet::Kind::DelayReq, 123, 1, vec![0; 10])
+                    .encode()
+                    .unwrap(),
+            )
+            .unwrap();
+        owner.observe(Duration::from_millis(1)).unwrap();
+        assert!(owner.progress(Stage::Anchor).is_err());
+        assert_eq!(owner.state(), State::Failed);
+        assert!(owner.prepared.is_none());
+        assert!(owner.stream.is_none());
+        assert!(owner.timing.is_none());
+        assert!(!owner.anchor_accepted);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn pending_record_cancel_revocation_timing_loss_and_tcp_close_fail_closed() {
+    for fault in 0..4 {
+        let (entered, pending) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (mut owner, approval, server) = fixture(move |mut socket| {
+            let mut keys = server_keys();
+            read_request(&mut socket, &mut keys);
+            reply(&mut socket, &mut keys, 1, Some(info()));
+            read_request(&mut socket, &mut keys);
+            reply(&mut socket, &mut keys, 2, Some(setup(123)));
+            assert!(read_request(&mut socket, &mut keys)
+                .0
+                .starts_with("RECORD "));
+            entered.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(2)).unwrap();
+            if fault == 2 {
+                // Response can be valid while the timing service has failed.
+                thread::sleep(Duration::from_millis(160));
+                reply(&mut socket, &mut keys, 3, None);
+                assert!(read_request(&mut socket, &mut keys)
+                    .0
+                    .starts_with("TEARDOWN "));
+                reply(&mut socket, &mut keys, 4, None);
+            }
+            // Other faults close TCP, with no further control stage possible.
+        });
+        let (event, _event_peer) = udp_pair();
+        let (general, _general_peer) = udp_pair();
+        owner
+            .negotiate_with(|wire, setup, id| {
+                let timeout = if fault == 2 {
+                    Duration::from_millis(100)
+                } else {
+                    Duration::from_secs(30)
+                };
+                let clock = ptp::Grandmaster::new(id, setup.clock_id, Instant::now(), timeout)?;
+                Ok((
+                    None,
+                    ptp::Service::attach(clock, event, general, wire.ptp_lease()?)?,
+                ))
+            })
+            .unwrap();
+        let cancel = owner.cancel.clone();
+        let config = approval.path().join("config.toml");
+        let change = thread::spawn(move || {
+            pending.recv_timeout(Duration::from_secs(2)).unwrap();
+            if fault == 0 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            if fault == 1 {
+                std::fs::write(config, "receiver_allowlist=[]").unwrap();
+            }
+            release.send(()).unwrap();
+        });
+        assert!(owner.progress(Stage::Stream).is_err());
+        assert_eq!(owner.state(), State::Failed);
+        assert!(owner.control.is_none());
+        assert!(owner.timing.is_none());
+        assert!(owner.prepared.is_none());
+        assert!(!owner.anchor_accepted);
+        change.join().unwrap();
+        server.join().unwrap();
+    }
 }

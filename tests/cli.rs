@@ -565,3 +565,41 @@ fn buffered_audio_intent_fails_locally_without_selection_discovery_or_confirmati
             .success()
     );
 }
+
+#[test]
+fn buffered_control_checks_are_explicit_and_noninteractive_runs_fail_closed() {
+    for stage in ["record", "stream", "anchor"] {
+        let output = run(&[
+            "buffered-test",
+            "device:112233445566",
+            "--control-check",
+            stage,
+        ]);
+        assert!(!output.status.success());
+        for conflict in ["--confirm-audio", "--setup-check"] {
+            assert_eq!(
+                run(&[
+                    "buffered-test",
+                    "device:112233445566",
+                    "--control-check",
+                    stage,
+                    conflict
+                ])
+                .status
+                .code(),
+                Some(2)
+            );
+        }
+    }
+    assert_eq!(
+        run(&[
+            "buffered-test",
+            "device:112233445566",
+            "--control-check",
+            "play"
+        ])
+        .status
+        .code(),
+        Some(2)
+    );
+}

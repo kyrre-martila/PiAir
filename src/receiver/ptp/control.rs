@@ -13,7 +13,7 @@ pub struct Peers {
     local: IpAddr,
 }
 impl Peers {
-    pub(super) fn new(receiver: IpAddr, local: IpAddr) -> Result<Self> {
+    pub(crate) fn new(receiver: IpAddr, local: IpAddr) -> Result<Self> {
         for a in [receiver, local] {
             ensure!(
                 !a.is_unspecified() && !a.is_multicast(),
@@ -88,7 +88,7 @@ impl AnchorRequest {
             generation: mapping.generation,
         })
     }
-    fn validate(&self, clock: &Grandmaster, now: Instant) -> Result<()> {
+    pub(crate) fn validate(&self, clock: &Grandmaster, now: Instant) -> Result<()> {
         ensure!(
             clock.state() == State::PeerObserved
                 && self.anchor.clock_id == clock.clock_id
@@ -152,7 +152,10 @@ pub fn acknowledgement(body: &[u8], expected: Option<&Value>) -> Result<()> {
     Ok(())
 }
 
-fn validate_reply(reply: &crate::receiver::wire::Reply, expected: Option<&Value>) -> Result<()> {
+pub(crate) fn validate_reply(
+    reply: &crate::receiver::wire::Reply,
+    expected: Option<&Value>,
+) -> Result<()> {
     if !reply.body.is_empty() {
         if let Some(content_type) = reply.headers.get("content-type") {
             ensure!(

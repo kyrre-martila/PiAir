@@ -93,6 +93,19 @@ impl Packet {
             interval: b[33] as i8,
             body: b[34..].to_vec(),
         };
+        let expected_control = match p.kind {
+            Kind::Sync => 0,
+            Kind::DelayReq => 1,
+            Kind::FollowUp => 2,
+            Kind::DelayResp => 3,
+            _ => 5,
+        };
+        ensure!(
+            b[32] == expected_control
+                || (b[32] == 0
+                    && matches!(p.kind, Kind::FollowUp | Kind::DelayResp | Kind::Announce)),
+            "invalid PTP control field"
+        );
         p.validate()?;
         Ok(p)
     }
@@ -116,11 +129,58 @@ impl Packet {
         if self.kind == Kind::PdelayReq {
             ensure!(self.body[10..20] == [0; 10], "reserved pdelay bytes");
         }
+        let mut apple_seen = 0u8;
         let mut tail = &self.body[self.kind.body_len()..];
         while !tail.is_empty() {
             ensure!(tail.len() >= 4, "truncated PTP TLV");
             let n = usize::from(u16::from_be_bytes(tail[2..4].try_into()?));
             ensure!(n % 2 == 0 && n <= tail.len() - 4, "invalid PTP TLV size");
+            let kind = u16::from_be_bytes(tail[..2].try_into()?);
+            let value = &tail[4..n + 4];
+            if kind == 8 {
+                ensure!(
+                    self.kind == Kind::Announce && n >= 8 && n % 8 == 0,
+                    "invalid path trace TLV"
+                );
+            }
+            if kind == 3 {
+                ensure!(n >= 6, "short organization TLV");
+                if value[..6] == [0, 0x80, 0xc2, 0, 0, 1] {
+                    ensure!(
+                        self.kind == Kind::FollowUp && n == 28,
+                        "invalid Follow_Up information TLV"
+                    );
+                }
+                if value[..3] == [0, 0x0d, 0x93] {
+                    let subtype = value[5];
+                    ensure!(
+                        value[3..5] == [0; 2] && subtype < 8 && apple_seen & (1 << subtype) == 0,
+                        "duplicate/unsupported Apple TLV"
+                    );
+                    apple_seen |= 1 << subtype;
+                    match &value[3..6] {
+                        [0, 0, 4] => {
+                            ensure!(
+                                self.kind == Kind::FollowUp && n == 16,
+                                "invalid Apple clock TLV"
+                            );
+                            ensure!(
+                                value[6..14] == self.source[..8] && value[14..] == [0; 2],
+                                "conflicting Apple clock TLV"
+                            );
+                        }
+                        [0, 0, 1] => ensure!(
+                            self.kind == Kind::Signaling && n == 22,
+                            "invalid Apple signaling subtype 1"
+                        ),
+                        [0, 0, 5] => ensure!(
+                            self.kind == Kind::Signaling && n == 32,
+                            "invalid Apple signaling subtype 5"
+                        ),
+                        _ => anyhow::bail!("unsupported Apple TLV"),
+                    }
+                }
+            }
             tail = &tail[n + 4..];
         }
         Ok(())
