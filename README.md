@@ -405,3 +405,9 @@ with `piair stua-playback-check device:02d899c1833f --volume-db -20`.
 The default remains -40 dB. The confirmation displays the selected volume;
 receiver volume may persist after the test, including after failure, and is not
 restored. This changes only receiver volume, not the generated tone amplitude.
+
+Passive transport diagnostics: `piair receiver-plan` shows observed capabilities,
+provenance, group/stereo/proxy candidates and transport rejection reasons without
+receiver connections or state writes. Optional `--method setup-code` (also
+`pin-display`/`transient`) expresses planning intent only; it does not pair or play.
+See [capability planning and remaining gaps](docs/RECEIVER_PLANNING.md).

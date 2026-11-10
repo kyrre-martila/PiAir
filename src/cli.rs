@@ -30,6 +30,12 @@ pub enum Command {
     Devices,
     /// Full passive receiver details: IDs, addresses, services and local approval/pairing state.
     Receivers,
+    /// Passive capability/topology snapshot and transport plan; no receiver connections or state writes.
+    ReceiverPlan {
+        /// Explicit authentication intent for planning only; never enrolls or authenticates.
+        #[arg(long, value_enum)]
+        method: Option<crate::receiver::compatibility::Method>,
+    },
     /// Enroll persistent credentials with an approved receiver; requires verified PIN delivery or a genuine HAP setup code.
     Pairing,
     /// Pin an already allowlisted receiver's discovered endpoint; no connection.

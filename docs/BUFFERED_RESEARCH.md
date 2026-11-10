@@ -1,5 +1,9 @@
 # Buffered-profile research update (Prompt 4b)
 
+Historical revision scope: see [the newer fork audit and gap matrix](RECEIVER_PLANNING.md).
+The newer `owntone-mini/minimal` fork has active buffered transport; the older
+pinned source conclusions below do not describe that fork.
+
 Historical component scope. Prompt 4c adds a separate source-traced realtime
 UDP/NTP profile; it does not enable buffered type 103. See
 [AIRPLAY_REFERENCE_ANALYSIS.md](AIRPLAY_REFERENCE_ANALYSIS.md).

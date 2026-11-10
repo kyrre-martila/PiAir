@@ -1,5 +1,9 @@
 # Sender source analysis and implementation decision (Prompt 4c)
 
+Historical revision scope: see [the newer fork audit and gap matrix](RECEIVER_PLANNING.md).
+The newer `owntone-mini/minimal` fork has active buffered transport; the older
+pinned source conclusions below do not describe that fork.
+
 Examined 2026-11-07, before adding the active transport. GitHub reported PR #4
 already merged at `4fa1401` when this continuation began; the user explicitly
 authorized a follow-up PR based on that main, preserving the completed work. This is a protocol fact

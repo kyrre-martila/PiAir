@@ -25,6 +25,13 @@ fn run_with_discovery(
         Command::Receivers => {
             receiver::list(&loaded, &discover(loaded.config.discovery_timeout_secs)?)?
         }
+        Command::ReceiverPlan { method } => {
+            let snapshot = discover(loaded.config.discovery_timeout_secs)?;
+            print!(
+                "{}",
+                receiver::planning::diagnostic(&snapshot, |id| loaded.config.allows(id), method)
+            );
+        }
         Command::Pairing => receiver::interactive::pairing(&loaded)?,
         Command::Select {
             receiver_id,

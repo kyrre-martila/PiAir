@@ -515,3 +515,20 @@ fn stored_hap_operation_method_cannot_be_selected_for_enrollment() {
         Some(2)
     );
 }
+
+#[test]
+fn passive_receiver_plan_help_and_auth_intent_contract_are_device_free() {
+    let help = run(&["receiver-plan", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("no receiver connections or state writes"));
+    assert!(help.contains("--method"));
+    for args in [
+        vec!["receiver-plan", "--method", "auto"],
+        vec!["receiver-plan", "--method", "stored-hap"],
+        vec!["receiver-plan", "device:aabbccddeeff"],
+        vec!["receiver-plan", "--play"],
+    ] {
+        assert_eq!(run(&args).status.code(), Some(2));
+    }
+}
