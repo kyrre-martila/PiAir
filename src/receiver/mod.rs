@@ -6,13 +6,14 @@ mod crypto;
 mod diagnostics;
 mod hex_u64;
 pub(crate) mod interactive;
+mod lifecycle;
 pub(crate) mod planning;
 // Sans-I/O components only; blocked by the documented unresolved transport profile.
 #[allow(dead_code)]
 mod media;
 mod pairing;
 mod profile;
-#[allow(dead_code)] // Timing foundation remains inactive until PR #42.
+#[allow(dead_code)] // Playback timing primitives remain gated beyond the initial diagnostic.
 mod ptp;
 mod realtime;
 mod session;
@@ -627,4 +628,69 @@ fn stua_credential(store: &store::Store, selected: &Selection) -> Result<store::
         "credential discovery binding differs from selection"
     );
     Ok(credential)
+}
+
+/// Explicit buffered initial-SETUP diagnostic. Playback requests fail before discovery or dialing.
+pub fn buffered_test(
+    loaded: &Loaded,
+    id: &str,
+    setup_check: bool,
+    confirm_audio: bool,
+) -> Result<()> {
+    exact_id(id)?;
+    if confirm_audio || !setup_check {
+        anyhow::bail!(lifecycle::PLAYBACK_BLOCKER);
+    }
+    ensure!(loaded.config.allows(id), "receiver is not approved");
+    let store = store::Store::new(&loaded.path)?;
+    let selected = store
+        .selection()?
+        .context("select this approved receiver first")?;
+    ensure!(selected.id == id, "receiver is not selected");
+    selected.capabilities.decide(selected.method)?;
+    ensure!(
+        selected.capabilities.features & ((1u64 << 40) | (1u64 << 41))
+            == ((1u64 << 40) | (1u64 << 41)),
+        "selected receiver must advertise buffered audio and PTP; no profile fallback"
+    );
+    let credential = if selected.method == Method::Transient {
+        None
+    } else {
+        let credential = store
+            .credential(id)?
+            .context("existing credentials required; no automatic pairing")?;
+        ensure!(
+            credential.authentication_method(id)? == selected.method
+                && credential.advertised_pi == selected.advertised_pi,
+            "credentials differ from selected authentication binding"
+        );
+        Some(credential)
+    };
+    ensure!(
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+        "buffered diagnostic requires interactive confirmation"
+    );
+    let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    println!("Initial PTP SETUP diagnostic only: at most one second of timing observation, then bounded TEARDOWN. No RECORD, audio, volume or settings changes. Clock adoption and audible playback remain unverified.");
+    interactive::confirm_operation(
+        loaded,
+        None,
+        &snapshot,
+        "Contact the selected receiver for this initial SETUP check? [y/N]: ",
+    )?;
+    let mut session = lifecycle::Session::new();
+    let cancel = session.cancel.clone();
+    ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
+    session.start(
+        || wire::Wire::connect(&loaded.path, id, &selected, &snapshot),
+        credential.as_ref(),
+    )?;
+    let observed = session.observe(std::time::Duration::from_secs(1))?;
+    session.stop()?;
+    println!(
+        "PTP activity: {observed:?}; session: {:?}; TEARDOWN acknowledged. Audio bytes: 0. {}",
+        session.state(),
+        lifecycle::PLAYBACK_BLOCKER
+    );
+    Ok(())
 }

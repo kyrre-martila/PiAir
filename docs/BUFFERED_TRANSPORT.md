@@ -1,5 +1,11 @@
 # Buffered AirPlay 2 transport foundation
 
+Current single-receiver status: [BUFFERED_LIFECYCLE.md](BUFFERED_LIFECYCLE.md)
+implements an opt-in authenticated initial PTP SETUP diagnostic and bounded
+cleanup. Live buffered playback remains closed because receiver clock adoption
+is unverified. Historical PR #42 prerequisite lists below remain unresolved
+except for that explicitly documented foundation. No verified audio is claimed.
+
 Baseline: main / PR #39 merge `0608f2307a7c81b5faa5bd7a19f00607dbe04785`.
 This implements independently testable type103 transport and a local encoder.
 **No CLI or session can activate buffered playback. No audible playback is verified.**

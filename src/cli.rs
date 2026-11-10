@@ -91,6 +91,16 @@ pub enum Command {
         #[arg(long, requires = "setup_check", value_enum)]
         setup_profile: Option<crate::receiver::SetupProfile>,
     },
+    /// Buffered PTP foundation diagnostic; live audio remains blocked pending clock-adoption evidence.
+    BufferedTest {
+        receiver_id: String,
+        /// Opt in to initial SETUP and one second of PTP observation, with terminal confirmation.
+        #[arg(long, conflicts_with = "confirm_audio")]
+        setup_check: bool,
+        /// Explicit audio intent; currently fails locally because the live timing gate is closed.
+        #[arg(long)]
+        confirm_audio: bool,
+    },
     /// Stua only: reuse stored HAP credentials, validate stream SETUP, zero audio/volume changes.
     StuaStreamSetupCheck { receiver_id: String },
     /// Stua only: one second faded tone, configurable receiver volume (may persist), two seconds silent drain.

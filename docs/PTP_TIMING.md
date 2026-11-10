@@ -1,5 +1,11 @@
 # AirPlay 2 PTP and authenticated timing foundation
 
+Current single-receiver status: [BUFFERED_LIFECYCLE.md](BUFFERED_LIFECYCLE.md)
+implements an opt-in authenticated initial PTP SETUP diagnostic and bounded
+cleanup. Live buffered playback remains closed because receiver clock adoption
+is unverified. Historical PR #42 prerequisite lists below remain unresolved
+except for that explicitly documented foundation. No verified audio is claimed.
+
 Baseline: PR #40 merge `34ea81a3df3a5f520542ce32db1fe1052a0b8c82` on main. This is PR #41's timing foundation.
 **Buffered media remains disabled. No audible playback or Apple hardware clock
 lock has been verified.** Realtime NTP is unchanged. No daemon, system service,

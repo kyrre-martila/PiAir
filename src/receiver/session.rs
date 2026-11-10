@@ -328,8 +328,8 @@ impl Session {
         })();
         self.finish(result)
     }
-    /// No SETUP, ports, key exchange, codec or timing profile has been validated.
-    /// Calling this must never result in READY, RECORD, or plaintext media.
+    /// Legacy buffered entry point remains closed. The separate lifecycle owner
+    /// supports only the explicit initial PTP SETUP diagnostic, never media.
     #[allow(dead_code)] // Integration gate for PR #5; no CLI streaming command.
     pub fn start_buffered_audio(&mut self) -> Result<()> {
         let result = (|| {
@@ -337,7 +337,10 @@ impl Session {
                 self.state == State::Negotiating,
                 "authenticated negotiation required"
             );
-            bail!("buffered audio unsupported: type 103 codec offer, media key exchange, reserved header bits and Apple TV PTP/rate-anchor/feedback profile are unverified; standalone ALAC/packet components do not establish negotiation; FairPlay is not implemented")
+            bail!(
+                "{}; complete codec/FairPlay profile remains unsupported",
+                super::lifecycle::PLAYBACK_BLOCKER
+            )
         })();
         self.finish(result)
     }
