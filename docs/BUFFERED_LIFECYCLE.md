@@ -1,5 +1,7 @@
 # Single-receiver buffered lifecycle: fail-closed foundation
 
+> PR #43 update: see [current compatibility evidence, staged controls and remaining blockers](AIRPLAY2_COMPATIBILITY.md). The body below records the earlier foundation; its future-work statements are historical. Audio remains gated.
+
 This change takes Prompt 42's explicit fallback: **live buffered playback remains
 unavailable**. It implements an opt-in, authenticated initial PTP SETUP diagnostic
 and its resource lifecycle. It does not implement or claim a complete playable

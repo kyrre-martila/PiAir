@@ -410,3 +410,53 @@ fn maximum_frame_boundary_is_checked_before_encryption() {
     )
     .is_err());
 }
+
+#[test]
+fn nested_stream_ports_status_and_key_policy_are_validated() {
+    let make = |flat: Option<u64>, nested: u64, status: u64, key: bool| {
+        let mut stream = profile::dict([
+            ("type", profile::uint(103)),
+            (
+                "streamConnections",
+                profile::dict([(
+                    "streamConnectionTypeRTP",
+                    profile::dict([
+                        ("streamConnectionKeyPort", profile::uint(nested)),
+                        (
+                            "streamConnectionKeyUseStreamEncryptionKey",
+                            plist::Value::Boolean(key),
+                        ),
+                    ]),
+                )]),
+            ),
+        ]);
+        if let Some(flat) = flat {
+            stream
+                .as_dictionary_mut()
+                .unwrap()
+                .insert("dataPort".into(), profile::uint(flat));
+        }
+        profile::dict([
+            ("status", profile::uint(status)),
+            ("streams", plist::Value::Array(vec![stream])),
+        ])
+    };
+    for flat in [None, Some(1234)] {
+        assert_eq!(
+            NegotiatedStream::parse(&make(flat, 1234, 0, true), 7)
+                .unwrap()
+                .data_port
+                .get(),
+            1234
+        );
+    }
+    for v in [
+        make(Some(4321), 1234, 0, true),
+        make(None, 0, 0, true),
+        make(None, 65536, 0, true),
+        make(None, 1234, 1, true),
+        make(None, 1234, 0, false),
+    ] {
+        assert!(NegotiatedStream::parse(&v, 7).is_err());
+    }
+}

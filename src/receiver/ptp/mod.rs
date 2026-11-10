@@ -128,6 +128,7 @@ pub struct Grandmaster {
     next_sync: Instant,
     next_announce: Instant,
     sequence: u16,
+    announce_sequence: u16,
     pending_sync: Option<(u16, Instant)>,
     peer_identity: Option<[u8; 10]>,
     last_sequences: [Option<u16>; 2],
@@ -163,6 +164,7 @@ impl Grandmaster {
             next_sync: now,
             next_announce: now,
             sequence: 0,
+            announce_sequence: 0,
             pending_sync: None,
             peer_identity: None,
             last_sequences: [None; 2],
@@ -253,6 +255,12 @@ impl Grandmaster {
         p.body
             .extend_from_slice(&[0, 3, 0, 28, 0, 0x80, 0xc2, 0, 0, 1]);
         p.body.extend_from_slice(&[0; 22]);
+        // Empirically corroborated Apple clock identity extension. Length 16
+        // includes OUI/subtype (6), clock (8) and two reserved zero bytes.
+        p.body
+            .extend_from_slice(&[0, 3, 0, 16, 0, 0x0d, 0x93, 0, 0, 4]);
+        p.body.extend_from_slice(&self.clock_id.to_be_bytes());
+        p.body.extend_from_slice(&[0; 2]);
         p.interval = -3;
         Ok(p)
     }
@@ -272,7 +280,13 @@ impl Grandmaster {
             // Standard PATH_TRACE TLV with this grandmaster only.
             b.extend_from_slice(&[0, 8, 0, 8]);
             b.extend_from_slice(&self.clock_id.to_be_bytes());
-            out.push(Packet::new(Kind::Announce, self.clock_id, self.sequence, b));
+            out.push(Packet::new(
+                Kind::Announce,
+                self.clock_id,
+                self.announce_sequence,
+                b,
+            ));
+            self.announce_sequence = self.announce_sequence.wrapping_add(1);
             self.next_announce = now + Duration::from_secs(1);
         }
         if now >= self.next_sync {
@@ -333,6 +347,29 @@ impl Grandmaster {
         self.last_peer = Some(received);
         self.state = State::PeerObserved;
         Ok(vec![response])
+    }
+    /// General-channel observations cannot pin identities, elect a clock or
+    /// refresh delay-request liveness. Apple signaling contents remain opaque.
+    fn receive_general(&self, bytes: &[u8]) -> Result<()> {
+        let p = Packet::decode(bytes)?;
+        ensure!(!p.kind.event(), "event packet on general channel");
+        ensure!(
+            p.source[..8] == self.peer_clock_id.to_be_bytes(),
+            "unexpected general peer identity"
+        );
+        if let Some(identity) = self.peer_identity {
+            ensure!(p.source == identity, "general peer port identity changed");
+        }
+        if p.kind == Kind::Signaling {
+            let mut local = [0; 10];
+            local[..8].copy_from_slice(&self.clock_id.to_be_bytes());
+            local[8..].copy_from_slice(&0x8005u16.to_be_bytes());
+            ensure!(
+                p.body[..10] == local || p.body[..10] == [0xff; 10] || p.body[..10] == [0; 10],
+                "unexpected signaling target"
+            );
+        }
+        Ok(())
     }
     pub fn shutdown(&mut self) {
         self.state = State::Shutdown;
@@ -454,6 +491,27 @@ impl Service {
                             }
                         }
                     }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        // Drain general traffic too, with a separate fixed work bound. No
+        // private TLV can register peers or authorize additional destinations.
+        for _ in 0..16 {
+            self.check_authorization()?;
+            ensure!(!cancel.load(Ordering::Relaxed), "PTP cancelled");
+            let mut bytes = [0; 513];
+            match self
+                .general
+                .as_ref()
+                .context("PTP socket closed")?
+                .recv(&mut bytes)
+            {
+                Ok(n) => {
+                    self.check_authorization()?;
+                    let _ = self.clock.receive_general(&bytes[..n]);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,

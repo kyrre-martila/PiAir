@@ -6,7 +6,7 @@ mod crypto;
 mod diagnostics;
 mod hex_u64;
 pub(crate) mod interactive;
-mod lifecycle;
+pub(crate) mod lifecycle;
 pub(crate) mod planning;
 // Sans-I/O components only; blocked by the documented unresolved transport profile.
 #[allow(dead_code)]
@@ -636,9 +636,10 @@ pub fn buffered_test(
     id: &str,
     setup_check: bool,
     confirm_audio: bool,
+    control_check: Option<lifecycle::Stage>,
 ) -> Result<()> {
     exact_id(id)?;
-    if confirm_audio || !setup_check {
+    if confirm_audio || (!setup_check && control_check.is_none()) {
         anyhow::bail!(lifecycle::PLAYBACK_BLOCKER);
     }
     ensure!(loaded.config.allows(id), "receiver is not approved");
@@ -671,13 +672,24 @@ pub fn buffered_test(
         "buffered diagnostic requires interactive confirmation"
     );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
-    println!("Initial PTP SETUP diagnostic only: at most one second of timing observation, then bounded TEARDOWN. No RECORD, audio, volume or settings changes. Clock adoption and audible playback remain unverified.");
+    println!("Buffered diagnostic: initial SETUP and one second of timing observation; any additional control stages need separate confirmation. Bounded TEARDOWN follows. No audio or volume changes. Clock adoption and audible playback remain unverified.");
     interactive::confirm_operation(
         loaded,
         None,
         &snapshot,
         "Contact the selected receiver for this initial SETUP check? [y/N]: ",
     )?;
+    if let Some(target) = control_check {
+        for (stage, prompt) in [
+            (lifecycle::Stage::Record, "Opt in to RECORD on this session? [y/N]: "),
+            (lifecycle::Stage::Stream, "Opt in to SETPEERS, empty MediaRemote registration, stream SETUP and audioMode (fresh secret key; no media connection)? [y/N]: "),
+            (lifecycle::Stage::Anchor, "Opt in to a paused timing anchor (acceptance does not prove clock adoption)? [y/N]: "),
+        ] {
+            if stage <= target {
+                interactive::confirm_operation(loaded, None, &snapshot, prompt)?;
+            }
+        }
+    }
     let mut session = lifecycle::Session::new();
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
@@ -686,6 +698,12 @@ pub fn buffered_test(
         credential.as_ref(),
     )?;
     let observed = session.observe(std::time::Duration::from_secs(1))?;
+    if let Some(stage) = control_check {
+        session.progress(stage)?;
+        println!(
+            "Control stage {stage:?} accepted; receiver clock adoption unproven; audio bytes: 0."
+        );
+    }
     session.stop()?;
     println!(
         "PTP activity: {observed:?}; session: {:?}; TEARDOWN acknowledged. Audio bytes: 0. {}",

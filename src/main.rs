@@ -89,9 +89,16 @@ fn run_with_discovery(
         Command::BufferedTest {
             receiver_id,
             setup_check,
+            control_check,
             confirm_audio,
         } => {
-            receiver::buffered_test(&loaded, &receiver_id, setup_check, confirm_audio)?;
+            receiver::buffered_test(
+                &loaded,
+                &receiver_id,
+                setup_check,
+                confirm_audio,
+                control_check,
+            )?;
         }
         Command::StuaStreamSetupCheck { receiver_id } => {
             receiver::stua_check(&loaded, &receiver_id, false, -40)?
