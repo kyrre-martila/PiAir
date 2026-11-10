@@ -347,7 +347,8 @@ fn loopback_service_and_socket_cleanup() {
     let general_addr = general.local_addr().unwrap();
     let now = Instant::now();
     let c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
-    let mut s = Service::attach(c, event, general).unwrap();
+    let fixture = authorized_ptp_fixture();
+    let mut s = Service::attach(c, event, general, fixture.wire.ptp_lease().unwrap()).unwrap();
     let cancel = AtomicBool::new(false);
     peer_event
         .send(&request(Kind::DelayReq, 1).encode().unwrap())
@@ -379,6 +380,7 @@ fn loopback_service_and_socket_cleanup() {
 }
 #[test]
 fn socket_peer_mismatch_rejected() {
+    let fixture = authorized_ptp_fixture();
     let (e, _) = udp_pair();
     let g = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     g.connect(SocketAddr::from(([127, 0, 0, 2], 320))).unwrap();
@@ -391,7 +393,8 @@ fn socket_peer_mismatch_rejected() {
         )
         .unwrap(),
         e,
-        g
+        g,
+        fixture.wire.ptp_lease().unwrap(),
     )
     .is_err());
 }
@@ -508,6 +511,7 @@ fn authenticated_timing_control_same_socket_and_failure_semantics() {
                 ControlKeys::events(b"timing-test"),
             )
             .unwrap();
+        let _approval = wire.ptp_test_authorization().unwrap();
         let now = Instant::now();
         let mut clock =
             Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
@@ -692,6 +696,7 @@ fn rejected_setpeers_closes_control_without_anchor_or_retry() {
             ControlKeys::events(b"timing-test"),
         )
         .unwrap();
+    let _approval = wire.ptp_test_authorization().unwrap();
     let clock = Grandmaster::new(
         42,
         0x1122334455667788,
@@ -709,4 +714,254 @@ fn rejected_setpeers_closes_control_without_anchor_or_retry() {
     assert!(wire.is_invalidated());
     drop(wire);
     t.join().unwrap();
+}
+
+/// Network fixtures opt in to real allowlist/selection checks. Mock encryption
+/// keys alone never grant PTP authorization. Keep the Wire and config owner alive.
+struct AuthorizedPtpFixture {
+    wire: Wire,
+    approval: tempfile::TempDir,
+    _receiver: TcpStream,
+}
+fn authorized_ptp_fixture() -> AuthorizedPtpFixture {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (receiver, _) = listener.accept().unwrap();
+    let mut wire = Wire::mock(socket, Duration::from_secs(1), "device:112233445566")
+        .secure(
+            ControlKeys::new(b"ptp-fixture"),
+            ControlKeys::events(b"ptp-fixture"),
+        )
+        .unwrap();
+    let approval = wire.ptp_test_authorization().unwrap();
+    AuthorizedPtpFixture {
+        wire,
+        approval,
+        _receiver: receiver,
+    }
+}
+impl AuthorizedPtpFixture {
+    fn revoke(&self) {
+        std::fs::write(
+            self.approval.path().join("config.toml"),
+            "receiver_allowlist=[]",
+        )
+        .unwrap();
+    }
+}
+fn fixture_clock() -> Grandmaster {
+    Grandmaster::new(
+        42,
+        0x1122334455667788,
+        Instant::now(),
+        Duration::from_secs(2),
+    )
+    .unwrap()
+}
+fn no_datagram(socket: &UdpSocket) {
+    socket.set_nonblocking(true).unwrap();
+    let error = socket.recv(&mut [0; 513]).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+}
+fn assert_service_closed(
+    service: &Service,
+    event: std::net::SocketAddr,
+    general: std::net::SocketAddr,
+) {
+    assert_eq!(service.state(), State::Shutdown);
+    assert!(service.event.is_none() && service.general.is_none());
+    let _event = UdpSocket::bind(event).unwrap();
+    let _general = UdpSocket::bind(general).unwrap();
+}
+#[test]
+fn ptp_requires_both_authentication_and_concrete_authorization() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (_receiver, _) = listener.accept().unwrap();
+    let mut wire = Wire::mock(socket, Duration::from_secs(1), "device:112233445566");
+    let _approval = wire.ptp_test_authorization().unwrap();
+    assert!(wire.ptp_lease().is_err()); // allowlist alone is not authentication
+    assert!(wire
+        .start_ptp(42, 0x1122334455667788, Duration::from_secs(1))
+        .is_err());
+    let mut wire = wire
+        .secure(
+            ControlKeys::new(b"ptp-fixture"),
+            ControlKeys::events(b"ptp-fixture"),
+        )
+        .unwrap();
+    assert!(wire.ptp_lease().is_ok());
+    wire.close();
+    assert!(wire.ptp_lease().is_err());
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (_receiver, _) = listener.accept().unwrap();
+    let mut wire = Wire::mock(socket, Duration::from_secs(1), "device:112233445566")
+        .secure(
+            ControlKeys::new(b"ptp-fixture"),
+            ControlKeys::events(b"ptp-fixture"),
+        )
+        .unwrap();
+    assert!(wire.ptp_lease().is_err()); // keys alone cannot use legacy None leases
+    assert!(wire
+        .start_ptp(42, 0x1122334455667788, Duration::from_secs(1))
+        .is_err());
+    assert!(wire
+        .buffered_timing("rtsp://127.0.0.1/session".into(), &fixture_clock())
+        .is_err());
+    // Direct control construction cannot bypass the same mandatory boundary.
+    assert!(super::control::Control::new(
+        &mut wire,
+        "rtsp://127.0.0.1/session".into(),
+        &fixture_clock()
+    )
+    .is_err());
+}
+#[test]
+fn revoked_capability_rejects_attachment_and_releases_sockets_without_traffic() {
+    let fixture = authorized_ptp_fixture();
+    let lease = fixture.wire.ptp_lease().unwrap();
+    let (event, peer_event) = udp_pair();
+    let (general, peer_general) = udp_pair();
+    let event_addr = event.local_addr().unwrap();
+    let general_addr = general.local_addr().unwrap();
+    fixture.revoke();
+    assert!(fixture.wire.ptp_lease().is_err());
+    assert!(Service::attach(fixture_clock(), event, general, lease).is_err());
+    let _event = UdpSocket::bind(event_addr).unwrap();
+    let _general = UdpSocket::bind(general_addr).unwrap();
+    no_datagram(&peer_event);
+    no_datagram(&peer_general);
+}
+#[test]
+fn polling_revocation_blocks_scheduled_and_reply_datagrams_and_closes_immediately() {
+    for change in 0..4 {
+        let fixture = authorized_ptp_fixture();
+        let (event, peer_event) = udp_pair();
+        let (general, peer_general) = udp_pair();
+        let event_addr = event.local_addr().unwrap();
+        let general_addr = general.local_addr().unwrap();
+        let mut service = Service::attach(
+            fixture_clock(),
+            event,
+            general,
+            fixture.wire.ptp_lease().unwrap(),
+        )
+        .unwrap();
+        peer_event
+            .send(&request(Kind::DelayReq, 1).encode().unwrap())
+            .unwrap();
+        match change {
+            0 => fixture.revoke(),
+            1 => std::fs::remove_file(fixture.approval.path().join("receiver-state/selected.toml"))
+                .unwrap(),
+            2 => {
+                std::fs::write(fixture.approval.path().join("config.toml"), "invalid = [").unwrap()
+            }
+            _ => std::fs::write(
+                fixture.approval.path().join("receiver-state/selected.toml"),
+                "invalid = [",
+            )
+            .unwrap(),
+        }
+        assert!(service.poll(&AtomicBool::new(false)).is_err());
+        no_datagram(&peer_event);
+        no_datagram(&peer_general);
+        assert_service_closed(&service, event_addr, general_addr);
+        assert!(service.clock.last_peer.is_none()); // queued traffic was never processed
+    }
+}
+#[test]
+fn authorization_is_rechecked_for_each_outbound_datagram() {
+    for kind in [
+        Kind::Sync,
+        Kind::FollowUp,
+        Kind::DelayResp,
+        Kind::PdelayResp,
+        Kind::PdelayFollowUp,
+        Kind::Announce,
+    ] {
+        let fixture = authorized_ptp_fixture();
+        let (event, peer_event) = udp_pair();
+        let (general, peer_general) = udp_pair();
+        let event_addr = event.local_addr().unwrap();
+        let general_addr = general.local_addr().unwrap();
+        let mut service = Service::attach(
+            fixture_clock(),
+            event,
+            general,
+            fixture.wire.ptp_lease().unwrap(),
+        )
+        .unwrap();
+        // A prior successful send must not cache permission for the next datagram.
+        let first = Packet::new(Kind::Sync, 42, 0, vec![0; 10]);
+        service.send(&first).unwrap();
+        let mut received = [0; 512];
+        let n = peer_event.recv(&mut received).unwrap();
+        assert_eq!(Packet::decode(&received[..n]).unwrap().kind, Kind::Sync);
+        fixture.revoke();
+        let length = match kind {
+            Kind::Sync | Kind::FollowUp => 10,
+            Kind::Announce => 30,
+            _ => 20,
+        };
+        let packet = Packet::new(kind, 42, 1, vec![0; length]);
+        assert!(service.send(&packet).is_err());
+        no_datagram(&peer_event);
+        no_datagram(&peer_general);
+        assert_service_closed(&service, event_addr, general_addr);
+        // Restoring approval cannot resurrect an owner whose sockets were closed.
+        std::fs::write(
+            fixture.approval.path().join("config.toml"),
+            "receiver_allowlist=['device:112233445566']",
+        )
+        .unwrap();
+        assert!(service.poll(&AtomicBool::new(false)).is_err());
+        assert!(service.send(&packet).is_err());
+        no_datagram(&peer_event);
+        no_datagram(&peer_general);
+    }
+}
+#[test]
+fn matching_socket_peers_cannot_target_another_receiver_with_a_valid_capability() {
+    let fixture = authorized_ptp_fixture();
+    let event = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let general = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    event.connect((Ipv4Addr::new(127, 0, 0, 2), 319)).unwrap();
+    general.connect((Ipv4Addr::new(127, 0, 0, 2), 320)).unwrap();
+    assert!(Service::attach(
+        fixture_clock(),
+        event,
+        general,
+        fixture.wire.ptp_lease().unwrap()
+    )
+    .is_err());
+}
+
+#[test]
+fn timing_control_revocation_closes_without_sending_a_request() {
+    let (wire, receiver) = mock_timing(|mut socket| {
+        let mut byte = [0; 1];
+        assert_eq!(socket.read(&mut byte).unwrap(), 0);
+    });
+    let mut wire = wire
+        .secure(
+            ControlKeys::new(b"timing-test"),
+            ControlKeys::events(b"timing-test"),
+        )
+        .unwrap();
+    let approval = wire.ptp_test_authorization().unwrap();
+    let clock = fixture_clock();
+    {
+        let mut control = wire
+            .buffered_timing("rtsp://127.0.0.2/session".into(), &clock)
+            .unwrap();
+        std::fs::write(approval.path().join("config.toml"), "receiver_allowlist=[]").unwrap();
+        assert!(control.set_peers().is_err());
+        assert!(control.set_peers().is_err());
+    }
+    assert!(wire.is_invalidated());
+    drop(wire);
+    receiver.join().unwrap();
 }

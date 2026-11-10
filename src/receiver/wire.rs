@@ -793,6 +793,57 @@ impl Wire {
             self.auth_profile == AuthProfile::PyatvDiagnostic,
         )
     }
+    /// Issue a PTP capability only from a live authenticated, authorized Wire.
+    /// The legacy Lease's optional mock authorization is never accepted here.
+    pub(super) fn ptp_lease(&self) -> Result<PtpLease> {
+        ensure!(
+            !self.failed && self.keys.is_some(),
+            "authenticated control required for PTP"
+        );
+        let (path, authorization) = self
+            .authorization
+            .as_ref()
+            .context("PTP authorization absent")?;
+        let lease = PtpLease {
+            path: path.clone(),
+            authorization: authorization.clone(),
+            id: self.receiver_id.clone(),
+            peer: self.socket.peer_addr()?.ip(),
+        };
+        lease.check()?;
+        Ok(lease)
+    }
+    /// Explicit loopback fixture with real allowlist/selection revocation checks.
+    #[cfg(test)]
+    pub(super) fn ptp_test_authorization(&mut self) -> Result<tempfile::TempDir> {
+        let peer = self.socket.peer_addr()?;
+        ensure!(peer.ip().is_loopback(), "PTP fixture requires loopback");
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!("receiver_allowlist=['{}']", self.receiver_id),
+        )?;
+        let selected = Selection {
+            id: self.receiver_id.clone(),
+            advertised_pi: None,
+            method: self.method,
+            addresses: [peer.ip()].into_iter().collect(),
+            port: peer.port(),
+            capabilities: super::compatibility::Capabilities {
+                features: (1 << 9) | (1 << 19),
+                flags: None,
+                password: None,
+                access_control: None,
+                access_control_type: None,
+                protocol_version: None,
+            },
+        };
+        super::store::Store::new(&path)?.select(&selected)?;
+        self.authorization = Some((path, Authorization::Persisted(selected)));
+        self.reauthorize()?;
+        Ok(dir)
+    }
     /// No production caller until PR #42 owns authenticated buffered setup.
     /// Binding standard PTP ports may fail without local bind permission: fail closed.
     #[allow(dead_code)]
@@ -802,11 +853,7 @@ impl Wire {
         peer_clock_id: u64,
         timeout: Duration,
     ) -> Result<super::ptp::Service> {
-        self.reauthorize()?;
-        ensure!(
-            !self.failed && self.keys.is_some(),
-            "authenticated control required"
-        );
+        let lease = self.ptp_lease()?;
         let peer = self.socket.peer_addr()?.ip();
         let local = self.socket.local_addr()?.ip();
         let event = UdpSocket::bind(SocketAddr::new(local, 319))?;
@@ -818,8 +865,8 @@ impl Wire {
             super::ptp::Grandmaster::new(clock_id, peer_clock_id, Instant::now(), timeout)?,
             event,
             general,
-        )?
-        .authorize(self.lease())
+            lease,
+        )
     }
     /// Foundation only: exclusive same-receiver authenticated timing control.
     #[allow(dead_code)]
@@ -837,9 +884,7 @@ impl Wire {
             uri.starts_with("rtsp://") && uri.len() < 256 && uri.bytes().all(|b| b > 32 && b < 127),
             "invalid session URI"
         );
-        let receiver = self.socket.peer_addr()?.ip();
-        let local = self.socket.local_addr()?.ip();
-        super::ptp::control::Control::new(self, uri, receiver, local, clock)
+        super::ptp::control::Control::new(self, uri, clock)
     }
     pub(super) fn uses_owntone_transient_profile(&self) -> bool {
         self.auth_profile == AuthProfile::OwnToneTransient
@@ -1135,6 +1180,22 @@ impl Drop for Wire {
 pub(super) struct Reply {
     pub body: Zeroizing<Vec<u8>>,
     pub headers: BTreeMap<String, String>,
+}
+/// Mandatory PTP network capability. Only Wire can construct it, after checking
+/// authentication and a concrete persisted/operation authorization. No None form.
+pub(super) struct PtpLease {
+    path: PathBuf,
+    authorization: Authorization,
+    id: String,
+    peer: IpAddr,
+}
+impl PtpLease {
+    pub(super) fn check(&self) -> Result<()> {
+        self.authorization.check(&self.path, &self.id)
+    }
+    pub(super) fn peer(&self) -> IpAddr {
+        self.peer
+    }
 }
 #[derive(Clone)]
 pub(super) struct Lease {

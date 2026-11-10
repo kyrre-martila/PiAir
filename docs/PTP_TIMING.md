@@ -19,12 +19,23 @@ trait intentionally still has no live implementation.
 Only `Wire::start_ptp` can create production timing sockets. It checks existing
 authorization and authenticated control keys, binds the control socket's local
 literal address on UDP 319/320, and connects only to the same receiver address.
-A copied authorization lease is checked every poll and before every datagram
-send. Failure to bind the standard ports is an error; PiAir never installs a
+Every service requires a non-optional `PtpLease` capability minted only by a live
+Wire with authenticated control keys and concrete persisted/operation authorization.
+Its fields and constructor are private to Wire; the optional legacy lease is not
+accepted. `Service::attach` is restricted to the receiver implementation and
+requires that capability at construction, rechecks it, and checks both connected
+socket peers against its authorized receiver address. There is no unauthenticated
+service constructor or later `authorize` step. Authorization is checked on each
+poll, before every outbound datagram, around incoming packet processing and at
+poll completion. Detected revocation shuts down the clock and closes both sockets
+immediately, including a failed direct send; restoring approval cannot resurrect
+that owner. Failure to bind the standard ports is an error; PiAir never installs a
 service, elevates itself, reuses another daemon, or changes host configuration.
 These entry points have no production caller until PR #42. The lower-level
-service accepts preconnected sockets for independent loopback testing, following
-PR #40's transport attachment pattern. No receiver endpoint comes from a plist
+service accepts preconnected sockets only with the same mandatory capability.
+Loopback fixtures explicitly create temporary allowlist/selection files and mock
+authenticated control keys, then use the production capability-issuance and
+revocation checks. Pure Grandmaster packet/state tests require no network lease. No receiver endpoint comes from a plist
 peer list, DNS, a redirect, model, name or discovered group member.
 
 The future session owns the authenticated Wire, service and media transport.
@@ -126,7 +137,10 @@ not proof that the receiver has adopted that schedule.
 
 ## Authenticated control and trust boundaries
 
-`Wire::buffered_timing` requires control keys and current authorization. Its
+`Wire::buffered_timing` requires control keys and current authorization.
+Direct typed Control construction also requires Wire to issue a concrete PTP
+capability and derives its peer addresses from that Wire; keys without persisted
+or operation authorization cannot create network-capable timing control. Its
 exclusive Wire borrow binds all operations to that authenticated connection and
 receiver. SETPEERS is the RTSP **method**, uses the session URI, Content-Type
 `/peer-list-changed`, and a bare binary-plist array ordered receiver address,
@@ -218,3 +232,19 @@ loss blocks media and teardown removes sockets. Physical audibility, latency and
 channel/sample correctness require separate measurement, not RTSP status alone.
 Proxy groups, stereo groups and Apple TV/HomePod grouped playback remain out of
 scope; do not validate them by automatically authorizing additional members.
+
+
+## Mandatory authorization regression coverage
+
+The senior-review correction removes the optional-service-lease bypass without
+changing legacy realtime NTP or authentication leases. Tests reject absent
+approval even when mock control keys exist, approval without authentication,
+closed Wires, revoked capabilities at attachment and sockets targeting another
+receiver. Revocation during an owner's lifetime (allowlist removal, missing or
+malformed selection, malformed config) prevents scheduled and response packets,
+ignores queued timing input and immediately releases sockets. Per-datagram tests
+revoke after a successful send and verify that Sync, Follow_Up, Delay_Resp,
+Pdelay_Resp, Pdelay_Resp_Follow_Up and Announce cannot transmit afterward. Typed
+timing control is also tested for revocation before its first request. All
+network fixtures are explicit loopback authorizations; no physical receiver is
+contacted, discovered or automatically approved.

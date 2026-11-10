@@ -170,19 +170,16 @@ pub struct Control<'a> {
     wire: &'a mut Wire,
     uri: String,
     peers: Peers,
+    lease: crate::receiver::wire::PtpLease,
     clock_id: u64,
     generation: u64,
     peers_accepted: bool,
     failed: bool,
 }
 impl<'a> Control<'a> {
-    pub(crate) fn new(
-        wire: &'a mut Wire,
-        uri: String,
-        receiver: IpAddr,
-        local: IpAddr,
-        clock: &Grandmaster,
-    ) -> Result<Self> {
+    pub(crate) fn new(wire: &'a mut Wire, uri: String, clock: &Grandmaster) -> Result<Self> {
+        let lease = wire.ptp_lease()?;
+        let peers = Peers::new(lease.peer(), wire.local_ip()?)?;
         let clock_id = clock.clock_id;
         ensure!(
             clock_id != 0 && clock_id != u64::MAX,
@@ -191,7 +188,8 @@ impl<'a> Control<'a> {
         Ok(Self {
             wire,
             uri,
-            peers: Peers::new(receiver, local)?,
+            peers,
+            lease,
             clock_id,
             generation: clock.generation(),
             peers_accepted: false,
@@ -204,6 +202,7 @@ impl<'a> Control<'a> {
             "timing control already used/failed"
         );
         let result = (|| {
+            self.lease.check()?;
             let body = self.peers.encode()?;
             let reply = self.wire.request(
                 "SETPEERS",
@@ -232,6 +231,7 @@ impl<'a> Control<'a> {
             "SETPEERS acknowledgement required"
         );
         let result = (|| {
+            self.lease.check()?;
             clock.check(now, false)?;
             ensure!(
                 clock.state() == State::PeerObserved

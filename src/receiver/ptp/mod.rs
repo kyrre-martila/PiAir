@@ -359,26 +359,40 @@ pub struct Service {
     clock: Grandmaster,
     event: Option<UdpSocket>,
     general: Option<UdpSocket>,
-    lease: Option<super::wire::Lease>,
+    lease: super::wire::PtpLease,
 }
 impl Service {
-    pub fn attach(clock: Grandmaster, event: UdpSocket, general: UdpSocket) -> Result<Self> {
+    pub(super) fn attach(
+        clock: Grandmaster,
+        event: UdpSocket,
+        general: UdpSocket,
+        lease: super::wire::PtpLease,
+    ) -> Result<Self> {
+        lease.check()?;
         let e = event.peer_addr()?;
         let g = general.peer_addr()?;
-        ensure!(e.ip() == g.ip(), "PTP peer mismatch");
+        ensure!(
+            e.ip() == lease.peer() && g.ip() == lease.peer(),
+            "PTP peer does not match authorization"
+        );
         event.set_nonblocking(true)?;
         general.set_nonblocking(true)?;
         Ok(Self {
             clock,
             event: Some(event),
             general: Some(general),
-            lease: None,
+            lease,
         })
     }
-    fn send(&self, p: &Packet) -> Result<()> {
-        if let Some(lease) = &self.lease {
-            lease.check()?;
+    fn check_authorization(&mut self) -> Result<()> {
+        let result = self.lease.check();
+        if result.is_err() {
+            self.shutdown();
         }
+        result
+    }
+    fn send(&mut self, p: &Packet) -> Result<()> {
+        self.check_authorization()?;
         let b = p.encode()?;
         let socket = if p.kind.event() {
             &self.event
@@ -397,9 +411,7 @@ impl Service {
         result
     }
     fn poll_inner(&mut self, cancel: &AtomicBool) -> Result<()> {
-        if let Some(lease) = &self.lease {
-            lease.check()?;
-        }
+        self.check_authorization()?;
         self.clock
             .check(Instant::now(), cancel.load(Ordering::Relaxed))?;
         for p in self.clock.due(Instant::now())? {
@@ -411,6 +423,7 @@ impl Service {
         }
         // Bounded work even under a flood. Wrong-port packets cannot refresh liveness.
         for _ in 0..16 {
+            self.check_authorization()?;
             if cancel.load(Ordering::Relaxed) {
                 self.clock.shutdown();
                 anyhow::bail!("PTP cancelled");
@@ -423,6 +436,7 @@ impl Service {
                 .recv(&mut b)
             {
                 Ok(n) => {
+                    self.check_authorization()?;
                     // Invalid unauthenticated UDP is ignored, never a lock signal.
                     if let Ok(responses) = self.clock.receive(&b[..n], Instant::now()) {
                         for p in responses {
@@ -446,12 +460,7 @@ impl Service {
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok(())
-    }
-    pub(super) fn authorize(mut self, lease: super::wire::Lease) -> Result<Self> {
-        lease.check()?;
-        self.lease = Some(lease);
-        Ok(self)
+        self.check_authorization()
     }
     pub fn shutdown(&mut self) {
         self.clock.shutdown();
