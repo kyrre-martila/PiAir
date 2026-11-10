@@ -1,0 +1,423 @@
+use super::*;
+use mdns_sd::ServiceInfo;
+
+const G: &str = "11111111-1111-4111-8111-111111111111";
+const H: &str = "22222222-2222-4222-8222-222222222222";
+fn receiver(id: &str, service: &str, fields: &[(&str, &str)]) -> Receiver {
+    let mut txt: std::collections::HashMap<String, String> = fields
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    txt.insert("deviceid".into(), id.into());
+    let instance = if service.starts_with("_raop") {
+        format!("{id}@Fixture")
+    } else {
+        "Fixture".into()
+    };
+    let info =
+        ServiceInfo::new(service, &instance, "fixture.local.", "127.0.0.1", 7000, txt).unwrap();
+    Receiver {
+        id: format!("device:{id}"),
+        name: "Fixture".into(),
+        services: vec![Advertisement::test_from_info(&info)],
+    }
+}
+fn ap(id: &str, extra: &[(&str, &str)]) -> Receiver {
+    let mut fields = vec![("features", "0x80200,0x4000"), ("flags", "0x0")];
+    fields.extend_from_slice(extra);
+    receiver(id, "_airplay._tcp.local.", &fields)
+}
+fn authorized() -> Authorization {
+    Authorization {
+        allowlisted: true,
+        method: Some(Method::SetupCode),
+        requires_ptp: false,
+    }
+}
+#[test]
+fn synthetic_receiver_matrix() {
+    // Product labels describe fixture scenarios only; implementation never reads them.
+    for (label, r, eligible, buffered) in [
+        ("Apple TV standalone", ap("aabbccddeeff", &[]), true, false),
+        ("HomePod standalone", ap("aabbccddeeff", &[]), true, false),
+        (
+            "AirPlay 2 realtime only",
+            ap("aabbccddeeff", &[]),
+            true,
+            false,
+        ),
+        (
+            "buffered capable",
+            receiver(
+                "aabbccddeeff",
+                "_airplay._tcp.local.",
+                &[("features", "0x80200,0x4300"), ("flags", "0")],
+            ),
+            true,
+            true,
+        ),
+        (
+            "AirPlay 1 only",
+            receiver(
+                "aabbccddeeff",
+                "_raop._tcp.local.",
+                &[("cn", "0,1"), ("sr", "44100"), ("ss", "16"), ("ch", "2")],
+            ),
+            false,
+            false,
+        ),
+        (
+            "third party incomplete",
+            receiver("aabbccddeeff", "_airplay._tcp.local.", &[]),
+            false,
+            false,
+        ),
+        (
+            "malformed capabilities",
+            receiver(
+                "aabbccddeeff",
+                "_airplay._tcp.local.",
+                &[("features", "bad-mask")],
+            ),
+            false,
+            false,
+        ),
+        (
+            "password",
+            ap("aabbccddeeff", &[("pw", "true")]),
+            false,
+            false,
+        ),
+        (
+            "restricted home",
+            ap("aabbccddeeff", &[("acl", "2")]),
+            false,
+            false,
+        ),
+        (
+            "malformed format",
+            ap("aabbccddeeff", &[("sr", "nonsense")]),
+            false,
+            false,
+        ),
+    ] {
+        let caps = ReceiverCapabilities::observe(&r);
+        assert_eq!(caps.buffered == Claim::Observed(true), buffered, "{label}");
+        assert_eq!(caps.runtime, RuntimeResults::default());
+        let t = topology(std::slice::from_ref(&r));
+        let plan = plan(&r, authorized(), &t, None);
+        assert_eq!(
+            plan.iter().any(|c| c.rejections.is_empty()),
+            eligible,
+            "{label}: {plan:?}"
+        );
+        assert!(plan
+            .iter()
+            .filter(|c| c.transport != Transport::RealtimeNtp)
+            .all(|c| !c.rejections.is_empty()));
+        assert_eq!(plan, super::plan(&r, authorized(), &t, None));
+    }
+}
+#[test]
+fn authorization_and_timing_never_fall_back() {
+    let r = ap("aabbccddeeff", &[]);
+    let t = topology(std::slice::from_ref(&r));
+    for auth in [
+        Authorization::default(),
+        Authorization {
+            requires_ptp: true,
+            ..authorized()
+        },
+        Authorization {
+            method: None,
+            ..authorized()
+        },
+        Authorization {
+            method: Some(Method::Transient),
+            ..authorized()
+        },
+    ] {
+        assert!(plan(&r, auth, &t, None)
+            .iter()
+            .all(|c| !c.rejections.is_empty()));
+    }
+}
+#[test]
+fn proxy_stereo_conflicts_and_changing_snapshots_are_candidates_only() {
+    for (label, snapshot, key) in [
+        (
+            "Apple TV and HomePod follower",
+            vec![
+                ap("aabbccddeeff", &[("gid", G), ("igl", "1")]),
+                ap("112233445566", &[("gid", G), ("igl", "0")]),
+            ],
+            format!("gid:{G}"),
+        ),
+        (
+            "Apple TV and two followers",
+            vec![
+                ap("aabbccddeeff", &[("gid", G), ("igl", "1")]),
+                ap("112233445566", &[("gid", G), ("igl", "0")]),
+                ap("223344556677", &[("gid", G), ("igl", "0")]),
+            ],
+            format!("gid:{G}"),
+        ),
+        (
+            "HomePod stereo pair",
+            vec![
+                ap("aabbccddeeff", &[("gid", G), ("tsid", H), ("igl", "1")]),
+                ap("112233445566", &[("gid", G), ("tsid", H), ("igl", "0")]),
+            ],
+            format!("tsid:{H}"),
+        ),
+    ] {
+        let t = topology(&snapshot);
+        assert_eq!(t.candidate_sets[&key].len(), snapshot.len(), "{label}");
+        for r in &snapshot {
+            assert!(plan(r, authorized(), &t, None)
+                .iter()
+                .all(|c| !c.rejections.is_empty()));
+        }
+        let newer = topology(&snapshot[..1]);
+        assert_eq!(newer.candidate_sets[&key].len(), 1);
+        assert!(topology(&[]).candidate_sets.is_empty());
+    }
+    let mut r = ap("aabbccddeeff", &[("gid", G)]);
+    r.services
+        .extend(ap("aabbccddeeff", &[("gid", H)]).services);
+    assert!(topology(&[r]).ambiguous.contains("device:aabbccddeeff"));
+    let shared_names = vec![ap("aabbccddeeff", &[]), ap("112233445566", &[])];
+    assert!(topology(&shared_names).candidate_sets.is_empty());
+    let competing = vec![
+        ap("aabbccddeeff", &[("gid", G), ("igl", "1")]),
+        ap("112233445566", &[("gid", G), ("igl", "1")]),
+    ];
+    assert_eq!(topology(&competing).ambiguous.len(), 2);
+    let changing = vec![ap("aabbccddeeff", &[("gid", H)])];
+    assert!(!topology(&changing)
+        .candidate_sets
+        .contains_key(&format!("gid:{G}")));
+}
+#[test]
+fn info_projection_preserves_formats_conflicts_and_excludes_secrets() {
+    let mut d = plist::Dictionary::new();
+    d.insert(
+        "features".into(),
+        Value::Integer(((1u64 << 46) | (1 << 19) | (1 << 9)).into()),
+    );
+    d.insert("shk".into(), Value::Data(b"SECRET-KEY".to_vec()));
+    d.insert(
+        "supportedFormats".into(),
+        super::super::profile::dict([
+            ("audioStream", Value::Integer(0x40000u64.into())),
+            ("bufferStream", Value::Integer((1u64 << 23).into())),
+        ]),
+    );
+    let value = Value::Dictionary(d.clone());
+    let info = Evidence::authenticated_info(&value);
+    assert_eq!(info.buffered_formats, Claim::Observed([23].into()));
+    assert!(!format!("{info:?}").contains("SECRET"));
+    let r = ap("aabbccddeeff", &[]);
+    let t = topology(std::slice::from_ref(&r));
+    assert!(plan(&r, authorized(), &t, Some(&info))[0]
+        .rejections
+        .is_empty());
+    d.insert(
+        "supportedAudioFormatsExtended".into(),
+        super::super::profile::dict([(
+            "bufferStream",
+            Value::Array(vec![Value::Integer(22u64.into())]),
+        )]),
+    );
+    assert_eq!(
+        Evidence::authenticated_info(&Value::Dictionary(d.clone())).buffered_formats,
+        Claim::Conflict
+    );
+    for invalid in [
+        Value::String("bad".into()),
+        Value::Integer(5u64.into()),
+        Value::Array(vec![Value::String("23".into())]),
+    ] {
+        d.insert(
+            "supportedAudioFormatsExtended".into(),
+            super::super::profile::dict([("bufferStream", invalid)]),
+        );
+        assert_eq!(
+            Evidence::authenticated_info(&Value::Dictionary(d.clone())).buffered_formats,
+            Claim::Invalid
+        );
+    }
+    d.insert("features".into(), Value::Integer(0u64.into()));
+    let conflict = Evidence::authenticated_info(&Value::Dictionary(d.clone()));
+    assert!(plan(&r, authorized(), &t, Some(&conflict))
+        .iter()
+        .all(|c| !c.rejections.is_empty()));
+    d.insert("statusFlags".into(), Value::Integer(128u64.into()));
+    assert!(plan(
+        &r,
+        authorized(),
+        &t,
+        Some(&Evidence::authenticated_info(&Value::Dictionary(d)))
+    )
+    .iter()
+    .all(|c| !c.rejections.is_empty()));
+}
+#[test]
+fn diagnostic_is_deterministic_and_redacted() {
+    let mut r = ap("aabbccddeeff", &[("gid", "invalid"), ("igl", "maybe")]);
+    r.services[0]
+        .capabilities
+        .insert("pk".into(), "SECRET".into());
+    let text = diagnostic(&[r], |_| false, None);
+    assert!(text.contains("not authorized"));
+    assert!(!text.contains("SECRET"));
+    assert!(text.contains("audible_playback: None"));
+}
+
+#[test]
+fn passive_dispatch_never_connects_or_mutates_state() {
+    use clap::Parser;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let source = "receiver_allowlist=['device:aabbccddeeff']\n";
+    std::fs::write(&config, source).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    for method in [None, Some("setup-code"), Some("transient")] {
+        let mut args = vec![
+            "piair",
+            "--config",
+            config.to_str().unwrap(),
+            "receiver-plan",
+        ];
+        if let Some(method) = method {
+            args.extend(["--method", method]);
+        }
+        let cli = crate::cli::Cli::parse_from(args);
+        crate::run_with_discovery(cli, |_| {
+            let mut r = ap("aabbccddeeff", &[]);
+            r.services[0].port = port;
+            Ok(vec![r])
+        })
+        .unwrap();
+        assert!(listener.accept().is_err());
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), source);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn labels_cannot_grant_capabilities_and_split_gids_stay_separate() {
+    let mut r = ap(
+        "aabbccddeeff",
+        &[
+            ("model", "HomePod"),
+            ("tsid", H),
+            ("gid", &format!("{H}+0")),
+        ],
+    );
+    let other = ap("112233445566", &[("tsid", H), ("gid", &format!("{H}+1"))]);
+    r.name = "Apple TV".into();
+    let topology = topology(&[r, other]);
+    assert_eq!(topology.stereo_candidates[&format!("tsid:{H}")].len(), 2);
+    assert_eq!(topology.candidate_sets[&format!("gid:{H}+0")].len(), 1);
+    assert_eq!(topology.candidate_sets[&format!("gid:{H}+1")].len(), 1);
+    assert!(topology.proxy_candidates.is_empty());
+    let mut unknown = receiver(
+        "aabbccddeeff",
+        "_airplay._tcp.local.",
+        &[("model", "AppleTV")],
+    );
+    unknown.name = "HomePod".into();
+    let caps = ReceiverCapabilities::observe(&unknown);
+    assert_eq!(caps.alac, Claim::Unknown);
+    assert_eq!(caps.buffered, Claim::Unknown);
+    assert_eq!(caps.ptp, Claim::Unknown);
+}
+
+#[test]
+fn malformed_info_parents_and_status_are_never_silently_promoted() {
+    for value in [
+        Value::String("bad".into()),
+        super::super::profile::dict([("supportedFormats", Value::String("bad".into()))]),
+        super::super::profile::dict([(
+            "supportedAudioFormatsExtended",
+            Value::String("bad".into()),
+        )]),
+    ] {
+        let info = Evidence::authenticated_info(&value);
+        assert!(info.realtime_format == Claim::Invalid || info.buffered_formats == Claim::Invalid);
+    }
+    let r = receiver(
+        "aabbccddeeff",
+        "_airplay._tcp.local.",
+        &[("features", "0x80200,0x10000"), ("flags", "0")],
+    );
+    let t = topology(std::slice::from_ref(&r));
+    let auth = Authorization {
+        method: Some(Method::Transient),
+        ..authorized()
+    };
+    assert!(plan(&r, auth, &t, None)[0].rejections.is_empty());
+    for flags in [1u64 << 3, 1 << 7, 1 << 9] {
+        let info = Evidence::authenticated_info(&super::super::profile::dict([(
+            "statusFlags",
+            Value::Integer(flags.into()),
+        )]));
+        assert!(plan(&r, auth, &t, Some(&info))
+            .iter()
+            .all(|c| !c.rejections.is_empty()));
+    }
+}
+
+#[test]
+fn existing_local_state_is_never_read_or_changed_by_diagnostics() {
+    use clap::Parser;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
+    let state = dir.path().join("receiver-state");
+    std::fs::create_dir(&state).unwrap();
+    // Deliberately invalid local state proves dispatch does not parse credentials/selection.
+    let selected = state.join("selected.toml");
+    let credentials = state.join("aabbccddeeff.toml");
+    for path in [&selected, &credentials] {
+        std::fs::write(path, "SECRET invalid local material").unwrap();
+    }
+    let cli = crate::cli::Cli::parse_from([
+        "piair",
+        "--config",
+        config.to_str().unwrap(),
+        "receiver-plan",
+    ]);
+    crate::run_with_discovery(cli, |_| Ok(vec![ap("aabbccddeeff", &[])])).unwrap();
+    for path in [&selected, &credentials] {
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "SECRET invalid local material"
+        );
+    }
+    assert_eq!(std::fs::read_dir(state).unwrap().count(), 2);
+}
+
+#[test]
+fn unknown_extended_format_ids_remain_evidence_without_enabling_streaming() {
+    let value = super::super::profile::dict([(
+        "supportedAudioFormatsExtended",
+        super::super::profile::dict([(
+            "bufferStream",
+            Value::Array(vec![Value::Integer(99u64.into())]),
+        )]),
+    )]);
+    let evidence = Evidence::authenticated_info(&value);
+    assert_eq!(evidence.buffered_formats, Claim::Observed([99].into()));
+    assert!(evidence.raw["supportedAudioFormatsExtended.bufferStream"].contains("99"));
+    let r = ap("aabbccddeeff", &[]);
+    let t = topology(std::slice::from_ref(&r));
+    let candidates = plan(&r, authorized(), &t, Some(&evidence));
+    assert!(candidates
+        .iter()
+        .filter(|c| c.transport == Transport::BufferedPtp)
+        .all(|c| c.implementation == Implementation::Unsupported && !c.rejections.is_empty()));
+}

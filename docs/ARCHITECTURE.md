@@ -205,3 +205,12 @@ terminal control characters out of output.
 
 mdns-sd's optional logging and async features are disabled: synchronous browsing
 needs neither, and third-party trace messages must not expose raw TXT/key fields.
+
+## Passive capabilities and transport planning
+
+See [receiver planning and reference gap matrix](RECEIVER_PLANNING.md) for the
+original typed evidence model, read-only group candidates, deterministic planner,
+new `receiver-plan` command and the distinction between historical upstream
+OwnTone research and the newer `owntone-mini/minimal` fork. Planning never opens
+receiver connections or changes selection. Buffered/PTP remain unsupported for
+streaming. Advertised buffered support and RTSP success do not prove audible playback.

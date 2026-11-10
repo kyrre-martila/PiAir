@@ -33,6 +33,11 @@ const CAPABILITIES: &[&str] = &[
     "protovers",
     "acl",
     "act",
+    "gid",
+    "gpn",
+    "tsid",
+    "gcgl",
+    "igl",
 ];
 
 #[derive(Clone, Debug)]
@@ -68,6 +73,10 @@ fn parse_txt<'a>(
             .and_then(|b| std::str::from_utf8(b).ok())
             .filter(|v| !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control));
         let Some(value) = value else {
+            if ["gid", "gpn", "tsid", "gcgl", "igl", "cn", "ch", "sr", "ss"].contains(&key.as_str())
+            {
+                values.insert(key.clone(), "invalid".into());
+            }
             if [
                 "deviceid",
                 "pi",
@@ -337,7 +346,8 @@ mod tests {
             ("pk", Some(&b"never retained"[..])),
             ("fv", Some(&b"27.2"[..])),
         ]);
-        assert_eq!(txt.len(), 3);
+        assert_eq!(txt.len(), 4);
+        assert_eq!(txt["sr"], "invalid");
         assert_eq!(txt["fv"], "27.2");
         assert!(device_id(&txt["deviceid"]).is_none());
         assert_eq!(txt["features"], "0x1,0x2");

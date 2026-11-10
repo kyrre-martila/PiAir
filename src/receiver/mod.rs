@@ -4,6 +4,7 @@ mod crypto;
 mod diagnostics;
 mod hex_u64;
 pub(crate) mod interactive;
+pub(crate) mod planning;
 // Sans-I/O components only; blocked by the documented unresolved transport profile.
 #[allow(dead_code)]
 mod media;
