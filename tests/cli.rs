@@ -532,3 +532,36 @@ fn passive_receiver_plan_help_and_auth_intent_contract_are_device_free() {
         assert_eq!(run(&args).status.code(), Some(2));
     }
 }
+
+#[test]
+fn buffered_audio_intent_fails_locally_without_selection_discovery_or_confirmation() {
+    for extra in [vec![], vec!["--confirm-audio"]] {
+        let args: Vec<_> = ["buffered-test", "device:112233445566"]
+            .into_iter()
+            .chain(extra)
+            .collect();
+        let output = run(&args);
+        assert!(!output.status.success());
+        assert!(String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("clock adoption is unverified"));
+    }
+    assert!(run(&["buffered-test", "--help"]).status.success());
+    assert_eq!(run(&["buffered-test"]).status.code(), Some(2));
+    assert_eq!(
+        run(&[
+            "buffered-test",
+            "device:112233445566",
+            "--setup-check",
+            "--confirm-audio"
+        ])
+        .status
+        .code(),
+        Some(2)
+    );
+    assert!(
+        !run(&["buffered-test", "device:112233445566", "--setup-check"])
+            .status
+            .success()
+    );
+}

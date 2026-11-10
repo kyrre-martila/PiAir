@@ -86,6 +86,13 @@ fn run_with_discovery(
             setup_profile,
             experimental_owntone_transient,
         )?,
+        Command::BufferedTest {
+            receiver_id,
+            setup_check,
+            confirm_audio,
+        } => {
+            receiver::buffered_test(&loaded, &receiver_id, setup_check, confirm_audio)?;
+        }
         Command::StuaStreamSetupCheck { receiver_id } => {
             receiver::stua_check(&loaded, &receiver_id, false, -40)?
         }

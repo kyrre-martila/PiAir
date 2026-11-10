@@ -1,5 +1,11 @@
 # Receiver capability and transport planning foundation
 
+Current single-receiver status: [BUFFERED_LIFECYCLE.md](BUFFERED_LIFECYCLE.md)
+implements an opt-in authenticated initial PTP SETUP diagnostic and bounded
+cleanup. Live buffered playback remains closed because receiver clock adoption
+is unverified. Historical PR #42 prerequisite lists below remain unresolved
+except for that explicitly documented foundation. No verified audio is claimed.
+
 Current foundation update: [BUFFERED_TRANSPORT.md](BUFFERED_TRANSPORT.md) supersedes
 historical statements below that all buffered encoders/transport are absent.
 ALAC24 and type103 TCP components are implemented; complete sessions and live

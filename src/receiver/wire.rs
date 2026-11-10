@@ -793,6 +793,14 @@ impl Wire {
             self.auth_profile == AuthProfile::PyatvDiagnostic,
         )
     }
+    /// Buffered diagnostics cannot use the legacy optional mock authorization.
+    pub(super) fn buffered_authorization(&self) -> Result<()> {
+        ensure!(
+            !self.failed && self.authorization.is_some(),
+            "explicit buffered receiver authorization required"
+        );
+        self.reauthorize()
+    }
     /// Issue a PTP capability only from a live authenticated, authorized Wire.
     /// The legacy Lease's optional mock authorization is never accepted here.
     pub(super) fn ptp_lease(&self) -> Result<PtpLease> {
@@ -844,9 +852,8 @@ impl Wire {
         self.reauthorize()?;
         Ok(dir)
     }
-    /// No production caller until PR #42 owns authenticated buffered setup.
+    /// Initial diagnostic only: attach after authenticated timingPeerInfo validation.
     /// Binding standard PTP ports may fail without local bind permission: fail closed.
-    #[allow(dead_code)]
     pub(super) fn start_ptp(
         &self,
         clock_id: u64,

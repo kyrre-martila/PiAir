@@ -7,6 +7,12 @@ session diagnostics and an explicit AirPlay 2 realtime UDP/ALAC/NTP audio test.
 **Real Apple TV/HomePod playback compatibility remains unverified.** Audio tools never discover or contact receivers. Existing Autostream
 and OwnTone services are never modified.
 
+Buffered AirPlay 2 has an explicit, non-playing `buffered-test --setup-check`
+diagnostic for one already selected and authorized receiver. Live audio stays
+blocked pending receiver clock-adoption evidence. See the [lifecycle, limitations
+and manual hardware instructions](docs/BUFFERED_LIFECYCLE.md). No diagnostic runs
+automatically; no buffered audible playback is claimed.
+
 ## Build on Raspberry Pi OS ARM64
 
 Install a current stable Rust toolchain with rustfmt and Clippy, then build

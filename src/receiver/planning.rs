@@ -77,7 +77,7 @@ impl Evidence {
     }
     /// Caller must have authenticated the same receiver on this connection.
     /// This pure parser does not establish authentication or correlate identities.
-    #[allow(dead_code)] // Future authenticated-session seam; passive CLI never fetches /info.
+    // The explicit buffered diagnostic uses this; passive CLI never fetches /info.
     pub fn authenticated_info(value: &Value) -> Self {
         let integer = |path: &[&str]| {
             let mut v = value;
