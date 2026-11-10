@@ -115,6 +115,7 @@ impl Evidence {
                     .iter()
                     .map(Value::as_unsigned_integer)
                     .collect::<Option<BTreeSet<_>>>()
+                    .filter(|ids| ids.len() == a.len())
                     .map(Claim::Observed)
                     .unwrap_or(Claim::Invalid),
                 _ => Claim::Invalid,
@@ -129,7 +130,18 @@ impl Evidence {
             Claim::Unknown => Claim::Unknown,
             _ => Claim::Invalid,
         };
-        let buffered_formats = reconcile(mask, list);
+        // The legacy mask describes only indices 0..63. Extended IDs above
+        // that range cannot contradict it and remain unknown codec evidence.
+        let buffered_formats = match (mask, list) {
+            (Claim::Observed(mask), Claim::Observed(list)) => {
+                if mask == list.iter().copied().filter(|id| *id < 64).collect() {
+                    Claim::Observed(list)
+                } else {
+                    Claim::Conflict
+                }
+            }
+            (mask, list) => reconcile(mask, list),
+        };
         let features = integer(&["features"]);
         let realtime_format = integer(&["supportedFormats", "audioStream"]);
         let status_flags = integer(&["statusFlags"]);
@@ -163,6 +175,87 @@ impl Evidence {
             buffered_formats,
         }
     }
+}
+/// Fixed allowlist of fields and types; never format arbitrary plist values.
+/// Inspect at most 64 array elements and emit at most 64 numeric IDs per field.
+pub fn buffered_format_diagnostic(value: &Value) -> String {
+    fn kind(v: &Value) -> &'static str {
+        match v {
+            Value::Array(_) => "array",
+            Value::Dictionary(_) => "dictionary",
+            Value::Integer(_) => "integer",
+            Value::String(_) => "string",
+            Value::Data(_) => "data",
+            Value::Boolean(_) => "boolean",
+            Value::Real(_) => "real",
+            Value::Date(_) => "date",
+            Value::Uid(_) => "uid",
+            _ => "other",
+        }
+    }
+    let mut out = String::new();
+    for field in ["supportedFormats", "supportedAudioFormatsExtended"] {
+        let parent = value.as_dictionary().and_then(|d| d.get(field));
+        let child = parent
+            .and_then(Value::as_dictionary)
+            .and_then(|d| d.get("bufferStream"));
+        let _ = write!(
+            out,
+            "{field}:type={} bufferStream:type={}",
+            parent.map(kind).unwrap_or("missing"),
+            child.map(kind).unwrap_or("missing")
+        );
+        match child {
+            Some(Value::Array(a)) => {
+                let ids: Vec<_> = a
+                    .iter()
+                    .take(64)
+                    .filter_map(Value::as_unsigned_integer)
+                    .collect();
+                let unique: BTreeSet<_> = ids.iter().copied().collect();
+                let _ = write!(
+                    out,
+                    " count={} ids={ids:?} truncated={} malformedElements={} duplicates={} required21={}",
+                    a.len(),
+                    a.len() > 64,
+                    ids.len() != a.len().min(64),
+                    unique.len() != ids.len(),
+                    ids.contains(&21)
+                );
+            }
+            Some(Value::Integer(i)) => {
+                if let Some(mask) = i.as_unsigned() {
+                    let ids: Vec<_> = (0..64).filter(|bit| mask & (1u64 << bit) != 0).collect();
+                    let _ = write!(
+                        out,
+                        " count={} ids={ids:?} required21={}",
+                        ids.len(),
+                        ids.contains(&21)
+                    );
+                } else {
+                    out.push_str(" invalid-unsigned-mask");
+                }
+            }
+            _ => (),
+        }
+        out.push_str("; ");
+    }
+    let evidence = Evidence::authenticated_info(value);
+    let (state, present) = match evidence.buffered_formats {
+        Claim::Unknown => ("missing", false),
+        Claim::Invalid => ("malformed", false),
+        Claim::Conflict => ("contradictory", false),
+        Claim::Observed(ids) => (
+            if ids.contains(&21) {
+                "supported"
+            } else {
+                "unsupported"
+            },
+            ids.contains(&21),
+        ),
+    };
+    let _ = write!(out, "result={state} required21={present}");
+    out
 }
 fn reconcile<T: PartialEq>(a: Claim<T>, b: Claim<T>) -> Claim<T> {
     match (a, b) {

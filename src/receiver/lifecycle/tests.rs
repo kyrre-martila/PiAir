@@ -844,3 +844,40 @@ fn transient_rejection_never_allocates_ptp_events_or_stream_resources() {
     assert!(owner.request_playback().is_err());
     server.join().unwrap();
 }
+
+#[test]
+fn rejected_formats_send_no_setup_and_allocate_no_timing() {
+    for formats in [
+        None,
+        Some(Value::Array(vec![])),
+        Some(Value::Array(vec![profile::uint(23)])),
+        Some(Value::String("PRIVATE".into())),
+    ] {
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            let mut keys = server_keys();
+            let (head, _) = read_request(&mut socket, &mut keys);
+            assert!(head.starts_with("GET /info "));
+            let mut rejected = info();
+            let root = rejected.as_dictionary_mut().unwrap();
+            root.remove("supportedFormats");
+            if let Some(formats) = formats {
+                root.insert(
+                    "supportedAudioFormatsExtended".into(),
+                    profile::dict([("bufferStream", formats)]),
+                );
+            }
+            reply(&mut socket, &mut keys, 1, Some(rejected));
+            let mut byte = [0];
+            assert_eq!(socket.read(&mut byte).unwrap(), 0);
+        });
+        let error = owner
+            .negotiate_with(|_, _, _| panic!("PTP allocation after rejection"))
+            .unwrap_err();
+        assert!(error.to_string().contains("required21=false"));
+        assert!(!owner.attempted_setup);
+        assert!(owner.timing.is_none());
+        assert!(owner.events.is_none());
+        drop(owner);
+        server.join().unwrap();
+    }
+}

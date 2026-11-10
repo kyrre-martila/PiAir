@@ -245,3 +245,99 @@ Only then consider the existing separately confirmed staged controls. No buffere
 SETUP/PTP success is established by the authentication evidence or these mocks.
 Clock adoption remains unverified; live buffered audio is disabled. Do not change
 OwnTone, autostream, production configuration, volume or stored credentials.
+
+## Prompt 45: authenticated format rejection (2026-11-10)
+
+Operator evidence on `694d038` (merged PR #44): Even-Olai HomePod,
+`device:3ae5c9a302ad`, AudioAccessory5,1 firmware 27.2 at
+`192.168.1.33:7000`, completed initial GET /info, transient SRP M1/M2 and
+M3/M4, and encrypted GET /info (all 200) using
+`piair -v buffered-test device:3ae5c9a302ad --setup-check`. Validation then
+reported `authenticated ALAC24/48000/stereo format unavailable or contradictory`.
+No initial SETUP, PTP session or audio followed. OwnTone was restored successfully.
+The actual authenticated format fields were not recorded, so the cause on this
+receiver is still unknown. No receiver was contacted during this development.
+
+### Evidence and interpretation
+
+* **PiAir source facts:** `planning::Evidence::authenticated_info` reads
+  `supportedFormats.bufferStream` as an unsigned 64-bit mask, converting set
+  bit positions to format IDs. It reads
+  `supportedAudioFormatsExtended.bufferStream` as an array of unsigned integer
+  indices inside a dictionary. Either field may supply evidence alone; a
+  malformed supplied field fails closed. Empty lists are valid evidence of no
+  offered formats. At most 64 extended entries are accepted; duplicates now
+  fail as malformed rather than being silently collapsed. Unknown unsigned IDs
+  are retained as unknown, never selected as a codec.
+* **Mapping evidence:** the independently maintained
+  [airplay2-rs protocol ledger, format table](https://github.com/lmcgartland/airplay2-rs/blob/master/AIRPLAY_2_SPEC.md)
+  records bit21 / `0x200000` as ALAC/48000/24/2. This is reverse-engineered
+  documentation, not an Apple normative specification. It corroborates PiAir's
+  existing mapping; no evidence warrants changing it. `buffered::select_format`
+  selects the implemented ALAC24 variant; `Prepared::setup_offer` emits
+  `audioFormatIndex=21` and `audioFormat=2097152`. Index 21 is a bit position,
+  not the twenty-second element of an advertised list. `profile.rs` has a
+  separate realtime mask check; it does not supply buffered capability evidence.
+* **Observed representation:** a
+  [public pyatv AppleTV14,1 capture](https://github.com/postlund/pyatv/issues/2642)
+  contains both dictionaries, an extended bufferStream integer array with IDs
+  above 63 (including 72), and a legacy 64-bit bufferStream mask. This is
+  evidence of a representation used by one Apple TV, not this HomePod's
+  authenticated response or a universal receiver contract. The independently
+  constructed regression uses only bit21 and index72, without private capture
+  fields. The old exact-set comparison necessarily rejected any such high IDs.
+  Reconciliation now compares the legacy mask with only the extended indices
+  below 64. Higher IDs remain unknown evidence; disagreement within 0..63 still
+  rejects. No codec fallback or model inference is introduced.
+* **Receiver differences:** the pinned
+  [openairplay receiver](https://github.com/openairplay/airplay2-receiver/blob/6c343d3679ddb561c61566985acaaf587d0a3bd3/ap2-receiver.py)
+  leaves the legacy format dictionary commented out in its info construction.
+  A receiver implementation can therefore omit tables; its ability to decode
+  audio is not authenticated format evidence. No GPL OwnTone code was copied,
+  translated or incorporated; the correction is set projection over PiAir's
+  existing typed representation.
+
+**Hypotheses, not conclusions:** the HomePod might omit a field, supply a different
+shape, disagree within the legacy range, or advertise higher unknown indices.
+The public Apple TV dump also displays a negative legacy integer; PiAir still
+rejects negative integers rather than guessing signed-mask reinterpretation.
+No broader signedness change is justified by this HomePod evidence. The
+64-entry bound may reject a future larger legitimate table; it remains explicit
+and fail-closed pending evidence. Neither HomePod branding nor authentication
+success proves index21 support.
+
+### Diagnostics and next Raspberry Pi test
+
+A format rejection now appends a fixed-field summary to the error (visible with
+`-v`): parent and bufferStream plist types (`missing` if absent), array entry
+count or mask population count, numeric unsigned IDs, per-field `required21`,
+array truncation, malformed-element/duplicate indicators, and a final `missing`, `malformed`, `contradictory`,
+`unsupported` or `supported` classification. Final `required21` means validated
+support; per-field presence can be true even when reconciliation fails. Array
+IDs are limited to the first 64 entries; count is the full entry count, and
+invalid elements are omitted from the ID summary but still invalidate parsing.
+Negative masks report `invalid-unsigned-mask`. No arbitrary strings, dictionary
+keys, data bytes, full plists, secrets or unrelated private fields are formatted.
+Nested malformed values are not traversed. Existing bounded RTSP response parsing
+remains unchanged. The complete two-field diagnostic is bounded under 4096 bytes.
+
+The next manually authorized Pi test is the same command above, with its existing
+interactive confirmation and receiver authorization. Record authentication and
+encrypted GET status plus the sanitized format failure summary. If validation
+passes, this command can proceed to its existing initial SETUP/PTP diagnostic;
+record that stage and cleanup outcome too. Do not add staged-control flags or
+`--confirm-audio`. Do not dump decrypted /info or change OwnTone, autostream,
+credentials or volume. This development task does not authorize an automated
+physical test. Playback stays disabled. The next summary should establish which
+field/type/IDs were observed and whether the demonstrated reconciliation fix is
+relevant; if a new shape or signed mask appears, investigate independently before
+changing acceptance policy.
+
+Validation for Prompt 45: `cargo fmt --check`,
+`cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`,
+`cargo build --release --locked`, and `git diff --check` passed.
+Final tests: 278 unit tests and 23 integration tests, zero failures/ignored.
+An initial sandboxed run failed because loopback socket binds were denied;
+reruns with loopback access passed. Rust and ALSA development files were installed
+under the development workspace; no dependency or lockfile change was needed.
+All receiver traffic in validation used local mocks.
