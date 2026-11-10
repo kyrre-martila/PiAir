@@ -173,6 +173,17 @@ fn reconcile<T: PartialEq>(a: Claim<T>, b: Claim<T>) -> Claim<T> {
         _ => Claim::Conflict,
     }
 }
+// Reconcile only a profile's required bits: an unrelated codec/transport bit
+// changing must not invalidate this profile's capability evidence.
+fn feature_bit(features: &Claim<u64>, bit: u32) -> Claim<bool> {
+    match features {
+        Claim::Observed(f) => Claim::Observed(f & (1u64 << bit) != 0),
+        Claim::Unknown => Claim::Unknown,
+        Claim::Invalid => Claim::Invalid,
+        Claim::Conflict => Claim::Conflict,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transport {
     Raop,
@@ -185,9 +196,44 @@ pub enum Implementation {
     DiagnosticOnly,
     Unsupported,
 }
+/// Format IDs are protocol evidence, not codec implementation support.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferedFormat {
+    AacLc44100Stereo,
+    AacLc48000Stereo,
+    Alac48000Stereo24,
+    AacLc48000Surround,
+    Unknown(u64),
+}
+impl BufferedFormat {
+    fn from_id(id: u64) -> Self {
+        match id {
+            22 => Self::AacLc44100Stereo,
+            23 => Self::AacLc48000Stereo,
+            21 => Self::Alac48000Stereo24,
+            39 => Self::AacLc48000Surround,
+            other => Self::Unknown(other),
+        }
+    }
+    /// No AAC encoder or matching buffered ALAC24 encoder is implemented.
+    /// The realtime ALAC encoder is not evidence for either buffered codec.
+    pub fn codec_available(self) -> Claim<bool> {
+        match self {
+            Self::Unknown(_) => Claim::Unknown,
+            _ => Claim::Observed(false),
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MediaProfile {
+    RealtimeAlac44100Stereo16,
+    Buffered(Claim<Vec<BufferedFormat>>),
+    RaopUnresolved,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
     pub transport: Transport,
+    pub media: MediaProfile,
     pub implementation: Implementation,
     pub rejections: Vec<String>,
 }
@@ -214,35 +260,39 @@ pub struct ReceiverCapabilities {
 impl ReceiverCapabilities {
     pub fn observe(receiver: &Receiver) -> Self {
         let evidence: Vec<_> = receiver.services.iter().map(Evidence::mdns).collect();
-        let features = evidence
+        let airplay_features: Vec<_> = receiver
+            .services
             .iter()
-            .fold(Claim::Unknown, |a, e| reconcile(a, e.features.clone()));
-        let bit = |n: u32| match features {
-            Claim::Observed(f) => Claim::Observed(f & (1u64 << n) != 0u64),
-            ref other => match other {
-                Claim::Invalid => Claim::Invalid,
-                Claim::Conflict => Claim::Conflict,
-                _ => Claim::Unknown,
-            },
-        };
-        let sample_format = receiver.services.iter().fold(Claim::Unknown, |a, s| {
-            let parse = || {
-                Some((
-                    s.capabilities.get("sr")?.parse().ok()?,
-                    s.capabilities.get("ss")?.parse().ok()?,
-                    s.capabilities.get("ch")?.parse().ok()?,
-                ))
-            };
-            let b = if ["sr", "ss", "ch"]
+            .filter(|s| s.service_type == "_airplay._tcp.local.")
+            .map(|s| Evidence::mdns(s).features)
+            .collect();
+        let bit = |n| {
+            airplay_features
                 .iter()
-                .all(|k| !s.capabilities.contains_key(*k))
-            {
-                Claim::Unknown
-            } else {
-                parse().map(Claim::Observed).unwrap_or(Claim::Invalid)
-            };
-            reconcile(a, b)
-        });
+                .fold(Claim::Unknown, |a, f| reconcile(a, feature_bit(f, n)))
+        };
+        let sample_format = receiver
+            .services
+            .iter()
+            .filter(|s| s.service_type == "_airplay._tcp.local.")
+            .fold(Claim::Unknown, |a, s| {
+                let parse = || {
+                    Some((
+                        s.capabilities.get("sr")?.parse().ok()?,
+                        s.capabilities.get("ss")?.parse().ok()?,
+                        s.capabilities.get("ch")?.parse().ok()?,
+                    ))
+                };
+                let b = if ["sr", "ss", "ch"]
+                    .iter()
+                    .all(|k| !s.capabilities.contains_key(*k))
+                {
+                    Claim::Unknown
+                } else {
+                    parse().map(Claim::Observed).unwrap_or(Claim::Invalid)
+                };
+                reconcile(a, b)
+            });
         Self {
             raop: if receiver
                 .services
@@ -416,16 +466,10 @@ pub fn plan(
     let mut caps = ReceiverCapabilities::observe(receiver);
     if let Some(info) = info {
         caps.evidence.push(info.clone());
-        let feature = caps
-            .evidence
-            .iter()
-            .fold(Claim::Unknown, |a, e| reconcile(a, e.features.clone()));
-        caps.realtime = match feature {
-            Claim::Observed(f) => Claim::Observed(f & (1 << 9) != 0),
-            Claim::Unknown => Claim::Unknown,
-            Claim::Invalid => Claim::Invalid,
-            Claim::Conflict => Claim::Conflict,
-        };
+        caps.realtime = reconcile(caps.realtime, feature_bit(&info.features, 9));
+        caps.alac = reconcile(caps.alac, feature_bit(&info.features, 19));
+        caps.buffered = reconcile(caps.buffered, feature_bit(&info.features, 40));
+        caps.ptp = reconcile(caps.ptp, feature_bit(&info.features, 41));
     }
     let mut candidates = Vec::new();
     for transport in [
@@ -436,6 +480,13 @@ pub fn plan(
     ] {
         let mut c = Candidate {
             transport,
+            media: match transport {
+                Transport::RealtimeNtp | Transport::RealtimePtp => {
+                    MediaProfile::RealtimeAlac44100Stereo16
+                }
+                Transport::Raop => MediaProfile::RaopUnresolved,
+                Transport::BufferedPtp => MediaProfile::Buffered(buffered_formats(info)),
+            },
             implementation: if transport == Transport::RealtimeNtp {
                 Implementation::DiagnosticOnly
             } else {
@@ -462,96 +513,183 @@ pub fn plan(
                 "group handling is unimplemented; candidate membership needs validation".into(),
             );
         }
-        if let Some(info) = info {
-            if info.provenance != Provenance::AuthenticatedInfo {
-                c.rejections
-                    .push("info evidence lacks authenticated provenance".into());
-            }
-            if matches!(info.status_flags, Claim::Invalid | Claim::Conflict)
-                || matches!(info.status_flags, Claim::Observed(f) if f & (1 << 7) != 0)
-            {
-                c.rejections.push(
-                    "authenticated receiver status requires unsupported authentication".into(),
-                );
-            }
-            if authorization.method == Some(Method::Transient)
-                && matches!(info.status_flags, Claim::Observed(f) if f & ((1 << 3) | (1 << 9)) != 0)
-            {
-                c.rejections.push("authenticated status requires PIN or persistent pairing; no transient downgrade".into());
-            }
-            if transport == Transport::BufferedPtp
-                && matches!(info.buffered_formats, Claim::Invalid | Claim::Conflict)
-            {
-                c.rejections
-                    .push("authenticated buffered format claims malformed or contradictory".into());
-            }
-            if transport == Transport::RealtimeNtp {
-                match info.realtime_format {
-                    Claim::Observed(f) if f & 0x40000 == 0 => c
-                        .rejections
-                        .push("authenticated info excludes realtime ALAC format".into()),
+        match transport {
+            Transport::Raop => evaluate_raop(receiver, &mut c),
+            Transport::RealtimeNtp | Transport::RealtimePtp => {
+                evaluate_airplay_auth(receiver, &caps, authorization, info, &mut c);
+                if caps.realtime != Claim::Observed(true) || caps.alac != Claim::Observed(true) {
+                    c.rejections
+                        .push("audio/ALAC claims missing, malformed or contradictory".into());
+                }
+                if let Some(info) = info {
+                    match info.realtime_format {
+                        Claim::Observed(f) if f & 0x40000 == 0 => c
+                            .rejections
+                            .push("authenticated info excludes realtime ALAC format".into()),
+                        Claim::Invalid | Claim::Conflict => c
+                            .rejections
+                            .push("authenticated sample formats malformed".into()),
+                        _ => (),
+                    }
+                }
+                match caps.sample_format {
+                    Claim::Observed(format) if format != (44100, 16, 2) => c.rejections.push(
+                        "advertised sample format excludes local ALAC/44100/16/2 profile".into(),
+                    ),
                     Claim::Invalid | Claim::Conflict => c
                         .rejections
-                        .push("authenticated sample formats malformed".into()),
+                        .push("sample format claims malformed or contradictory".into()),
                     _ => (),
                 }
-            }
-        }
-        if transport == Transport::Raop {
-            if caps.raop != Claim::Observed(true) {
-                c.rejections.push("RAOP advertisement missing".into());
-            }
-        } else {
-            if caps.realtime != Claim::Observed(true) || caps.alac != Claim::Observed(true) {
-                c.rejections
-                    .push("audio/ALAC claims missing, malformed or contradictory".into());
-            }
-            if transport == Transport::BufferedPtp && caps.buffered != Claim::Observed(true) {
-                c.rejections
-                    .push("buffered audio claim not established".into());
-            }
-            if matches!(transport, Transport::RealtimePtp | Transport::BufferedPtp)
-                && caps.ptp != Claim::Observed(true)
-            {
-                c.rejections.push("PTP claim not established".into());
-            }
-            if transport == Transport::RealtimeNtp && authorization.requires_ptp {
-                c.rejections
-                    .push("receiver requires unsupported PTP; no timing fallback".into());
-            }
-            let services: Vec<_> = receiver
-                .services
-                .iter()
-                .filter(|s| s.service_type == "_airplay._tcp.local.")
-                .collect();
-            if services.len() != 1 || !services[0].matches_id(&receiver.id) {
-                c.rejections
-                    .push("missing or ambiguous stable AirPlay endpoint identity".into());
-            }
-            match authorization.method {
-                None => c.rejections.push("no explicit authentication method authorized; no automatic pairing or downgrade".into()),
-                Some(method) => for auth in &caps.authentication {
-                    match auth {
-                        Claim::Observed(auth) => if let Err(e) = auth.decide(method) { c.rejections.push(e.to_string()); },
-                        _ => c.rejections.push("authentication requirements malformed or unknown".into()),
-                    }
-                },
-            }
-            if let Claim::Observed(format) = caps.sample_format {
-                if format != (44100, 16, 2) {
-                    c.rejections.push(
-                        "advertised sample format excludes local ALAC/44100/16/2 profile".into(),
-                    );
+                if transport == Transport::RealtimeNtp && authorization.requires_ptp {
+                    c.rejections
+                        .push("receiver requires unsupported PTP; no timing fallback".into());
                 }
-            } else if matches!(caps.sample_format, Claim::Invalid | Claim::Conflict) {
-                c.rejections
-                    .push("sample format claims malformed or contradictory".into());
+                if transport == Transport::RealtimePtp && caps.ptp != Claim::Observed(true) {
+                    c.rejections.push("PTP claim not established".into());
+                }
+            }
+            Transport::BufferedPtp => {
+                evaluate_airplay_auth(receiver, &caps, authorization, info, &mut c);
+                if caps.buffered != Claim::Observed(true) {
+                    c.rejections
+                        .push("buffered audio claim not established".into());
+                }
+                if caps.ptp != Claim::Observed(true) {
+                    c.rejections.push("PTP claim not established".into());
+                }
+                // Neither realtime feature bits nor realtime sample formats enter here.
+                if let MediaProfile::Buffered(formats) = &c.media {
+                    match formats {
+                        Claim::Unknown => c.rejections.push("authenticated buffered format evidence unknown; advertisement alone proves no usable codec".into()),
+                        Claim::Invalid | Claim::Conflict => c.rejections.push("authenticated buffered format claims malformed or contradictory".into()),
+                        Claim::Observed(formats) if formats.is_empty() => c.rejections.push("authenticated info offers no buffered formats".into()),
+                        Claim::Observed(formats) => {
+                            for format in formats {
+                                match format.codec_available() {
+                                    Claim::Observed(true) => (),
+                                    Claim::Observed(false) => c.rejections.push(format!("buffered codec/format is not implemented: {format:?}")),
+                                    _ => c.rejections.push(format!("unknown buffered codec/format: {format:?}")),
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         candidates.push(c);
     }
     candidates.sort_by_key(|c| !c.rejections.is_empty());
     candidates
+}
+
+fn buffered_formats(info: Option<&Evidence>) -> Claim<Vec<BufferedFormat>> {
+    let Some(info) = info.filter(|e| e.provenance == Provenance::AuthenticatedInfo) else {
+        return Claim::Unknown;
+    };
+    match &info.buffered_formats {
+        Claim::Observed(ids) => {
+            Claim::Observed(ids.iter().copied().map(BufferedFormat::from_id).collect())
+        }
+        Claim::Unknown => Claim::Unknown,
+        Claim::Invalid => Claim::Invalid,
+        Claim::Conflict => Claim::Conflict,
+    }
+}
+
+/// AirPlay 2 shares endpoint/authentication policy, not codec prerequisites.
+fn evaluate_airplay_auth(
+    receiver: &Receiver,
+    caps: &ReceiverCapabilities,
+    authorization: Authorization,
+    info: Option<&Evidence>,
+    c: &mut Candidate,
+) {
+    let services: Vec<_> = receiver
+        .services
+        .iter()
+        .filter(|s| s.service_type == "_airplay._tcp.local.")
+        .collect();
+    if services.len() != 1 || !services[0].matches_id(&receiver.id) {
+        c.rejections
+            .push("missing or ambiguous stable AirPlay endpoint identity".into());
+    }
+    if let Some(info) = info {
+        if info.provenance != Provenance::AuthenticatedInfo {
+            c.rejections
+                .push("info evidence lacks authenticated provenance".into());
+        }
+        if matches!(info.status_flags, Claim::Invalid | Claim::Conflict)
+            || matches!(info.status_flags, Claim::Observed(f) if f & (1 << 7) != 0)
+        {
+            c.rejections
+                .push("authenticated receiver status requires unsupported authentication".into());
+        }
+        if authorization.method == Some(Method::Transient)
+            && matches!(info.status_flags, Claim::Observed(f) if f & ((1 << 3) | (1 << 9)) != 0)
+        {
+            c.rejections.push(
+                "authenticated status requires PIN or persistent pairing; no transient downgrade"
+                    .into(),
+            );
+        }
+    }
+    match authorization.method {
+        None => c.rejections.push(
+            "no explicit authentication method authorized; no automatic pairing or downgrade"
+                .into(),
+        ),
+        Some(method) => {
+            for auth in &caps.authentication {
+                match auth {
+                    Claim::Observed(auth) => {
+                        if let Err(e) = auth.decide(method) {
+                            c.rejections.push(e.to_string());
+                        }
+                        if let Some(info) = info {
+                            match info.features {
+                                Claim::Observed(features) => {
+                                    let observed = Capabilities {
+                                        features,
+                                        ..auth.clone()
+                                    };
+                                    if let Err(e) = observed.decide(method) {
+                                        c.rejections.push(format!(
+                                            "authenticated authentication requirements: {e}"
+                                        ));
+                                    }
+                                }
+                                Claim::Invalid | Claim::Conflict => c.rejections.push(
+                                    "authenticated authentication feature claims malformed or contradictory".into()
+                                ),
+                                Claim::Unknown => (),
+                            }
+                        }
+                    }
+                    _ => c
+                        .rejections
+                        .push("authentication requirements malformed or unknown".into()),
+                }
+            }
+        }
+    }
+}
+
+fn evaluate_raop(receiver: &Receiver, c: &mut Candidate) {
+    let services: Vec<_> = receiver
+        .services
+        .iter()
+        .filter(|s| s.service_type == "_raop._tcp.local.")
+        .collect();
+    if services.is_empty() {
+        c.rejections.push("RAOP advertisement missing".into());
+    } else if services.len() != 1 || !services[0].matches_id(&receiver.id) {
+        c.rejections
+            .push("missing or ambiguous stable RAOP endpoint identity".into());
+    }
+    // No implemented RAOP dialect exists to validate cn/et/tp/authentication.
+    // Keep this unresolved instead of borrowing HAP or AirPlay 2 /info policy.
+    c.rejections.push("RAOP codec, authentication and timing requirements unresolved; protocol profile unimplemented".into());
 }
 
 pub fn diagnostic(
@@ -582,9 +720,10 @@ pub fn diagnostic(
         ) {
             writeln!(
                 text,
-                "  {:?}: {:?}; eligible={}; rejection reasons={:?}",
+                "  {:?}: {:?}; media={:?}; eligible={}; rejection reasons={:?}",
                 c.transport,
                 c.implementation,
+                c.media,
                 c.rejections.is_empty(),
                 c.rejections
             )

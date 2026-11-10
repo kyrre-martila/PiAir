@@ -421,3 +421,258 @@ fn unknown_extended_format_ids_remain_evidence_without_enabling_streaming() {
         .filter(|c| c.transport == Transport::BufferedPtp)
         .all(|c| c.implementation == Implementation::Unsupported && !c.rejections.is_empty()));
 }
+
+fn buffered_receiver() -> Receiver {
+    // Buffered, PTP and HAP only: deliberately no realtime audio/ALAC bits.
+    receiver(
+        "aabbccddeeff",
+        "_airplay._tcp.local.",
+        &[
+            ("features", "0x0,0x4300"),
+            ("flags", "0"),
+            ("sr", "48000"),
+            ("ss", "24"),
+            ("ch", "6"),
+        ],
+    )
+}
+fn buffered_info(ids: &[u64]) -> Evidence {
+    Evidence::authenticated_info(&super::super::profile::dict([(
+        "supportedAudioFormatsExtended",
+        super::super::profile::dict([(
+            "bufferStream",
+            Value::Array(ids.iter().map(|id| Value::Integer((*id).into())).collect()),
+        )]),
+    )]))
+}
+fn candidate(candidates: &[Candidate], transport: Transport) -> &Candidate {
+    candidates
+        .iter()
+        .find(|c| c.transport == transport)
+        .unwrap()
+}
+
+#[test]
+fn buffered_formats_and_codecs_are_independent_of_realtime_alac() {
+    let r = buffered_receiver();
+    let t = topology(std::slice::from_ref(&r));
+    for (id, expected) in [
+        (22, BufferedFormat::AacLc44100Stereo),
+        (23, BufferedFormat::AacLc48000Stereo),
+        (21, BufferedFormat::Alac48000Stereo24),
+        (39, BufferedFormat::AacLc48000Surround),
+        (99, BufferedFormat::Unknown(99)),
+    ] {
+        let mut info = buffered_info(&[id]);
+        // Conflicting realtime format evidence has no bearing on buffered AAC.
+        info.realtime_format = Claim::Invalid;
+        let candidates = plan(&r, authorized(), &t, Some(&info));
+        let buffered = candidate(&candidates, Transport::BufferedPtp);
+        assert_eq!(
+            buffered.media,
+            MediaProfile::Buffered(Claim::Observed(vec![expected]))
+        );
+        assert!(
+            buffered
+                .rejections
+                .iter()
+                .all(|reason| !reason.contains("audio/ALAC claims")
+                    && !reason.contains("sample format")
+                    && !reason.contains("PTP claim")
+                    && !reason.contains("buffered audio claim")),
+            "{buffered:?}"
+        );
+        assert_eq!(buffered.implementation, Implementation::Unsupported);
+        assert!(!buffered.rejections.is_empty());
+        assert_ne!(expected.codec_available(), Claim::Observed(true));
+        assert!(buffered
+            .rejections
+            .iter()
+            .any(|r| r.contains("codec/format")));
+        assert!(candidate(&candidates, Transport::RealtimeNtp)
+            .rejections
+            .iter()
+            .any(|r| r.contains("audio/ALAC claims")));
+    }
+}
+
+#[test]
+fn buffered_evidence_is_unknown_until_authenticated_and_conflicts_fail_closed() {
+    let r = buffered_receiver();
+    let t = topology(std::slice::from_ref(&r));
+    let missing = Evidence::authenticated_info(&Value::Dictionary(Default::default()));
+    let mut untrusted = buffered_info(&[23]);
+    untrusted.provenance = Provenance::Mdns {
+        service: "untrusted".into(),
+    };
+    for info in [None, Some(&missing), Some(&untrusted)] {
+        let candidates = plan(&r, authorized(), &t, info);
+        let buffered = candidate(&candidates, Transport::BufferedPtp);
+        assert_eq!(buffered.media, MediaProfile::Buffered(Claim::Unknown));
+        assert!(buffered
+            .rejections
+            .iter()
+            .any(|r| r.contains("format evidence unknown")));
+    }
+    let conflict = Evidence::authenticated_info(&super::super::profile::dict([
+        (
+            "supportedFormats",
+            super::super::profile::dict([("bufferStream", Value::Integer((1u64 << 22).into()))]),
+        ),
+        (
+            "supportedAudioFormatsExtended",
+            super::super::profile::dict([(
+                "bufferStream",
+                Value::Array(vec![Value::Integer(23u64.into())]),
+            )]),
+        ),
+    ]));
+    for formats in [Claim::Conflict, Claim::Invalid] {
+        let mut info = conflict.clone();
+        info.buffered_formats = formats.clone();
+        let candidates = plan(&r, authorized(), &t, Some(&info));
+        let buffered = candidate(&candidates, Transport::BufferedPtp);
+        let expected = match formats {
+            Claim::Conflict => Claim::Conflict,
+            _ => Claim::Invalid,
+        };
+        assert_eq!(buffered.media, MediaProfile::Buffered(expected));
+        assert!(buffered
+            .rejections
+            .iter()
+            .any(|r| r.contains("buffered format claims malformed or contradictory")));
+    }
+    assert_eq!(conflict.buffered_formats, Claim::Conflict);
+    let empty = buffered_info(&[]);
+    assert!(candidate(
+        &plan(&r, authorized(), &t, Some(&empty)),
+        Transport::BufferedPtp
+    )
+    .rejections
+    .iter()
+    .any(|r| r.contains("offers no buffered formats")));
+}
+
+#[test]
+fn profile_specific_feature_and_format_changes_do_not_leak() {
+    let r = ap("aabbccddeeff", &[]);
+    let t = topology(std::slice::from_ref(&r));
+    let before = plan(&r, authorized(), &t, None);
+    let mut unrelated = buffered_info(&[99]);
+    unrelated.features = Claim::Observed((1u64 << 46) | (1 << 19) | (1 << 9) | (1 << 40));
+    unrelated.buffered_formats = Claim::Conflict;
+    let after = plan(&r, authorized(), &t, Some(&unrelated));
+    assert_eq!(
+        candidate(&before, Transport::RealtimeNtp),
+        candidate(&after, Transport::RealtimeNtp)
+    );
+    assert_eq!(
+        candidate(&before, Transport::RealtimePtp),
+        candidate(&after, Transport::RealtimePtp)
+    );
+    unrelated.realtime_format = Claim::Observed(0);
+    for transport in [Transport::RealtimeNtp, Transport::RealtimePtp] {
+        assert!(
+            candidate(&plan(&r, authorized(), &t, Some(&unrelated)), transport)
+                .rejections
+                .iter()
+                .any(|r| r.contains("excludes realtime ALAC"))
+        );
+    }
+    // Realtime ALAC changes in authenticated features do not gate buffered AAC.
+    let r = buffered_receiver();
+    let t = topology(std::slice::from_ref(&r));
+    let mut info = buffered_info(&[23]);
+    info.features = Claim::Observed((1u64 << 46) | (1 << 40) | (1 << 41));
+    let before = plan(&r, authorized(), &t, Some(&info));
+    info.features = Claim::Observed((1u64 << 46) | (1 << 40) | (1 << 41) | (1 << 19) | (1 << 9));
+    let after = plan(&r, authorized(), &t, Some(&info));
+    assert_eq!(
+        candidate(&before, Transport::BufferedPtp),
+        candidate(&after, Transport::BufferedPtp)
+    );
+}
+
+#[test]
+fn raop_and_airplay_service_requirements_do_not_leak_across_profiles() {
+    let mut r = ap("aabbccddeeff", &[]);
+    let raop = receiver(
+        "aabbccddeeff",
+        "_raop._tcp.local.",
+        &[
+            ("features", "bad"),
+            ("cn", "0"),
+            ("sr", "48000"),
+            ("ss", "24"),
+            ("ch", "1"),
+        ],
+    );
+    let before = plan(&r, authorized(), &topology(std::slice::from_ref(&r)), None);
+    r.services.extend(raop.services);
+    let t = topology(std::slice::from_ref(&r));
+    let after = plan(&r, authorized(), &t, None);
+    assert_eq!(
+        candidate(&before, Transport::RealtimeNtp),
+        candidate(&after, Transport::RealtimeNtp)
+    );
+    let raop_before = candidate(&after, Transport::Raop).clone();
+    let bad_info = Evidence::authenticated_info(&Value::String("bad AirPlay 2 info".into()));
+    let after = plan(
+        &r,
+        Authorization {
+            method: None,
+            ..authorized()
+        },
+        &t,
+        Some(&bad_info),
+    );
+    assert_eq!(candidate(&after, Transport::Raop), &raop_before);
+    assert_eq!(raop_before.media, MediaProfile::RaopUnresolved);
+    assert!(raop_before
+        .rejections
+        .iter()
+        .any(|r| r.contains("RAOP codec, authentication and timing requirements unresolved")));
+}
+
+#[test]
+fn shared_authorization_still_blocks_every_profile_and_no_transport_is_enabled() {
+    let r = buffered_receiver();
+    let t = topology(std::slice::from_ref(&r));
+    let info = buffered_info(&[23]);
+    for authorization in [
+        Authorization::default(),
+        Authorization {
+            allowlisted: false,
+            ..authorized()
+        },
+    ] {
+        for c in plan(&r, authorization, &t, Some(&info)) {
+            assert!(c
+                .rejections
+                .iter()
+                .any(|r| r.contains("not authorized by allowlist")));
+        }
+    }
+    for c in plan(&r, authorized(), &t, Some(&info)) {
+        if c.transport != Transport::RealtimeNtp {
+            assert_eq!(c.implementation, Implementation::Unsupported);
+            assert!(c
+                .rejections
+                .iter()
+                .any(|r| r.contains("transport is not implemented")));
+        }
+    }
+    let mut restricted = r;
+    restricted.services[0]
+        .capabilities
+        .insert("pw".into(), "true".into());
+    for c in plan(&restricted, authorized(), &t, Some(&info))
+        .iter()
+        .filter(|c| c.transport != Transport::Raop)
+    {
+        assert!(c
+            .rejections
+            .iter()
+            .any(|r| r.contains("password-protected")));
+    }
+}

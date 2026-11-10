@@ -54,6 +54,43 @@ explicit authenticated session validates it. Malformed or conflicting formats
 reject planning. Advertised PTP is separate from a caller's explicit PTP-only
 requirement; the latter rejects NTP with no fallback.
 
+### Transport independence (senior-review correction)
+
+The planner evaluates each media profile independently. Only authorization and
+topology restrictions apply to every candidate. AirPlay 2 profiles additionally
+share the exact AirPlay endpoint and explicit HAP/authentication policy; RAOP does
+not consume that policy or AirPlay 2 `/info` status. Discovery evidence is retained
+per service, but RAOP feature/sample claims never become AirPlay 2 requirements.
+
+| Profile | Capability and format evidence | Local status |
+| --- | --- | --- |
+| Realtime NTP/PTP | AirPlay audio bit9, ALAC bit19, AirPlay-service sample claims and authenticated `audioStream` format 0x40000; NTP rejects a PTP-only requirement, PTP requires bit41 | Only bounded NTP diagnostics are implemented. Both realtime timing variants check the same realtime codec/sample format. |
+| Buffered PTP | Buffered bit40, PTP bit41 and authenticated `bufferStream` format IDs; no dependency on realtime bit9, bit19, `audioStream`, or realtime sample claims | Transport and all buffered codec variants remain unavailable for streaming. |
+| RAOP | Its own RAOP service and exact endpoint identity; codec/encryption/transport/authentication dialect requirements remain explicitly unresolved | Protocol profile unavailable; no HAP or AirPlay 2 format prerequisite is borrowed. |
+
+Feature reconciliation compares only bits required by the profile, rather than
+requiring entire feature words to match. For example, a buffered-bit change cannot
+invalidate realtime ALAC, and an ALAC-bit change cannot invalidate a buffered AAC
+claim. Authentication features are still checked using the existing strict policy;
+format independence cannot relax authorization or authentication restrictions.
+
+Buffered media diagnostics expose typed format variants: ID22 AAC-LC 44.1 kHz
+stereo, ID23 AAC-LC 48 kHz stereo, ID21 ALAC 48 kHz/24-bit stereo, and ID39 AAC-LC
+48 kHz surround. These mappings are facts from the pinned fork's
+`src/outputs/airplay.c:117-135`, not baseline codec assumptions. Other IDs retain
+`Unknown(id)` and unknown codec availability. Recognized variants have explicit
+unavailable local codec status: PiAir has no AAC encoder or matching buffered
+ALAC24 encoder. Its realtime ALAC encoder does not supply either implementation.
+
+Bit40 alone leaves buffered formats **unknown**. Only an explicitly authenticated
+`/info` projection can provide format candidates; an absent list stays unknown,
+an empty list supplies no format, and malformed/conflicting mask/list evidence
+rejects evaluation. Known-but-unimplemented and unknown variants each have explicit
+codec/format rejection reasons. No buffered candidate is eligible for streaming,
+including receivers advertising AAC-LC without realtime ALAC. Authenticated format
+observations are compatibility evidence, never proof of usable local codecs or
+physical playback.
+
 Plans have stable preference order (realtime NTP, realtime PTP, buffered PTP,
 RAOP), with eligible candidates first and all rejection reasons retained. Eligibility
 is advice for an explicit diagnostic, not permission to connect, enroll, downgrade,
