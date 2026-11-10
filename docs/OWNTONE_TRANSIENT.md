@@ -7,9 +7,11 @@
 
 HomePod transient authentication/control success is operator-reported for the tested receiver; playback remains unverified. This is an independent Rust protocol
 implementation; no OwnTone code, architecture, identity or credentials are used.
-The explicit option is `--experimental-owntone-transient`. Default CLI/config,
+The explicit option for `authenticate` is `--experimental-owntone-transient`. Other CLI/config defaults,
 persistent HAP enrollment/pair-verify, and the labeled pyatv diagnostic remain
-unchanged. This profile is available through `authenticate` and the explicitly opt-in
+unchanged. This profile is also the documented transient default for the explicitly confirmed
+`buffered-test` diagnostic; see [Prompt 44 hardware evidence and decision](BUFFERED_LIFECYCLE.md#prompt-44-transient-authentication-compatibility-2026-11-10).
+It remains explicitly opt-in through `authenticate` and the
 [initial SETUP-only diagnostic](OWNTONE_TRANSIENT_SETUP_CHECK.md). Normal playback
 never uses this experimental profile.
 

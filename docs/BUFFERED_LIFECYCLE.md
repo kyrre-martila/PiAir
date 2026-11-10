@@ -186,3 +186,62 @@ feedback/flow-control and pause/flush semantics. It will additionally need
 separate per-member authorization, topology provenance, leader/proxy role
 negotiation, shared clock/sample mapping and coordinated failure/teardown.
 No group expansion or group readiness inference is introduced here.
+
+## Prompt 44: transient authentication compatibility (2026-11-10)
+
+Operator-supplied hardware evidence on main `9ad83d3` (PR #43): the approved,
+locally selected Even-Olai HomePod, `device:3ae5c9a302ad`, endpoint
+`192.168.1.33:7000`, AudioAccessory5,1 firmware 27.2, rejected
+`piair -v buffered-test device:3ae5c9a302ad --setup-check` during M1/M2 with
+HTTP 403. That path sent `POST /pair-setup HTTP/1.1`, `User-Agent: PiAir/0.1`,
+and no preceding `/info`. It reached no SETUP, PTP or audio.
+
+On that same receiver, the operator successfully ran:
+
+```sh
+piair -v authenticate device:3ae5c9a302ad --experimental-owntone-transient --control-check
+```
+
+The observed sequence was `GET /info RTSP/1.0` 200, transient pair-setup
+M1/M2 and M3/M4 over RTSP 200, encrypted OPTIONS 200, and clean shutdown
+without audio. This validates the combined authentication sequence for this
+receiver; it does not isolate the individual cause of the failed path's 403.
+No physical receiver was contacted during this implementation.
+
+`buffered-test` now uses the existing OwnTone-reference RTSP profile as its
+**transient default**, including its `/info` policy check, compatible
+`AirPlay/999.0.0` User-Agent, SRP validation and same-socket encrypted channel.
+It reuses `Wire::owntone_transient` and `pairing::transient`; no protocol logic
+was copied from GPL sources or reimplemented. Apache-2.0 licensing is unchanged.
+No additional experimental flag is required: this command already requires an
+explicit buffered diagnostic, allowlisted/selected receiver, selected transient
+method, fresh discovery checks and interactive operation confirmation. The CLI
+announces the profile before confirmation. The `authenticate` and `stream-test`
+defaults and experimental opt-ins are unchanged. There is no fallback.
+
+Capabilities are read from the pinned authorization and revalidated; transient
+SRP proves the connection, not a persistent receiver identity. It creates no
+pairing credentials and leaves existing credentials untouched. As in the
+existing profile, public sender identifiers may be initialized in protected
+`receiver-state/client-identity.toml`; these are not receiver credentials.
+The encrypted post-authentication `/info` identity/capability checks remain
+mandatory. Cancellation, changed authorization, non-200 responses or invalid
+SRP proofs drop the connection and cannot start PTP. SETUP/PTP and later
+explicitly confirmed controls retain their existing implementation and cleanup.
+
+Loopback regression tests exercise the buffered entry point through real SRP
+and encrypted GET, exact RTSP request ordering/headers, 403 at `/info` and M1,
+invalid proof, interrupted exchange, cancellation and revoked/changed selection.
+They require closure without retry, fallback, audio or volume requests, and
+compare all receiver-state files (including an existing credential) before/after.
+Existing lifecycle tests cover mandatory authorization, post-authentication
+SETUP/resource ordering and cleanup, and the permanently closed playback gate.
+
+A subsequent Raspberry Pi test requires separate explicit authorization for the
+exact receiver and interactive confirmation. Re-run the existing `buffered-test
+... --setup-check` command and record authentication, encrypted `/info`, SETUP,
+ClockID presence, standard-port PTP startup/activity and TEARDOWN outcome.
+Only then consider the existing separately confirmed staged controls. No buffered
+SETUP/PTP success is established by the authentication evidence or these mocks.
+Clock adoption remains unverified; live buffered audio is disabled. Do not change
+OwnTone, autostream, production configuration, volume or stored credentials.

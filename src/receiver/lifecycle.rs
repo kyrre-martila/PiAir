@@ -160,6 +160,7 @@ impl Session {
                         credential.is_none(),
                         "transient cannot consume persistent credentials"
                     );
+                    wire.buffered_transient()?;
                     pairing::transient(wire)?
                 } else {
                     pairing::verify(

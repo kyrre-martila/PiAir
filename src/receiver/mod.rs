@@ -673,6 +673,9 @@ pub fn buffered_test(
     );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
     println!("Buffered diagnostic: initial SETUP and one second of timing observation; any additional control stages need separate confirmation. Bounded TEARDOWN follows. No audio or volume changes. Clock adoption and audible playback remain unverified.");
+    if selected.method == Method::Transient {
+        println!("Transient default: OwnTone-reference RTSP /info and SRP on the same encrypted control connection; no fallback, persistent receiver identity verification or pairing credentials saved.");
+    }
     interactive::confirm_operation(
         loaded,
         None,
