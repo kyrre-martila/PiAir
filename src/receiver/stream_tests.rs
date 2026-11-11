@@ -75,8 +75,18 @@ fn send_reply(
     }
     let mut message=format!("RTSP/1.0 200 OK\r\nCSeq: {}\r\nContent-Length: {}\r\nSession: test-session;timeout=60\r\n{}{}\r\n",r.headers["cseq"],body.len(),if body.is_empty(){""}else{"Content-Type: application/x-apple-binary-plist\r\n"},extra).into_bytes();
     message.extend_from_slice(&body);
-    for part in message.chunks(127) {
-        socket.write_all(&keys.encrypt(part).unwrap()).unwrap();
+    if r.uri == "/feedback" {
+        // Preserve independent encrypted frame boundaries without making the
+        // successful feedback fixture depend on TCP Nagle/delayed-ACK timers.
+        let mut frames = Vec::new();
+        for part in message.chunks(127) {
+            frames.extend_from_slice(&keys.encrypt(part).unwrap());
+        }
+        socket.write_all(&frames).unwrap();
+    } else {
+        for part in message.chunks(127) {
+            socket.write_all(&keys.encrypt(part).unwrap()).unwrap();
+        }
     }
 }
 fn plist(r: &Request) -> Value {

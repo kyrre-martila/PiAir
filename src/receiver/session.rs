@@ -681,9 +681,30 @@ impl Session {
         Ok(())
     }
     fn feedback(&mut self) -> Result<()> {
-        let reply = self.call("POST", Some("/feedback"), &[], &[])?;
+        let started = Instant::now();
+        let result = self.call("POST", Some("/feedback"), &[], &[]);
+        let status = match &result {
+            Ok(_) => Some(200),
+            Err(error) => match error.downcast_ref::<super::wire::ResponseFailure>() {
+                Some(super::wire::ResponseFailure::Rejected(status)) => Some(*status),
+                _ => None,
+            },
+        };
+        let result = result.and_then(|reply| self.validate_feedback(&reply));
+        let classification = match &result {
+            Ok(()) => "accepted",
+            Err(error) => error
+                .downcast_ref::<super::wire::ResponseFailure>()
+                .map_or("invalid_or_error", super::wire::ResponseFailure::outcome),
+        };
+        tracing::debug!(target: "piair::rtsp", phase = "feedback", status,
+            classification, elapsed_us = started.elapsed().as_micros() as u64,
+            "feedback outcome; receiver acceptance of audio unverified");
+        result
+    }
+    fn validate_feedback(&self, reply: &Reply) -> Result<()> {
         if !reply.body.is_empty() {
-            let value = Self::plist_response(&reply)?;
+            let value = Self::plist_response(reply)?;
             let d = profile::dictionary(&value)?;
             let streams = d
                 .get("streams")
@@ -754,7 +775,7 @@ impl Session {
             let mut sync_packets = 0_u64;
             let mut max_lateness_us = 0_u64;
             tracing::debug!(target: "piair::rtsp", phase = "playback policy",
-                feedback_polling = !self.playback_check,
+                feedback_polling = !self.playback_check || wav.is_some(),
                 retransmissions_allowed = !self.playback_check,
                 signal_frames = signal, total_frames = total,
                 expected_packets = total.div_ceil(profile::SPF as u64),
@@ -766,8 +787,22 @@ impl Session {
                     Instant::now().saturating_duration_since(deadline) < Duration::from_millis(100),
                     "audio scheduler stalled; no uncontrolled catch-up"
                 );
-                if !self.playback_check && Instant::now() >= feedback_at {
-                    self.feedback()?;
+                if (!self.playback_check || wav.is_some()) && Instant::now() >= feedback_at {
+                    let began = Instant::now();
+                    if wav.is_some() {
+                        self.control.as_mut().unwrap().feedback_budget =
+                            Some(Duration::from_millis(50));
+                    }
+                    let feedback = self.feedback();
+                    self.control.as_mut().unwrap().feedback_budget = None;
+                    feedback?;
+                    self.workers()?;
+                    if wav.is_some() {
+                        feedback_schedule(
+                            began.elapsed(),
+                            Instant::now().saturating_duration_since(deadline),
+                        )?;
+                    }
                     feedback_at += Duration::from_secs(2);
                 }
                 if let Some((first, count)) = self.media.as_ref().unwrap().retransmit()? {
@@ -1008,5 +1043,58 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+// A slow poll ends the experiment before another RTP send, never a catch-up burst.
+fn feedback_schedule(elapsed: Duration, lateness: Duration) -> Result<()> {
+    let within_budget = elapsed < realtime::sample_time(profile::SPF as u64)
+        && lateness < Duration::from_millis(100);
+    if !within_budget {
+        tracing::debug!(target: "piair::rtsp", phase = "feedback",
+            classification = "scheduler_budget_exceeded",
+            elapsed_us = elapsed.as_micros() as u64,
+            lateness_us = lateness.as_micros() as u64,
+            "feedback halted playback before next RTP send");
+    }
+    ensure!(within_budget, "feedback exceeded realtime scheduler budget");
+    Ok(())
+}
+
+#[cfg(test)]
+mod feedback_tests {
+    use super::*;
+    #[test]
+    fn scheduling_budget_is_strict_and_deterministic() {
+        assert!(feedback_schedule(Duration::from_millis(1), Duration::ZERO).is_ok());
+        assert!(
+            feedback_schedule(realtime::sample_time(profile::SPF as u64), Duration::ZERO).is_err()
+        );
+        assert!(feedback_schedule(Duration::ZERO, Duration::from_millis(100)).is_err());
+    }
+    #[test]
+    fn feedback_validation_preserves_stream_identity_and_type() {
+        let mut session = Session::new();
+        session.stream_id = Some(7);
+        for (id, kind, accepted) in [(7, 96, true), (8, 96, false), (7, 103, false)] {
+            let value = profile::dict([(
+                "streams",
+                Value::Array(vec![profile::dict([
+                    ("streamID", profile::uint(id)),
+                    ("type", profile::uint(kind)),
+                ])]),
+            )]);
+            let mut body = Vec::new();
+            value.to_writer_binary(&mut body).unwrap();
+            let reply = Reply {
+                body: body.into(),
+                headers: [(
+                    "content-type".into(),
+                    "application/x-apple-binary-plist".into(),
+                )]
+                .into(),
+            };
+            assert_eq!(session.validate_feedback(&reply).is_ok(), accepted);
+        }
     }
 }

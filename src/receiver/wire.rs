@@ -53,6 +53,7 @@ pub struct Wire {
     // Scoped by Session to the initial SETUP diagnostic only.
     pub(super) setup_response_wait: Option<(Duration, Arc<AtomicBool>)>,
     polling_response: bool,
+    pub(super) feedback_budget: Option<Duration>,
     pub(super) diagnostic_cancel: Option<Arc<AtomicBool>>,
     deadline: Instant,
     budget: Duration,
@@ -248,6 +249,7 @@ impl Wire {
             socket,
             setup_response_wait: None,
             polling_response: false,
+            feedback_budget: None,
             diagnostic_cancel: None,
             deadline: Instant::now() + budget,
             budget,
@@ -561,6 +563,13 @@ impl Wire {
             );
             self.reauthorize()?;
             self.restart_deadline();
+            if let Some(budget) = self.feedback_budget {
+                ensure!(
+                    method == "POST" && uri == "/feedback",
+                    "feedback budget scope"
+                );
+                self.deadline = started + self.budget.min(budget);
+            }
             let request = (|| -> Result<Zeroizing<Vec<u8>>> {
                 ensure!(
                     [
@@ -616,7 +625,10 @@ impl Wire {
                 self.deadline = Instant::now() + *budget;
                 self.polling_response = true;
             }
-            if self.diagnostic_cancel.is_some() && self.setup_response_wait.is_none() {
+            if self.diagnostic_cancel.is_some()
+                && self.setup_response_wait.is_none()
+                && self.feedback_budget.is_none()
+            {
                 self.deadline = Instant::now() + self.budget.min(Duration::from_secs(3));
                 self.polling_response = true;
             }
@@ -1820,6 +1832,42 @@ mod worker_tests {
             assert!(start.elapsed() < Duration::from_secs(1));
             assert_eq!(wire.response_frames, 0);
             assert_eq!(wire.response_bytes > 0, partial);
+            assert!(wire.failed && wire.keys.is_none());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn feedback_deadline_covers_silence_and_partial_frames_without_reset() {
+        for partial in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut peer = listener.accept().unwrap().0;
+            let mut wire = Wire::mock(socket, Duration::from_secs(15), "test");
+            wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
+            wire.diagnostic_cancel = Some(Arc::new(AtomicBool::new(false)));
+            wire.feedback_budget = Some(Duration::from_millis(50));
+            let server = thread::spawn(move || {
+                peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                if partial {
+                    let mut keys = super::super::crypto::ControlKeys::new(&[7; 32]);
+                    keys.swap_directions_for_test();
+                    let frame = keys
+                        .encrypt(b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n")
+                        .unwrap();
+                    peer.write_all(&frame[..3]).unwrap();
+                }
+                let mut received = Vec::new();
+                peer.read_to_end(&mut received).unwrap();
+                assert!(!received.is_empty());
+            });
+            let began = Instant::now();
+            let error = wire.request("POST", "/feedback", &[], &[]).err().unwrap();
+            assert!(matches!(
+                error.downcast_ref::<ResponseFailure>(),
+                Some(ResponseFailure::Timeout)
+            ));
+            assert!(began.elapsed() < Duration::from_millis(500));
             assert!(wire.failed && wire.keys.is_none());
             server.join().unwrap();
         }

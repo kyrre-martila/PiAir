@@ -14,6 +14,12 @@ enum Case {
     CancelMedia,
     RevokeMedia,
     MediaFeedback,
+    PollReject,
+    PollTimeout,
+    PollClose,
+    PollSlow,
+    PollBadType,
+    PollCancel,
     RevokeStream,
     NoTiming,
     NoLengthOrLatency,
@@ -59,6 +65,12 @@ impl Case {
                 | Self::CancelMedia
                 | Self::RevokeMedia
                 | Self::MediaFeedback
+                | Self::PollReject
+                | Self::PollTimeout
+                | Self::PollClose
+                | Self::PollSlow
+                | Self::PollBadType
+                | Self::PollCancel
                 | Self::CancelStream
                 | Self::RevokeStream
                 | Self::NoLengthOrLatency
@@ -610,6 +622,7 @@ fn authenticated_receiver_input(
                             Some(profile::dict([(
                                 "streams",
                                 Value::Array(vec![profile::dict([
+                                    ("streamID", profile::uint(7)),
                                     (
                                         "dataPort",
                                         profile::uint(u64::from(data.local_addr().unwrap().port())),
@@ -715,18 +728,18 @@ fn authenticated_receiver_input(
                                 let p = &b[..n];
                                 assert_eq!(p[0], 0x80);
                                 assert_eq!(p[1], if count == 0 { 0xe0 } else { 0x60 });
-                                let seq = u16::from_be_bytes(p[2..4].try_into().unwrap());
+                                let rtp_seq = u16::from_be_bytes(p[2..4].try_into().unwrap());
                                 let ts = u32::from_be_bytes(p[4..8].try_into().unwrap());
                                 let nonce = u64::from_le_bytes(p[n - 8..].try_into().unwrap());
                                 if first_seq.is_none() {
-                                    first_seq = Some(seq);
+                                    first_seq = Some(rtp_seq);
                                     first_ts = ts;
                                     first_nonce = nonce;
                                 }
-                                assert_eq!(seq, first_seq.unwrap().wrapping_add(count as u16));
+                                assert_eq!(rtp_seq, first_seq.unwrap().wrapping_add(count as u16));
                                 assert_eq!(ts, first_ts.wrapping_add(count as u32 * 352));
                                 assert_eq!(nonce, first_nonce + count);
-                                assert_eq!(nonce, u64::from(seq));
+                                assert_eq!(nonce, u64::from(rtp_seq));
                                 // Receiver validates directly with the primitive, not sender helpers.
                                 use chacha20poly1305::{
                                     aead::{Aead, KeyInit, Payload},
@@ -759,6 +772,76 @@ fn authenticated_receiver_input(
                                     assert!(pcm.iter().flatten().all(|x| *x == 0));
                                 }
                                 count += 1;
+                                if wav && count == 251 {
+                                    let poll = read_message(&mut socket, &mut keys);
+                                    assert_eq!(poll.method, "POST");
+                                    assert_eq!(poll.uri, "/feedback");
+                                    assert!(poll.body.is_empty());
+                                    assert_eq!(poll.headers["session"], "test-session");
+                                    assert_eq!(poll.headers["cseq"], seq(next_seq));
+                                    next_seq += 1;
+                                    match case {
+                                        Case::PollReject => {
+                                            socket.write_all(&keys.encrypt(format!("RTSP/1.0 403 private-reason\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n", poll.headers["cseq"]).as_bytes()).unwrap()).unwrap();
+                                        }
+                                        Case::PollClose => {
+                                            let _ = socket.shutdown(std::net::Shutdown::Both);
+                                        }
+                                        Case::PollCancel => {
+                                            remote_cancel.store(true, Ordering::Relaxed);
+                                        }
+                                        Case::PollTimeout => {}
+                                        _ => {
+                                            if case == Case::PollSlow {
+                                                std::thread::sleep(Duration::from_millis(25));
+                                            }
+                                            send_reply(
+                                                &mut socket,
+                                                &mut keys,
+                                                &poll,
+                                                Some(profile::dict([(
+                                                    "streams",
+                                                    Value::Array(vec![profile::dict([
+                                                        ("streamID", profile::uint(7)),
+                                                        (
+                                                            "type",
+                                                            profile::uint(
+                                                                if case == Case::PollBadType {
+                                                                    103
+                                                                } else {
+                                                                    96
+                                                                },
+                                                            ),
+                                                        ),
+                                                    ])]),
+                                                )])),
+                                                "",
+                                            );
+                                        }
+                                    }
+                                    if matches!(
+                                        case,
+                                        Case::PollReject
+                                            | Case::PollTimeout
+                                            | Case::PollClose
+                                            | Case::PollCancel
+                                            | Case::PollSlow
+                                            | Case::PollBadType
+                                    ) {
+                                        if matches!(case, Case::PollSlow | Case::PollBadType) {
+                                            let end = read_message(&mut socket, &mut keys);
+                                            assert_eq!(end.method, "TEARDOWN");
+                                            send_reply(&mut socket, &mut keys, &end, None, "");
+                                        }
+                                        if case != Case::PollClose {
+                                            assert_eof(&mut socket);
+                                        }
+                                        if let Some(mut event) = event_socket {
+                                            assert_eof(&mut event);
+                                        }
+                                        return;
+                                    }
+                                }
                             }
                             assert!(began.elapsed() >= Duration::from_millis(2800));
                             assert!(began.elapsed() < Duration::from_secs(4));
@@ -901,6 +984,31 @@ fn authenticated_receiver_input(
         Case::CancelMedia | Case::RevokeMedia | Case::MediaFeedback
     ) {
         assert!((1..=10).contains(&session.packets_sent));
+    } else if matches!(
+        case,
+        Case::PollReject
+            | Case::PollTimeout
+            | Case::PollClose
+            | Case::PollSlow
+            | Case::PollBadType
+            | Case::PollCancel
+    ) {
+        assert_eq!(session.packets_sent, 251);
+        assert!(output.contains("feedback outcome"), "{case:?}: {output}");
+        assert!(output.contains("session cleanup complete"));
+        let expected = match case {
+            Case::PollReject => "classification\":\"rejected",
+            Case::PollTimeout => "classification\":\"timed_out",
+            Case::PollCancel => "feedback outcome",
+            Case::PollClose => "classification\":\"connection_closed",
+            Case::PollSlow => "scheduler_budget_exceeded",
+            Case::PollBadType => "classification\":\"invalid_or_error",
+            _ => unreachable!(),
+        };
+        assert!(output.contains(expected), "{case:?}: {output}");
+        if case == Case::PollReject {
+            assert!(output.contains("status\":403"));
+        }
     } else {
         assert_eq!(
             session.packets_sent,
@@ -921,7 +1029,11 @@ fn authenticated_receiver_input(
     if playback == Some(true) && case == Case::Good {
         for field in [
             "diagnostic policy",
-            "feedback_polling\":false",
+            if wav {
+                "feedback_polling\":true"
+            } else {
+                "feedback_polling\":false"
+            },
             "retransmissions_allowed\":false",
             "sync datagram sent",
             "sync_packets\":3",
@@ -929,6 +1041,16 @@ fn authenticated_receiver_input(
             "datagram_bytes\":1452",
             "max_lateness_us",
             "ntp_age_ms",
+        ] {
+            assert!(output.contains(field), "missing {field}: {output}");
+        }
+    }
+    if wav && case == Case::Good {
+        for field in [
+            "feedback outcome",
+            "status\":200",
+            "classification\":\"accepted",
+            "elapsed_us",
         ] {
             assert!(output.contains(field), "missing {field}: {output}");
         }
@@ -1207,5 +1329,27 @@ fn hap_wav_uses_verified_identity_and_shared_transport_with_failure_cleanup() {
         ] {
             authenticated_receiver_input(case, Some(true), true, -20, HAP_FIXTURE_ID, true, method);
         }
+    }
+}
+
+#[test]
+fn wav_feedback_failures_stop_media_and_release_authenticated_resources() {
+    for case in [
+        Case::PollReject,
+        Case::PollTimeout,
+        Case::PollClose,
+        Case::PollSlow,
+        Case::PollBadType,
+        Case::PollCancel,
+    ] {
+        authenticated_receiver_input(
+            case,
+            Some(true),
+            true,
+            -20,
+            HAP_FIXTURE_ID,
+            true,
+            Method::PinDisplay,
+        );
     }
 }
