@@ -112,7 +112,15 @@ fn authenticated_receiver_case(
     volume_db: i32,
     receiver_id: &'static str,
 ) {
-    authenticated_receiver_input(case, playback, persistent, volume_db, receiver_id, false);
+    authenticated_receiver_input(
+        case,
+        playback,
+        persistent,
+        volume_db,
+        receiver_id,
+        false,
+        Method::PinDisplay,
+    );
 }
 fn authenticated_receiver_input(
     case: Case,
@@ -121,6 +129,7 @@ fn authenticated_receiver_input(
     volume_db: i32,
     receiver_id: &'static str,
     wav: bool,
+    enrollment_method: Method,
 ) {
     let method = if persistent {
         Method::StoredHap
@@ -167,7 +176,7 @@ fn authenticated_receiver_input(
         name: "RecordFixture".into(),
         services: vec![discovery::Advertisement::test_from_info(&advertisement)],
     }];
-    let selected = Selection::from_receiver(&observed[0], method).unwrap();
+    let mut selected = Selection::from_receiver(&observed[0], method).unwrap();
     let store = store::Store::new(&config).unwrap();
     // Existing credentials for another receiver must survive byte-for-byte.
     store.save(&credential()).unwrap();
@@ -177,7 +186,8 @@ fn authenticated_receiver_input(
         store.save(&c).unwrap();
     }
     // An approved, paired default receiver remains selected for the entire Stua
-    // diagnostic. Advertise its distinct endpoint and prove it is never contacted.
+    // diagnostic, except WAV which requires its own persisted selection.
+    // Advertise the other endpoint and prove it is never contacted.
     let other_listener = if persistent {
         let other = TcpListener::bind("127.0.0.2:0").unwrap();
         other.set_nonblocking(true).unwrap();
@@ -204,6 +214,11 @@ fn authenticated_receiver_input(
             .select(&Selection::from_receiver(&default, Method::PinDisplay).unwrap())
             .unwrap();
         observed.push(default);
+        if wav {
+            store
+                .select(&Selection::from_receiver(&observed[0], enrollment_method).unwrap())
+                .unwrap();
+        }
         Some(other)
     } else {
         store.select(&selected).unwrap();
@@ -795,10 +810,17 @@ fn authenticated_receiver_input(
     session.cancel = cancel;
     if persistent {
         let c = if wav {
-            let mut enrollment = selected.clone();
-            enrollment.method = Method::PinDisplay;
+            let enrollment = store.selection().unwrap().unwrap();
+            assert_eq!(enrollment.id, receiver_id);
+            assert_eq!(enrollment.method, enrollment_method);
             let (operation, credential) = wav_authentication(&store, &enrollment, false).unwrap();
-            assert!(operation == selected);
+            let loaded = config::load(Some(config.clone())).unwrap();
+            let validated =
+                validate_selection(&loaded, receiver_id, Method::StoredHap, &observed).unwrap();
+            assert!(operation.matches_observation(&validated));
+            assert_eq!(operation.method, Method::StoredHap);
+            // Use the derived operation itself for pair-verify and WAV playback.
+            selected = operation;
             credential.unwrap()
         } else {
             hap_credential(&store, &selected).unwrap()
@@ -911,7 +933,10 @@ fn authenticated_receiver_input(
     server.join().unwrap();
     assert_eq!(state_files(&dir.path().join("receiver-state")), before);
     if let Some(other) = other_listener {
-        assert_eq!(store.selection().unwrap().unwrap().id, ID);
+        assert_eq!(
+            store.selection().unwrap().unwrap().id,
+            if wav { receiver_id } else { ID }
+        );
         assert!(
             other.accept().is_err(),
             "Stua must never contact the default receiver"
@@ -1136,21 +1161,31 @@ fn wav_uses_existing_encrypted_transport_and_cleans_up_on_failure() {
         Case::CancelStream,
         Case::StreamReject,
     ] {
-        authenticated_receiver_input(case, Some(true), false, -20, RECORD_RECEIVER_ID, true);
+        authenticated_receiver_input(
+            case,
+            Some(true),
+            false,
+            -20,
+            RECORD_RECEIVER_ID,
+            true,
+            Method::Transient,
+        );
     }
 }
 
 #[test]
 fn hap_wav_uses_verified_identity_and_shared_transport_with_failure_cleanup() {
-    for case in [
-        Case::Good,
-        Case::TeardownReject,
-        Case::CancelStream,
-        Case::RevokeStream,
-        Case::StreamReject,
-        Case::StreamMalformed,
-        Case::EventRefused,
-    ] {
-        authenticated_receiver_input(case, Some(true), true, -20, HAP_FIXTURE_ID, true);
+    for method in [Method::PinDisplay, Method::SetupCode] {
+        for case in [
+            Case::Good,
+            Case::TeardownReject,
+            Case::CancelStream,
+            Case::RevokeStream,
+            Case::StreamReject,
+            Case::StreamMalformed,
+            Case::EventRefused,
+        ] {
+            authenticated_receiver_input(case, Some(true), true, -20, HAP_FIXTURE_ID, true, method);
+        }
     }
 }
