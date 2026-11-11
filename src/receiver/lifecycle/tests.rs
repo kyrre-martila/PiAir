@@ -54,6 +54,9 @@ fn read_request(socket: &mut TcpStream, keys: &mut ControlKeys) -> (String, Vec<
                 .parse::<usize>()
                 .unwrap();
             if bytes.len() == end + 4 + length {
+                if TOKENLESS.with(std::cell::Cell::get) {
+                    assert!(!header.to_ascii_lowercase().contains("\r\nsession:"));
+                }
                 return (header, bytes[end + 4..].to_vec());
             }
         }
@@ -61,21 +64,46 @@ fn read_request(socket: &mut TcpStream, keys: &mut ControlKeys) -> (String, Vec<
     }
 }
 fn reply(socket: &mut TcpStream, keys: &mut ControlKeys, seq: u32, value: Option<Value>) {
+    reply_session(
+        socket,
+        keys,
+        seq,
+        value,
+        if seq == 1 {
+            ""
+        } else {
+            "Session: test-session\r\n"
+        },
+    );
+}
+fn reply_session(
+    socket: &mut TcpStream,
+    keys: &mut ControlKeys,
+    seq: u32,
+    value: Option<Value>,
+    session: &str,
+) {
+    let session = TOKENLESS.with(|mode| if mode.get() { "" } else { session });
     let body = value
         .map(|mut v| profile::binary(&mut v).unwrap())
         .unwrap_or_default();
-    let mut response = format!("RTSP/1.0 200 OK\r\nCSeq: {seq}\r\nContent-Type: application/x-apple-binary-plist\r\nSession: test-session\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    let mut response = format!("RTSP/1.0 200 OK\r\nCSeq: {seq}\r\nContent-Type: application/x-apple-binary-plist\r\n{session}Content-Length: {}\r\n\r\n", body.len()).into_bytes();
     response.extend_from_slice(&body);
     for part in response.chunks(31) {
         socket.write_all(&keys.encrypt(part).unwrap()).unwrap();
     }
+}
+thread_local! {
+    static TOKENLESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 fn fixture(
     server: impl FnOnce(TcpStream) + Send + 'static,
 ) -> (Session, tempfile::TempDir, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.2:0").unwrap();
     let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let tokenless = TOKENLESS.with(std::cell::Cell::get);
     let handle = thread::spawn(move || {
+        TOKENLESS.with(|mode| mode.set(tokenless));
         let (socket, _) = listener.accept().unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -249,7 +277,10 @@ fn encrypted_initial_lifecycle_observes_peer_without_ever_granting_playback() {
         reply(&mut socket, &mut keys, 2, Some(setup(123)));
         let (head, _) = read_request(&mut socket, &mut keys);
         assert!(head.starts_with("TEARDOWN "));
-        assert!(head.contains("Session: test-session\r\n"));
+        assert_eq!(
+            head.contains("Session: test-session\r\n"),
+            !TOKENLESS.with(std::cell::Cell::get)
+        );
         reply(&mut socket, &mut keys, 3, None);
         let mut byte = [0];
         assert_eq!(socket.read(&mut byte).unwrap(), 0);
@@ -297,6 +328,13 @@ fn encrypted_initial_lifecycle_observes_peer_without_ever_granting_playback() {
 }
 #[test]
 fn partial_setup_faults_attempt_teardown_and_release_all_resources() {
+    for tokenless in [false, true] {
+        TOKENLESS.with(|mode| mode.set(tokenless));
+        partial_setup_faults_attempt_teardown_and_release_all_resources_case();
+    }
+    TOKENLESS.with(|mode| mode.set(false));
+}
+fn partial_setup_faults_attempt_teardown_and_release_all_resources_case() {
     // Inject at /info validation, initial SETUP validation and resource attachment.
     for fault in 0..3 {
         let (mut owner, _approval, server) = fixture(move |mut socket| {
@@ -379,6 +417,13 @@ fn setup_server(mut socket: TcpStream, acknowledge_teardown: bool) {
 }
 #[test]
 fn cancellation_clock_loss_and_drop_attempt_authenticated_teardown() {
+    for tokenless in [false, true] {
+        TOKENLESS.with(|mode| mode.set(tokenless));
+        cancellation_clock_loss_and_drop_attempt_authenticated_teardown_case();
+    }
+    TOKENLESS.with(|mode| mode.set(false));
+}
+fn cancellation_clock_loss_and_drop_attempt_authenticated_teardown_case() {
     for fault in 0..3 {
         let (mut owner, _approval, server) = fixture(|socket| setup_server(socket, true));
         owner.negotiate_with(attach_test_timing).unwrap();
@@ -402,6 +447,13 @@ fn cancellation_clock_loss_and_drop_attempt_authenticated_teardown() {
 }
 #[test]
 fn revocation_prevents_timing_and_teardown_network_writes() {
+    for tokenless in [false, true] {
+        TOKENLESS.with(|mode| mode.set(tokenless));
+        revocation_prevents_timing_and_teardown_network_writes_case();
+    }
+    TOKENLESS.with(|mode| mode.set(false));
+}
+fn revocation_prevents_timing_and_teardown_network_writes_case() {
     let (mut owner, approval, server) = fixture(|socket| setup_server(socket, false));
     owner.negotiate_with(attach_test_timing).unwrap();
     std::fs::write(approval.path().join("config.toml"), "receiver_allowlist=[]").unwrap();
@@ -416,6 +468,13 @@ fn revocation_prevents_timing_and_teardown_network_writes() {
 }
 #[test]
 fn teardown_stall_is_bounded_and_does_not_leave_a_control_socket() {
+    for tokenless in [false, true] {
+        TOKENLESS.with(|mode| mode.set(tokenless));
+        teardown_stall_is_bounded_and_does_not_leave_a_control_socket_case();
+    }
+    TOKENLESS.with(|mode| mode.set(false));
+}
+fn teardown_stall_is_bounded_and_does_not_leave_a_control_socket_case() {
     let (release, wait) = std::sync::mpsc::channel();
     let (mut owner, _approval, server) = fixture(move |mut socket| {
         let mut keys = server_keys();
@@ -442,6 +501,13 @@ fn teardown_stall_is_bounded_and_does_not_leave_a_control_socket() {
 }
 #[test]
 fn disconnect_during_setup_closes_without_reusing_cipher_or_retrying() {
+    for tokenless in [false, true] {
+        TOKENLESS.with(|mode| mode.set(tokenless));
+        disconnect_during_setup_closes_without_reusing_cipher_or_retrying_case();
+    }
+    TOKENLESS.with(|mode| mode.set(false));
+}
+fn disconnect_during_setup_closes_without_reusing_cipher_or_retrying_case() {
     let (mut owner, _approval, server) = fixture(|mut socket| {
         let mut keys = server_keys();
         read_request(&mut socket, &mut keys);
@@ -480,17 +546,25 @@ fn authorization_is_mandatory_before_authentication_or_any_control_request() {
 
 #[test]
 fn control_stages_validate_order_payloads_and_never_connect_media() {
+    for tokenless in [false, true] {
+        TOKENLESS.with(|mode| mode.set(tokenless));
+        control_stages_validate_order_payloads_and_never_connect_media_case();
+    }
+    TOKENLESS.with(|mode| mode.set(false));
+}
+fn control_stages_validate_order_payloads_and_never_connect_media_case() {
     for target in [Stage::Record, Stage::Stream, Stage::Anchor] {
         let media = TcpListener::bind("127.0.0.2:0").unwrap();
         media.set_nonblocking(true).unwrap();
         let port = media.local_addr().unwrap().port();
         let (mut owner, _approval, server) = fixture(move |mut socket| {
             let mut keys = server_keys();
-            read_request(&mut socket, &mut keys);
+            let mut binding = None;
+            read_bound_request(&mut socket, &mut keys, &mut binding);
             reply(&mut socket, &mut keys, 1, Some(info()));
-            read_request(&mut socket, &mut keys);
+            read_bound_request(&mut socket, &mut keys, &mut binding);
             reply(&mut socket, &mut keys, 2, Some(setup(123)));
-            let (head, body) = read_request(&mut socket, &mut keys);
+            let (head, body) = read_bound_request(&mut socket, &mut keys, &mut binding);
             assert!(head.starts_with("RECORD "));
             assert!(body.is_empty());
             // PTP must continue while this response is pending.
@@ -498,7 +572,7 @@ fn control_stages_validate_order_payloads_and_never_connect_media() {
             reply(&mut socket, &mut keys, 3, None);
             let mut next = 4;
             if target >= Stage::Stream {
-                let (head, body) = read_request(&mut socket, &mut keys);
+                let (head, body) = read_bound_request(&mut socket, &mut keys, &mut binding);
                 assert!(head.starts_with("SETPEERS "));
                 assert!(head.contains("Content-Type: /peer-list-changed\r\n"));
                 assert_eq!(
@@ -506,7 +580,7 @@ fn control_stages_validate_order_payloads_and_never_connect_media() {
                     Value::Array(vec!["127.0.0.2".into(), "127.0.0.1".into()])
                 );
                 reply(&mut socket, &mut keys, 4, None);
-                let (head, body) = read_request(&mut socket, &mut keys);
+                let (head, body) = read_bound_request(&mut socket, &mut keys, &mut binding);
                 assert!(head.starts_with("POST /command "));
                 let value = profile::parse(&body).unwrap();
                 let value = value.as_dictionary().unwrap();
@@ -523,7 +597,7 @@ fn control_stages_validate_order_payloads_and_never_connect_media() {
                     5,
                     Some(profile::dict([("status", profile::uint(0))])),
                 );
-                let (head, body) = read_request(&mut socket, &mut keys);
+                let (head, body) = read_bound_request(&mut socket, &mut keys, &mut binding);
                 assert!(head.starts_with("SETUP "));
                 let value = profile::parse(&body).unwrap();
                 let stream = value.as_dictionary().unwrap()["streams"]
@@ -559,7 +633,7 @@ fn control_stages_validate_order_payloads_and_never_connect_media() {
                     ])]),
                 )]);
                 reply(&mut socket, &mut keys, 6, Some(response));
-                let (head, body) = read_request(&mut socket, &mut keys);
+                let (head, body) = read_bound_request(&mut socket, &mut keys, &mut binding);
                 assert!(head.starts_with("POST /audioMode "));
                 assert_eq!(
                     profile::parse(&body).unwrap(),
@@ -569,7 +643,7 @@ fn control_stages_validate_order_payloads_and_never_connect_media() {
                 next = 8;
             }
             if target == Stage::Anchor {
-                let (head, body) = read_request(&mut socket, &mut keys);
+                let (head, body) = read_bound_request(&mut socket, &mut keys, &mut binding);
                 assert!(head.starts_with("SETRATEANCHORTIME "));
                 let value = profile::parse(&body).unwrap();
                 assert_eq!(
@@ -583,9 +657,12 @@ fn control_stages_validate_order_payloads_and_never_connect_media() {
                 reply(&mut socket, &mut keys, 8, Some(value));
                 next = 9;
             }
-            let (head, _) = read_request(&mut socket, &mut keys);
+            let (head, _) = read_bound_request(&mut socket, &mut keys, &mut binding);
             assert!(head.starts_with("TEARDOWN "));
-            assert!(head.contains("Session: test-session\r\n"));
+            assert_eq!(
+                head.contains("Session: test-session\r\n"),
+                !TOKENLESS.with(std::cell::Cell::get)
+            );
             reply(&mut socket, &mut keys, next, None);
         });
         let (event, peer_event) = udp_pair();
@@ -614,6 +691,7 @@ fn control_stages_validate_order_payloads_and_never_connect_media() {
         owner.observe(Duration::from_millis(1)).unwrap();
         owner.progress(target).unwrap();
         assert_eq!(owner.stage, Some(target));
+        assert!(owner.progress_inner(target).is_err());
         assert_eq!(owner.anchor_accepted, target == Stage::Anchor);
         assert!(!owner.timing.as_ref().unwrap().clock().media_permitted());
         // Initial Sync and at least one more while the RECORD reply stalled.
@@ -695,6 +773,13 @@ fn rejected_record_never_advances_and_attempts_teardown() {
 
 #[test]
 fn inband_rejections_at_every_control_stage_discard_session_and_key() {
+    for tokenless in [false, true] {
+        TOKENLESS.with(|mode| mode.set(tokenless));
+        inband_rejections_at_every_control_stage_discard_session_and_key_case();
+    }
+    TOKENLESS.with(|mode| mode.set(false));
+}
+fn inband_rejections_at_every_control_stage_discard_session_and_key_case() {
     for rejected_seq in 3..=8 {
         let (mut owner, _approval, server) = fixture(move |mut socket| {
             let mut keys = server_keys();
@@ -784,6 +869,13 @@ fn inband_rejections_at_every_control_stage_discard_session_and_key() {
 
 #[test]
 fn pending_record_cancel_revocation_timing_loss_and_tcp_close_fail_closed() {
+    for tokenless in [false, true] {
+        TOKENLESS.with(|mode| mode.set(tokenless));
+        pending_record_cancel_revocation_timing_loss_and_tcp_close_fail_closed_case();
+    }
+    TOKENLESS.with(|mode| mode.set(false));
+}
+fn pending_record_cancel_revocation_timing_loss_and_tcp_close_fail_closed_case() {
     for fault in 0..4 {
         let (entered, pending) = std::sync::mpsc::channel();
         let (release, wait) = std::sync::mpsc::channel();
@@ -1089,6 +1181,259 @@ fn advertised_address_failure_and_selected_peer_attachment_failure_teardown() {
         }));
         assert_eq!(owner.state(), State::Failed);
         assert!(owner.control.is_none() && owner.timing.is_none() && owner.events.is_none());
+        server.join().unwrap();
+    }
+}
+
+// Retain UDP peers until cleanup; dropping connected peers can deliver ICMP
+// connection-refused errors during the scoped PTP worker's next poll.
+fn negotiate_retaining_timing_peers(owner: &mut Session) -> (UdpSocket, UdpSocket) {
+    let (event, peer_event) = udp_pair();
+    let (general, peer_general) = udp_pair();
+    owner
+        .negotiate_with(|wire, setup, id| {
+            Ok((
+                None,
+                ptp::Service::attach(
+                    ptp::Grandmaster::new(
+                        id,
+                        setup.clock_id,
+                        Instant::now(),
+                        Duration::from_secs(30),
+                    )?,
+                    event,
+                    general,
+                    wire.ptp_lease()?,
+                )?,
+            ))
+        })
+        .unwrap();
+    (peer_event, peer_general)
+}
+
+// Check every request in the full staged exchange, including endpoint POSTs.
+fn read_bound_request(
+    socket: &mut TcpStream,
+    keys: &mut ControlKeys,
+    binding: &mut Option<String>,
+) -> (String, Vec<u8>) {
+    let (head, body) = read_request(socket, keys);
+    let uri = head.split_whitespace().nth(1).unwrap();
+    assert_eq!(
+        head.contains("Session: test-session\r\n"),
+        binding.is_some() && !TOKENLESS.with(std::cell::Cell::get)
+    );
+    if uri.starts_with("rtsp://") {
+        if let Some(initial) = binding {
+            assert_eq!(uri, initial);
+        } else {
+            let value = profile::parse(&body).unwrap();
+            let uuid = value.as_dictionary().unwrap()["sessionUUID"]
+                .as_string()
+                .unwrap();
+            assert!(uri.ends_with(&uuid.to_ascii_lowercase()));
+            *binding = Some(uri.to_owned());
+        }
+    }
+    (head, body)
+}
+
+fn raw_reply(keys: &mut ControlKeys, seq: u32, headers: &str, body: &[u8]) -> Vec<u8> {
+    let mut bytes = format!(
+        "RTSP/1.0 200 OK\r\nCSeq: {seq}\r\n{headers}Content-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    bytes.extend_from_slice(body);
+    keys.encrypt(&bytes).unwrap().to_vec()
+}
+
+#[test]
+fn session_binding_rejects_changed_late_malformed_conflicting_and_replayed_controls() {
+    for supplied in [false, true] {
+        for fault in 0..8 {
+            let (mut owner, _approval, server) = fixture(move |mut socket| {
+                let mut keys = server_keys();
+                read_request(&mut socket, &mut keys);
+                reply(&mut socket, &mut keys, 1, Some(info()));
+                let (head, body) = read_request(&mut socket, &mut keys);
+                assert!(!head.contains("\r\nSession:"));
+                let uri = head.split_whitespace().nth(1).unwrap().to_owned();
+                let value = profile::parse(&body).unwrap();
+                let uuid = value.as_dictionary().unwrap()["sessionUUID"]
+                    .as_string()
+                    .unwrap();
+                assert!(uri.ends_with(&uuid.to_ascii_lowercase()));
+                let token = if supplied {
+                    "Session: test-session\r\n"
+                } else {
+                    ""
+                };
+                let setup_body = profile::binary(&mut setup(123)).unwrap();
+                let setup_headers =
+                    format!("Content-Type: application/x-apple-binary-plist\r\n{token}");
+                let setup_frame = raw_reply(&mut keys, 2, &setup_headers, &setup_body);
+                socket.write_all(&setup_frame).unwrap();
+                let (head, _) = read_request(&mut socket, &mut keys);
+                assert!(head.starts_with(&format!("RECORD {uri} RTSP/1.0\r\n")));
+                assert_eq!(head.contains("Session: test-session\r\n"), supplied);
+                let headers = match fault {
+                    0 => "Session: other-session\r\n",
+                    1 => "Session: \r\n",
+                    2 => "Session: test-session;timeout=30\r\n",
+                    3 => "Session: bad/token\r\n",
+                    4 => "Session: test-session\r\nsEsSiOn: other-session\r\n",
+                    _ => token,
+                };
+                let frame = if fault == 6 {
+                    // Exact authenticated SETUP frame replayed at a new cipher counter.
+                    setup_frame
+                } else {
+                    let mut frame =
+                        raw_reply(&mut keys, if fault == 5 { 2 } else { 3 }, headers, &[]);
+                    if fault == 7 {
+                        *frame.last_mut().unwrap() ^= 1;
+                    }
+                    frame
+                };
+                socket.write_all(&frame).unwrap();
+                if fault < 4 {
+                    // Semantic token failure: bounded cleanup retains the original binding.
+                    let (head, _) = read_request(&mut socket, &mut keys);
+                    assert!(head.starts_with(&format!("TEARDOWN {uri} RTSP/1.0\r\n")));
+                    assert_eq!(head.contains("Session: test-session\r\n"), supplied);
+                    let frame = raw_reply(&mut keys, 4, token, &[]);
+                    socket.write_all(&frame).unwrap();
+                }
+                assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+            });
+            let _timing_peers = negotiate_retaining_timing_peers(&mut owner);
+            let error = owner.progress(Stage::Stream).unwrap_err();
+            let expected = match fault {
+                0 => "receiver session changed or unexpectedly introduced",
+                1..=3 => "unsupported receiver session token",
+                4 => "duplicate receiver header",
+                5 => "unexpected receiver CSeq",
+                _ => "authentication tag invalid",
+            };
+            assert!(
+                format!("{error:#}").contains(expected),
+                "supplied={supplied} fault={fault}: {error:#}"
+            );
+            assert!(owner.diagnostic().contains(if fault < 4 {
+                "TEARDOWN: acknowledged"
+            } else {
+                "TEARDOWN: unacknowledged; remote expiry unconfirmed"
+            }));
+            assert_eq!(owner.state(), State::Failed);
+            assert_eq!(owner.stage, None);
+            assert!(owner.control.is_none() && owner.timing.is_none());
+            assert!(owner.prepared.is_none() && owner.stream.is_none());
+            assert!(owner
+                .diagnostic()
+                .contains("last accepted: initial SETUP; attempted: RECORD"));
+            server.join().unwrap();
+        }
+    }
+}
+
+#[test]
+fn session_token_can_be_omitted_after_binding_but_is_still_reused_on_requests() {
+    let (mut owner, _approval, server) = fixture(|mut socket| {
+        let mut keys = server_keys();
+        read_request(&mut socket, &mut keys);
+        reply(&mut socket, &mut keys, 1, Some(info()));
+        read_request(&mut socket, &mut keys);
+        reply(&mut socket, &mut keys, 2, Some(setup(123)));
+        for seq in 3..=4 {
+            let (head, _) = read_request(&mut socket, &mut keys);
+            assert!(head.starts_with(if seq == 3 { "RECORD " } else { "TEARDOWN " }));
+            assert!(head.contains("Session: test-session\r\n"));
+            reply_session(&mut socket, &mut keys, seq, None, "");
+        }
+    });
+    let _timing_peers = negotiate_retaining_timing_peers(&mut owner);
+    owner.progress(Stage::Record).unwrap();
+    owner.stop().unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn initial_session_headers_are_strict_and_info_cannot_establish_a_token() {
+    for (early, header, transport_failure) in [
+        (true, "Session: early\r\n".to_owned(), false),
+        (false, "Session: \r\n".into(), false),
+        (false, "Session: token;timeout=30\r\n".into(), false),
+        (false, format!("Session: {}\r\n", "a".repeat(129)), false),
+        (false, "Session: one\r\nsession: two\r\n".into(), true),
+        (false, "Session: bad\u{7f}\r\n".into(), true),
+    ] {
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            let mut keys = server_keys();
+            read_request(&mut socket, &mut keys);
+            if !early {
+                reply(&mut socket, &mut keys, 1, Some(info()));
+                read_request(&mut socket, &mut keys);
+            }
+            let body = profile::binary(&mut if early { info() } else { setup(123) }).unwrap();
+            let frame = raw_reply(
+                &mut keys,
+                if early { 1 } else { 2 },
+                &format!("Content-Type: application/x-apple-binary-plist\r\n{header}"),
+                &body,
+            );
+            socket.write_all(&frame).unwrap();
+            if !early && !transport_failure {
+                let (head, _) = read_request(&mut socket, &mut keys);
+                assert!(head.starts_with("TEARDOWN "));
+                assert!(!head.contains("\r\nSession:"));
+                reply_session(&mut socket, &mut keys, 3, None, "");
+            }
+            assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+        });
+        let result =
+            owner.negotiate_with(|_, _, _| panic!("invalid SETUP must not allocate timing"));
+        assert!(owner.finish(result).is_err());
+        assert_eq!(owner.state(), State::Failed);
+        assert!(!owner.session_bound);
+        assert!(owner.control.is_none());
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn teardown_cannot_introduce_or_change_the_session_binding() {
+    for supplied in [false, true] {
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            let mut keys = server_keys();
+            read_request(&mut socket, &mut keys);
+            reply(&mut socket, &mut keys, 1, Some(info()));
+            read_request(&mut socket, &mut keys);
+            reply_session(
+                &mut socket,
+                &mut keys,
+                2,
+                Some(setup(123)),
+                if supplied {
+                    "Session: test-session\r\n"
+                } else {
+                    ""
+                },
+            );
+            let (head, _) = read_request(&mut socket, &mut keys);
+            assert!(head.starts_with("TEARDOWN "));
+            assert_eq!(head.contains("Session: test-session\r\n"), supplied);
+            reply_session(&mut socket, &mut keys, 3, None, "Session: unexpected\r\n");
+            assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+        });
+        let _timing_peers = negotiate_retaining_timing_peers(&mut owner);
+        assert!(owner.stop().is_err());
+        assert_eq!(owner.state(), State::Failed);
+        assert!(!owner.session_bound);
+        assert!(owner.token.is_none() && owner.control.is_none() && owner.timing.is_none());
+        assert!(owner
+            .diagnostic()
+            .contains("TEARDOWN: unacknowledged; remote expiry unconfirmed"));
         server.join().unwrap();
     }
 }

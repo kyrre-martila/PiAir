@@ -1,3 +1,111 @@
+# Tokenless authenticated control sessions (Prompt 51)
+
+## Observed result and scope
+
+Operator-supplied evidence after merged/deployed PR #50: Stua HomePod firmware
+27.2 returns authenticated initial SETUP RTSP 200 with valid PTP configuration
+and **no RTSP Session response header**. PTP reaches PeerObserved and TEARDOWN
+succeeds. `--control-check record` previously stopped locally with
+`initial SETUP session token required for progression`, before sending RECORD.
+This change removes that local incompatibility. RECORD acceptance on Stua with
+this revision is **unverified**; no receiver was contacted during this work.
+PeerObserved and accepted controls still do not prove clock adoption or permit
+media. No playback, volume, rate=1 anchor or service change is included.
+
+## Protocol evidence and identifier ownership
+
+PiAir baseline is main `26a7e968fd2ff6ccd06256b79fe66ead04390a2a` (PR #50).
+`src/receiver/lifecycle.rs` creates a fresh owner, random clock ID and UUID in
+`Session::new`. `negotiate_with` builds `rtsp://<local-address>/<uuid>` and
+`initial_offer` sends that UUID as `sessionUUID` and local timing-peer `ID`.
+Those are **sender-generated identifiers**, not receiver-issued RTSP tokens.
+The optional response `Session` header is separately validated and retained in
+`token`. Before this change `progress_inner` required `token.is_some()` despite
+successful authenticated SETUP validation and transition to Timing.
+
+Pinned [OwnTone Mini airplay.c](https://github.com/lo-tech-systems/owntone-mini/blob/e9b058448b7d921ed048790b45614685fd13802b/src/outputs/airplay.c)
+was read for protocol facts only; no source was copied or translated:
+
+| Location at e9b058448b7d921ed048790b45614685fd13802b | Observation |
+| --- | --- |
+| `session_ids_set`, L2219–2278; fields L538–544 | Generates random sender `session_id`, separate stream connection ID, session/group UUIDs and local-address RTSP URL. These are not receiver Session headers. |
+| `payload_make_setup_session` PTP branch, L4623–4670 | Sends sender `sessionUUID` and PTP peer information in initial SETUP. |
+| `request_headers_add`, L1296–1347 | Adds CSeq and sender identity headers; no mandatory receiver Session token. |
+| `response_handler_setup_session`, L5354–5420 | Requires successful SETUP, parses plist/eventPort and PTP peer information, then continues; no Session-header gate in this path. |
+| sequence table L6603–6613; `sequence_continue_cb`, L6693–6774; `sequence_continue`, L6789–6845 | Initial SETUP → RECORD → SETPEERS → command tables → stream SETUP → audioMode; request target defaults to sender session URL. No equivalent mandatory receiver token check in the examined sequence. |
+
+This implementation comparison plus Stua's observed tokenless response supports
+an optional header for this diagnostic. It is not a normative Apple protocol
+specification or evidence that every receiver accepts tokenless RECORD. PiAir
+keeps its stricter response/CSeq, authorization, event and timing validation;
+it does not adopt OwnTone's CSeq-comparison omission or playback/volume sequence.
+
+## Session-binding policy
+
+- Only the first authenticated initial SETUP response may establish a receiver
+  token. `/info` cannot supply one. Its presence/absence is frozen for this owner
+  before semantic SETUP validation, so even failed-SETUP cleanup cannot learn a
+  late token. Progress additionally requires the validated SETUP body, attached
+  event/PTP resources and Timing state. A tokenless 200 alone is insufficient.
+- A supplied token must contain 1–128 ASCII letters/digits or `-_.`. Empty,
+  parameterized (including `;timeout=`), oversized and other values fail.
+  Wire rejects duplicate headers case-insensitively, malformed names/values and
+  conflicting framing before lifecycle processing.
+- Token-present mode sends the exact retained token on every later request,
+  including endpoint POSTs and TEARDOWN. A later response may omit the header;
+  omission does not erase the binding. Any supplied later value must match
+  exactly. No token rotation or normalization beyond Wire's header whitespace
+  trimming is supported.
+- Tokenless mode sends **no Session header**, including on TEARDOWN. A later
+  response introducing any token fails, even if well formed. Never synthesize a
+  token from UUID, URI, clock ID, stream connection ID or sender identity.
+- Both modes stay on the same exclusively owned authenticated Wire, selected
+  authorized receiver and frozen sender URI/UUID. No reconnect, retry, alternate
+  receiver or migration occurs. Wire reauthorizes before/after requests and
+  retains connection CSeq and AEAD counters. A fresh owner generates fresh
+  session/clock IDs; closed/failed owners cannot restart or progress again.
+- Semantic rejection stops progression and attempts bounded TEARDOWN using only
+  the original binding. Revocation or invalidated framing/CSeq/AEAD prohibits
+  further sends; local resources are always released and remote expiry remains
+  explicitly unconfirmed. TEARDOWN responses obey the same token policy.
+
+The security binding is authenticated connection ownership plus receiver
+selection/authorization and immutable sender session identity; a receiver token
+adds consistency when provided. The absence of that optional token does not
+weaken authentication, clock identity, freshness, stage order or media readiness.
+Transient authentication retains its documented identity limitations; this fix
+adds no new identity claim. The tests use authenticated encrypted loopback peers,
+not physical devices. They exercise both token modes through RECORD, SETPEERS,
+empty command registration, stream SETUP, audioMode and a fresh **paused** anchor;
+verify no media connection; and cover malformed/changed/late headers, CSeq and
+ciphertext replay, cancellation/revocation, failed controls and cleanup.
+
+## Manual Stua-only RECORD verification (not executed)
+
+Use an isolated checkout/build of this PR; do not replace deployed binaries or
+change Raspberry Pi, OwnTone or Autostream services. Use the existing config,
+allowlist and stored selection for **Stua `device:02d899c1833f` only**, standalone
+and outside a group/stereo/proxy topology. Verify the selected device identity
+and firmware before opting in. Do not pair, alter volume or broaden permissions.
+
+1. Read `piair buffered-test --help` locally. Run the isolated binary in a terminal:
+   `piair --config <existing-config> -v buffered-test device:02d899c1833f --control-check record`.
+2. Review the discovered Stua selection and approve the existing initial SETUP
+   and RECORD prompts only. Confirmations occur before the fresh connection is
+   opened. This command observes PTP for one second and stops after RECORD.
+3. Check sanitized logs for authenticated initial SETUP 200, valid expected
+   clock/authorized timing peer, PeerObserved if traffic arrives, an actual
+   encrypted RECORD request/200, and acknowledged bounded TEARDOWN. Expect
+   `last accepted: RECORD`, clock adoption unverified and `audio bytes: 0`.
+   Do not infer RECORD success from absence of the old local gate error.
+4. Stop on identity/policy/header conflicts, authorization failure, timing loss,
+   non-200 RECORD or unacknowledged cleanup; retain the exact sanitized failure.
+   Ctrl+C requests cancellation and bounded cleanup. Do not retry automatically
+   or change services/privileges for port319/320 errors.
+5. Record firmware, commit, stage, sanitized RECORD result, PTP snapshot and
+   TEARDOWN result. Redact tokens, keys and decrypted payloads. Do not run stream,
+   anchor, playback, volume, rate=1 or audio tests as part of this procedure.
+
 # Post-PR #49 clock adoption investigation
 
 See [the focused investigation](CLOCK_ADOPTION_INVESTIGATION.md) for the pinned
@@ -38,7 +146,7 @@ condition for PiAir's diagnostic, not an assertion that every receiver requires 
 | --- | --- | --- | --- |
 | [initial PTP SETUP, L4623](https://github.com/lo-tech-systems/owntone-mini/blob/e9b058448b7d921ed048790b45614685fd13802b/src/outputs/airplay.c#L4623) | I: timingPeerInfo, signed ClockID, Addresses, timingPeerList, fresh UUID | I, unchanged | Authenticated peer/address binding required. Fork also sends macAddress/groupUUID/clock-port override; necessity U, omitted rather than invented. No group/proxy connections. |
 | [handle_timingpeerinfo, L5294](https://github.com/lo-tech-systems/owntone-mini/blob/e9b058448b7d921ed048790b45614685fd13802b/src/outputs/airplay.c#L5294) | I: exact authorized address, mandatory ClockID | I: same conservative policy, missing-ID rejection tested | Fork registers first usable address **without requiring ClockID**. Missing ID is valid protocol behavior, but secure discovery of its expected identity remains M; see below. Multiple-address fallback is not adopted. |
-| [sequence table, L6592](https://github.com/lo-tech-systems/owntone-mini/blob/e9b058448b7d921ed048790b45614685fd13802b/src/outputs/airplay.c#L6592) | M beyond initial SETUP | I: initial SETUP → RECORD → SETPEERS → command → stream SETUP → audioMode → optional paused anchor | Same authenticated Wire, token and receiver throughout. Full playable sequence M. No volume operation. |
+| [sequence table, L6592](https://github.com/lo-tech-systems/owntone-mini/blob/e9b058448b7d921ed048790b45614685fd13802b/src/outputs/airplay.c#L6592) | M beyond initial SETUP | I: initial SETUP → RECORD → SETPEERS → command → stream SETUP → audioMode → optional paused anchor | Same authenticated Wire, optional pinned token and receiver throughout. Full playable sequence M. No volume operation. |
 | [SETPEERS, L4549](https://github.com/lo-tech-systems/owntone-mini/blob/e9b058448b7d921ed048790b45614685fd13802b/src/outputs/airplay.c#L4549) | I component only | I integrated; bare array receiver then local, `/peer-list-changed` | Independent receiver corroborates shape. Receiver-self-first necessity is empirical. Additional group peers excluded. |
 | [command builders, L3593/L3629](https://github.com/lo-tech-systems/owntone-mini/blob/e9b058448b7d921ed048790b45614685fd13802b/src/outputs/airplay.c#L3593) | M | I empty supported-command registration; M full enabled table | Shape corroborated independently. PiAir handles no MediaRemote commands, so it advertises none. Fork's broad enabled command list/second POST is a receiver workaround, not proven mandatory; do not falsely promise remote controls. |
 | [stream SETUP, L4400](https://github.com/lo-tech-systems/owntone-mini/blob/e9b058448b7d921ed048790b45614685fd13802b/src/outputs/airplay.c#L4400) | I offer/parser components, M owner integration | I integrated: type103, format21/bit21, ct2, spf352, fresh 32-byte shk and signed random 64-bit streamConnectionID | Reuses PR #40 Prepared; no key import/reuse. streamConnections key-use true. Fork's clientID=com.apple.Music omitted: PiAir is not Music; receiver requirement U. |
@@ -106,8 +214,9 @@ nonce/sample progression and bounded queue, and continuously service timing.
 
 ## Ownership, bounds and failure behavior
 
-Stages are single-use and ordered on the same owner. A valid pinned initial
-Session token is mandatory to progress; changed or parameterized tokens fail.
+Stages are single-use and ordered on the same owner. The initial SETUP fixes
+the optional Session-header binding as described above; changed, late or
+parameterized tokens fail.
 All control responses pass existing AEAD/framing/CSeq/RTSP200/deadline checks;
 nonempty acknowledgement bodies require supported plist content type when
 present, valid dictionary semantics, zero status and no unknown/conflicting
