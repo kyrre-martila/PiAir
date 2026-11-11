@@ -643,3 +643,28 @@ fn wav_diagnostic_arguments_fail_before_receiver_contact() {
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("open WAV"));
 }
+
+#[test]
+fn stored_hap_wav_accepts_full_command_but_requires_interactive_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "receiver_allowlist=['device:02d899c1833f']").unwrap();
+    let output = run(&[
+        "--config",
+        config.to_str().unwrap(),
+        "stream-test",
+        "device:02d899c1833f",
+        "--audio-file",
+        "tests/assets/audio/Pachelbel_Canon_audio_test.wav",
+        "--seconds",
+        "30",
+        "--volume-db",
+        "-20",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("interactive terminal and explicit confirmation"));
+    let invalid = run(&["stream-test", "--audio-file", "/no-such-piair-test.wav"]);
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("open WAV"));
+}

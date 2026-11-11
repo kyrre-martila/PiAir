@@ -367,14 +367,13 @@ pub fn stream_test(
 ) -> Result<()> {
     ensure!(
         audio_file.is_none()
-            || (experimental_owntone_transient
-                && !setup_check
+            || (!setup_check
                 && !record_check
                 && !stream_setup_check
                 && !playback_check
                 && setup_profile.is_none()
                 && setup_timeout_seconds.is_none()),
-        "WAV playback requires OwnTone transient and no other diagnostic mode"
+        "WAV playback cannot be combined with another diagnostic mode or SETUP options"
     );
     let wav = audio_file
         .map(|path| wav::Playback::open(path, seconds))
@@ -439,8 +438,10 @@ pub fn stream_test(
         );
         selected.capabilities.decide(Method::Transient)?;
     }
-    let credential = if selected.method == Method::Transient {
-        None
+    let (selected, credential) = if wav.is_some() {
+        wav_authentication(&store, &selected, experimental_owntone_transient)?
+    } else if selected.method == Method::Transient {
+        (selected, None)
     } else {
         let credential = store
             .credential(id)?
@@ -449,7 +450,7 @@ pub fn stream_test(
             credential.advertised_pi == selected.advertised_pi,
             "credential discovery binding differs from selection"
         );
-        Some(credential)
+        (selected, Some(credential))
     };
     if let Some(wav) = &wav {
         println!("WAV playback: {} frames at 44100 Hz stereo; {}. WARNING: receiver volume {volume_db} dB may persist after playback or failure and is not restored. RTP transmission does not prove audible playback.", wav.frames.len(), if wav.eof { "ends at EOF; no looping" } else { "stops at requested duration; remainder is not played" });
@@ -476,6 +477,13 @@ pub fn stream_test(
         "volume must be -60..=-10 dB"
     );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    if wav.is_some() && selected.method == Method::StoredHap {
+        let observed = validate_selection(loaded, id, Method::StoredHap, &snapshot)?;
+        ensure!(
+            selected.matches_observation(&observed),
+            "receiver changed; review and select again explicitly"
+        );
+    }
     interactive::describe(&snapshot, id)?;
     if stream_setup_check {
         println!("Operation: stream SETUP-only check");
@@ -510,7 +518,16 @@ pub fn stream_test(
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
     let connect = || wire::Wire::connect(&loaded.path, id, &selected, &snapshot);
-    if stream_diagnostic || wav.is_some() {
+    if wav.is_some() && !experimental_owntone_transient {
+        let credential = credential
+            .as_ref()
+            .context("stored HAP credentials required")?;
+        session.start_hap_stream_selected(
+            || wire::Wire::connect_hap_operation(&loaded.path, &selected, &snapshot, credential),
+            credential,
+            true,
+        )?;
+    } else if stream_diagnostic || wav.is_some() {
         session.start_owntone_stream_selected(
             connect,
             &selected.capabilities,
@@ -650,6 +667,31 @@ pub fn hap_check(loaded: &Loaded, id: Option<&str>, playback: bool, volume_db: i
         println!("Receiver stream SETUP validated; TEARDOWN acknowledged; local cleanup complete. Audio packets: 0; volume unchanged. Audible playback unverified.");
     }
     Ok(())
+}
+
+/// Derive an operation-only HAP method from a persistent selection and local keys.
+/// Never reinterpret a transient selection or persist StoredHap as enrollment intent.
+fn wav_authentication(
+    store: &store::Store,
+    selected: &Selection,
+    transient: bool,
+) -> Result<(Selection, Option<store::Credential>)> {
+    let mut operation = selected.clone();
+    if transient {
+        ensure!(
+            selected.method == Method::Transient,
+            "--experimental-owntone-transient requires explicit transient selection; no fallback"
+        );
+        selected.capabilities.decide(Method::Transient)?;
+        return Ok((operation, None));
+    }
+    ensure!(
+        selected.method != Method::Transient,
+        "WAV requires a persistent receiver selection and existing HAP credentials; select the paired receiver explicitly, or opt in to --experimental-owntone-transient where receiver policy permits; no fallback"
+    );
+    operation.method = Method::StoredHap;
+    let credential = hap_credential(store, &operation)?;
+    Ok((operation, Some(credential)))
 }
 
 fn hap_credential(store: &store::Store, selected: &Selection) -> Result<store::Credential> {

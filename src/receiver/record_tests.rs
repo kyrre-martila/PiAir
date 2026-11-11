@@ -794,7 +794,15 @@ fn authenticated_receiver_input(
     let mut session = Session::new();
     session.cancel = cancel;
     if persistent {
-        let c = hap_credential(&store, &selected).unwrap();
+        let c = if wav {
+            let mut enrollment = selected.clone();
+            enrollment.method = Method::PinDisplay;
+            let (operation, credential) = wav_authentication(&store, &enrollment, false).unwrap();
+            assert!(operation == selected);
+            credential.unwrap()
+        } else {
+            hap_credential(&store, &selected).unwrap()
+        };
         session
             .start_hap_stream_selected(
                 || Wire::connect_hap_operation(&config, &selected, &observed, &c),
@@ -1129,5 +1137,20 @@ fn wav_uses_existing_encrypted_transport_and_cleans_up_on_failure() {
         Case::StreamReject,
     ] {
         authenticated_receiver_input(case, Some(true), false, -20, RECORD_RECEIVER_ID, true);
+    }
+}
+
+#[test]
+fn hap_wav_uses_verified_identity_and_shared_transport_with_failure_cleanup() {
+    for case in [
+        Case::Good,
+        Case::TeardownReject,
+        Case::CancelStream,
+        Case::RevokeStream,
+        Case::StreamReject,
+        Case::StreamMalformed,
+        Case::EventRefused,
+    ] {
+        authenticated_receiver_input(case, Some(true), true, -20, HAP_FIXTURE_ID, true);
     }
 }

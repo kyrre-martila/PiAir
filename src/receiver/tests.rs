@@ -3010,3 +3010,50 @@ fn buffered_transient_cancellation_during_srp_closes_before_setup() {
     drop(owner);
     server.join().unwrap();
 }
+
+#[test]
+fn wav_authentication_is_explicit_and_preserves_selection_and_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::Store::new(&dir.path().join("config.toml")).unwrap();
+    let mut selected = selection(7000);
+    selected.capabilities.features |= (1 << 9) | (1 << 19);
+    let error = wav_authentication(&store, &selected, false).err().unwrap();
+    assert!(error
+        .to_string()
+        .contains("existing receiver HAP credentials required"));
+    store.save(&credential()).unwrap();
+    store.select(&selected).unwrap();
+    let credential_path = dir.path().join("receiver-state/aabbccddeeff.toml");
+    let before = std::fs::read(&credential_path).unwrap();
+    for method in [Method::PinDisplay, Method::SetupCode] {
+        selected.method = method;
+        let (operation, c) = wav_authentication(&store, &selected, false).unwrap();
+        assert_eq!(operation.method, Method::StoredHap);
+        assert_eq!(operation.id, selected.id);
+        assert_eq!(c.unwrap().receiver_key, credential().receiver_key);
+        assert!(wav_authentication(&store, &selected, true).is_err());
+    }
+    selected.method = Method::Transient;
+    selected.capabilities.features |= 1 << 48;
+    selected.capabilities.flags = Some(0);
+    assert!(wav_authentication(&store, &selected, false).is_err());
+    let (operation, c) = wav_authentication(&store, &selected, true).unwrap();
+    assert_eq!(operation.method, Method::Transient);
+    assert!(c.is_none());
+    selected.capabilities.flags = Some(1 << 9);
+    assert!(wav_authentication(&store, &selected, true).is_err());
+    selected.method = Method::PinDisplay;
+    selected.advertised_pi = Some("changed".into());
+    assert!(wav_authentication(&store, &selected, false).is_err());
+    selected.advertised_pi = Some(PI.into());
+    selected.capabilities.features &= !(1 << 19);
+    assert!(wav_authentication(&store, &selected, false).is_err());
+    selected.capabilities.features |= 1 << 19;
+    selected.capabilities.access_control = Some(1);
+    assert!(wav_authentication(&store, &selected, false).is_err());
+    assert_eq!(std::fs::read(&credential_path).unwrap(), before);
+    assert_eq!(
+        store.selection().unwrap().unwrap().method,
+        Method::PinDisplay
+    );
+}
