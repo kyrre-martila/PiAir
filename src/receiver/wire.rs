@@ -1295,6 +1295,7 @@ impl MediaIo {
                     return Ok(None);
                 }
                 self.lease.check()?;
+                control_diagnostic(&b[..n]);
                 ensure!(
                     n == 8 && b[..2] == [0x80, 0xd5],
                     "invalid retransmission feedback"
@@ -1308,6 +1309,40 @@ impl MediaIo {
         }
     }
 }
+// Only classify the bounded datagram header. Never emit receiver payload bytes.
+fn control_diagnostic(packet: &[u8]) {
+    let kind = if packet.starts_with(&[0x80, 0xd5]) {
+        "retransmission"
+    } else {
+        "unrecognized"
+    };
+    tracing::debug!(target: "piair::rtsp", phase = "receiver control",
+        kind, received_bytes_capped = packet.len(), length_at_cap = packet.len() == 9,
+        "peer-bound control datagram observed; parser policy unchanged");
+}
+
+#[cfg(test)]
+mod control_diagnostic_tests {
+    use super::*;
+    #[test]
+    fn control_diagnostics_classify_without_disclosing_payloads() {
+        for (packet, kind) in [
+            (b"secret!!!".as_slice(), "unrecognized"),
+            (&[0x80, 0xd5, 0, 1, 0xff, 0xfe, 0, 2][..], "retransmission"),
+            (&[][..], "unrecognized"),
+        ] {
+            let emit = || control_diagnostic(packet);
+            assert!(
+                super::super::diagnostics::tests::capture(tracing::Level::INFO, emit).is_empty()
+            );
+            let log = super::super::diagnostics::tests::capture(tracing::Level::DEBUG, emit);
+            assert!(log.contains(kind));
+            assert!(!log.contains("secret"));
+            assert!(log.contains(&format!("received_bytes_capped\":{}", packet.len())));
+        }
+    }
+}
+
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,

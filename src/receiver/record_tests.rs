@@ -918,6 +918,26 @@ fn authenticated_receiver_input(
             "{case:?}: {output}"
         );
     }
+    if playback == Some(true) && case == Case::Good {
+        for field in [
+            "diagnostic policy",
+            "feedback_polling\":false",
+            "retransmissions_allowed\":false",
+            "sync datagram sent",
+            "sync_packets\":3",
+            "media datagram sent",
+            "datagram_bytes\":1452",
+            "max_lateness_us",
+            "ntp_age_ms",
+        ] {
+            assert!(output.contains(field), "missing {field}: {output}");
+        }
+    }
+    if case == Case::MediaFeedback {
+        assert!(output.contains("receiver requested retransmission"));
+        assert!(output.contains("allowed\":false"));
+        assert!(output.contains("peer-bound control datagram observed"));
+    }
     assert_eq!(session.resends, 0);
     assert!(!output.contains("private-reason"));
     if case.recorded() {
