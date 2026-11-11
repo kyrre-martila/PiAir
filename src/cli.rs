@@ -72,8 +72,12 @@ pub enum Command {
         /// Receiver volume in integer dB (-60..=-10); may persist after playback.
         #[arg(long, default_value_t = -30, allow_hyphen_values = true, value_parser = clap::value_parser!(i32).range(-60..=-10))]
         volume_db: i32,
-        #[arg(long, default_value_t=1, value_parser=clap::value_parser!(u32).range(1..=3))]
+        /// Playback duration: 1..3 seconds for tone, 1..30 for WAV (stops earlier at EOF).
+        #[arg(long, default_value_t=1, value_parser=clap::value_parser!(u32).range(1..=30))]
         seconds: u32,
+        /// Bounded PCM WAV playback through the OwnTone realtime diagnostic.
+        #[arg(long, group = "owntone_diagnostic", requires = "experimental_owntone_transient", conflicts_with_all = ["setup_check", "record_check", "stream_setup_check", "playback_check", "setup_profile", "setup_timeout_seconds"])]
+        audio_file: Option<std::path::PathBuf>,
         /// Validate initial SETUP and tear down before RECORD or audio transmission.
         #[arg(long, group = "owntone_diagnostic")]
         setup_check: bool,
@@ -532,5 +536,67 @@ mod dynamic_diagnostic_tests {
                 .is_ok());
             }
         }
+    }
+}
+
+impl Cli {
+    pub fn validate(&self) -> Result<(), clap::Error> {
+        if let Command::StreamTest {
+            seconds,
+            audio_file,
+            ..
+        } = &self.command
+        {
+            if *seconds > 3 && audio_file.is_none() {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "--seconds above 3 requires --audio-file (WAV maximum: 30 seconds)",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod wav_arguments {
+    use super::*;
+    #[test]
+    fn wav_modes_and_bounds() {
+        let base = [
+            "piair",
+            "stream-test",
+            "--experimental-owntone-transient",
+            "--audio-file",
+            "test.wav",
+        ];
+        for seconds in ["1", "30"] {
+            let c = Cli::try_parse_from(base.into_iter().chain([
+                "--seconds",
+                seconds,
+                "--volume-db",
+                "-20",
+            ]))
+            .unwrap();
+            assert!(c.validate().is_ok());
+        }
+        for flag in [
+            "--setup-check",
+            "--record-check",
+            "--stream-setup-check",
+            "--playback-check",
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain([flag])).is_err());
+        }
+        for seconds in ["0", "31"] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(["--seconds", seconds])).is_err());
+        }
+        assert!(Cli::try_parse_from(["piair", "stream-test", "--audio-file", "x.wav"]).is_err());
+        assert!(
+            Cli::try_parse_from(["piair", "stream-test", "--seconds", "4"])
+                .unwrap()
+                .validate()
+                .is_err()
+        );
     }
 }

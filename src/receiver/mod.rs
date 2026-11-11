@@ -22,6 +22,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 mod tlv;
+mod wav;
 mod wire;
 pub use session::SetupProfile;
 pub use wire::AuthProfile;
@@ -359,10 +360,25 @@ pub fn stream_test(
     record_check: bool,
     stream_setup_check: bool,
     playback_check: bool,
+    audio_file: Option<&std::path::Path>,
     setup_timeout_seconds: Option<u64>,
     setup_profile: Option<SetupProfile>,
     experimental_owntone_transient: bool,
 ) -> Result<()> {
+    ensure!(
+        audio_file.is_none()
+            || (experimental_owntone_transient
+                && !setup_check
+                && !record_check
+                && !stream_setup_check
+                && !playback_check
+                && setup_profile.is_none()
+                && setup_timeout_seconds.is_none()),
+        "WAV playback requires OwnTone transient and no other diagnostic mode"
+    );
+    let wav = audio_file
+        .map(|path| wav::Playback::open(path, seconds))
+        .transpose()?;
     let stream_diagnostic = stream_setup_check || playback_check;
     ensure!(!stream_diagnostic || (!setup_check && !record_check
         && !(stream_setup_check && playback_check) && experimental_owntone_transient
@@ -379,7 +395,8 @@ pub fn stream_test(
     );
     ensure!(
         !experimental_owntone_transient
-            || ((setup_check || record_check || stream_diagnostic) && setup_profile.is_none()),
+            || ((setup_check || record_check || stream_diagnostic || wav.is_some())
+                && setup_profile.is_none()),
         "OwnTone transient requires an explicit diagnostic and no --setup-profile; no fallback"
     );
     ensure!(!record_check || (!setup_check && experimental_owntone_transient
@@ -395,8 +412,8 @@ pub fn stream_test(
     exact_id(id)?;
     ensure!(loaded.config.allows(id), "receiver is not approved");
     ensure!(
-        (1..=3).contains(&seconds),
-        "test duration must be 1..3 seconds"
+        (1..=if wav.is_some() { 30 } else { 3 }).contains(&seconds),
+        "test duration must be 1..3 seconds (WAV: 1..30)"
     );
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
@@ -434,7 +451,9 @@ pub fn stream_test(
         );
         Some(credential)
     };
-    if stream_setup_check {
+    if let Some(wav) = &wav {
+        println!("WAV playback: {} frames at 44100 Hz stereo; {}. WARNING: receiver volume {volume_db} dB may persist after playback or failure and is not restored. RTP transmission does not prove audible playback.", wav.frames.len(), if wav.eof { "ends at EOF; no looping" } else { "stops at requested duration; remainder is not played" });
+    } else if stream_setup_check {
         println!("Stream SETUP-only check: authentication, initial SETUP, event connection, RECORD, stream SETUP, TEARDOWN. Zero audio; receiver volume unchanged. Successful negotiation does not prove audible playback.");
     } else if playback_check {
         println!("Playback check: one second original faded tone (peak below -18 dBFS), fixed receiver volume -40 dB, two second silent drain. Volume may persist and is NOT restored. No retries. Packet transmission does not prove audible playback.");
@@ -474,7 +493,9 @@ pub fn stream_test(
         loaded,
         proposed.as_ref(),
         &snapshot,
-        if stream_setup_check {
+        if wav.is_some() {
+            "Authorize WAV audio and persistent receiver volume? [y/N]: "
+        } else if stream_setup_check {
             "Start stream SETUP-only check? [y/N]: "
         } else if playback_check {
             "Authorize one second tone and persistent -40 dB receiver volume? [y/N]: "
@@ -489,8 +510,12 @@ pub fn stream_test(
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
     let connect = || wire::Wire::connect(&loaded.path, id, &selected, &snapshot);
-    if stream_diagnostic {
-        session.start_owntone_stream_selected(connect, &selected.capabilities, playback_check)?;
+    if stream_diagnostic || wav.is_some() {
+        session.start_owntone_stream_selected(
+            connect,
+            &selected.capabilities,
+            playback_check || wav.is_some(),
+        )?;
     } else if record_check {
         session.start_owntone_record_selected(connect, &selected.capabilities)?;
     } else if experimental_owntone_transient {
@@ -512,6 +537,13 @@ pub fn stream_test(
     if stream_setup_check {
         session.check_stream()?;
         println!("Stream SETUP validated; TEARDOWN acknowledged; local cleanup complete; audio packets: 0; volume unchanged. Audible playback unverified.");
+        return Ok(());
+    }
+    if let Some(wav) = wav {
+        session.prepare_playback_check_at_volume(volume_db)?;
+        session.transmit_wav(&wav.frames)?;
+        session.stop()?;
+        println!("WAV transmission complete: {} RTP packets; TEARDOWN acknowledged; local cleanup complete. Receiver volume may persist. Audible playback unverified.", session.packets_sent);
         return Ok(());
     }
     if playback_check {
