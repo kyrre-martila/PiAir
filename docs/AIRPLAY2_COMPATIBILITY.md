@@ -192,3 +192,7 @@ the delayed-RECORD fixture's 200ms budget was too small and the old malformed
 organization-TLV fixture now failed at encoding. The mock budget is500ms and
 the malformed receive fixture now injects its invalid bytes directly; the final
 full suite above passed. None of these checks contacted physical receivers.
+
+The focused [HomePod Delay_Req compatibility note](PTP_DELAY_REQ_COMPATIBILITY.md)
+records the reported Stua zero-control header, parser regression, pinned
+reference comparison and setup-only manual verification procedure.

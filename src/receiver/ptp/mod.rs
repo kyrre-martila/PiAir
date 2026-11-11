@@ -397,6 +397,36 @@ pub struct Service {
     event: Option<UdpSocket>,
     general: Option<UdpSocket>,
     lease: super::wire::PtpLease,
+    diagnostics: Diagnostics,
+}
+// Separate lifetime budgets: rejected floods cannot hide successful exchanges.
+// No packet contents, clock identities, addresses or control-session data.
+#[derive(Default)]
+struct Diagnostics {
+    rejected: u8,
+    exchanges: u8,
+}
+impl Diagnostics {
+    const LIMIT: u8 = 8;
+    fn reject(&mut self, channel: &'static str, bytes: &[u8], reason: &anyhow::Error) {
+        if self.rejected >= Self::LIMIT {
+            return;
+        }
+        self.rejected += 1;
+        tracing::debug!(target: "piair::ptp", channel, length = bytes.len(),
+            message_type = ?bytes.first().map(|b| b & 15),
+            control = ?bytes.get(32), reason = %reason,
+            diagnostic = self.rejected, "rejected PTP datagram");
+    }
+    fn exchange(&mut self, sequence: u16) {
+        if self.exchanges >= Self::LIMIT {
+            return;
+        }
+        self.exchanges += 1;
+        tracing::debug!(target: "piair::ptp", sequence, channel = "general",
+            diagnostic = self.exchanges,
+            "accepted Delay_Req; sent Delay_Resp");
+    }
 }
 impl Service {
     pub(super) fn attach(
@@ -419,6 +449,7 @@ impl Service {
             event: Some(event),
             general: Some(general),
             lease,
+            diagnostics: Diagnostics::default(),
         })
     }
     fn check_authorization(&mut self) -> Result<()> {
@@ -475,19 +506,25 @@ impl Service {
                 Ok(n) => {
                     self.check_authorization()?;
                     // Invalid unauthenticated UDP is ignored, never a lock signal.
-                    if let Ok(responses) = self.clock.receive(&b[..n], Instant::now()) {
-                        for p in responses {
-                            self.send(&p)?;
-                            if p.kind == Kind::PdelayResp {
-                                let mut body =
-                                    self.clock.timestamp(Instant::now())?.encode()?.to_vec();
-                                body.extend_from_slice(&p.body[10..20]);
-                                self.send(&Packet::new(
-                                    Kind::PdelayFollowUp,
-                                    self.clock.clock_id,
-                                    p.sequence,
-                                    body,
-                                ))?;
+                    match self.clock.receive(&b[..n], Instant::now()) {
+                        Err(reason) => self.diagnostics.reject("event", &b[..n], &reason),
+                        Ok(responses) => {
+                            for p in responses {
+                                self.send(&p)?;
+                                if p.kind == Kind::DelayResp {
+                                    self.diagnostics.exchange(p.sequence);
+                                }
+                                if p.kind == Kind::PdelayResp {
+                                    let mut body =
+                                        self.clock.timestamp(Instant::now())?.encode()?.to_vec();
+                                    body.extend_from_slice(&p.body[10..20]);
+                                    self.send(&Packet::new(
+                                        Kind::PdelayFollowUp,
+                                        self.clock.clock_id,
+                                        p.sequence,
+                                        body,
+                                    ))?;
+                                }
                             }
                         }
                     }
@@ -511,7 +548,9 @@ impl Service {
             {
                 Ok(n) => {
                     self.check_authorization()?;
-                    let _ = self.clock.receive_general(&bytes[..n]);
+                    if let Err(reason) = self.clock.receive_general(&bytes[..n]) {
+                        self.diagnostics.reject("general", &bytes[..n], &reason);
+                    }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
