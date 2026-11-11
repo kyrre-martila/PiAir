@@ -78,16 +78,20 @@ pub enum Command {
         #[arg(long, group = "owntone_diagnostic")]
         setup_check: bool,
         /// Validate RECORD after initial NTP SETUP, then tear down without audio.
-        #[arg(long, group = "owntone_diagnostic", requires_all = ["experimental_owntone_transient", "receiver_id"], conflicts_with_all = ["setup_check", "volume_db", "seconds", "setup_profile", "setup_timeout_seconds"])]
+        #[arg(long, group = "owntone_diagnostic", requires = "experimental_owntone_transient", conflicts_with_all = ["setup_check", "volume_db", "seconds", "setup_profile", "setup_timeout_seconds"])]
         record_check: bool,
         /// Validate stream SETUP, then TEARDOWN; zero audio and volume changes.
-        #[arg(long, group = "owntone_diagnostic", requires_all = ["experimental_owntone_transient", "receiver_id"], conflicts_with_all = ["volume_db", "seconds", "setup_profile", "setup_timeout_seconds"])]
+        #[arg(long, group = "owntone_diagnostic", requires = "experimental_owntone_transient", conflicts_with_all = ["volume_db", "seconds", "setup_profile", "setup_timeout_seconds"])]
         stream_setup_check: bool,
         /// One second faded tone at -40 dB receiver volume, which may persist.
-        #[arg(long, group = "owntone_diagnostic", requires_all = ["experimental_owntone_transient", "receiver_id"], conflicts_with_all = ["volume_db", "seconds", "setup_profile", "setup_timeout_seconds"])]
+        #[arg(long, group = "owntone_diagnostic", requires = "experimental_owntone_transient", conflicts_with_all = ["volume_db", "seconds", "setup_profile", "setup_timeout_seconds"])]
         playback_check: bool,
         /// OwnTone-reference transient authentication for explicit diagnostics; no fallback.
-        #[arg(long, requires_all = ["receiver_id", "owntone_diagnostic"], conflicts_with = "setup_profile")]
+        #[arg(
+            long,
+            requires = "owntone_diagnostic",
+            conflicts_with = "setup_profile"
+        )]
         experimental_owntone_transient: bool,
         /// Diagnostic only: wait up to 15 seconds total for initial SETUP.
         #[arg(long, requires = "setup_check", value_parser = clap::value_parser!(u64).range(15..=15))]
@@ -109,11 +113,14 @@ pub enum Command {
         #[arg(long)]
         confirm_audio: bool,
     },
-    /// Stua only: reuse stored HAP credentials, validate stream SETUP, zero audio/volume changes.
-    StuaStreamSetupCheck { receiver_id: String },
-    /// Stua only: one second faded tone, configurable receiver volume (may persist), two seconds silent drain.
-    StuaPlaybackCheck {
-        receiver_id: String,
+    /// Stored HAP: validate stream SETUP with zero audio/volume changes; omit ID for picker.
+    #[command(visible_alias = "stua-stream-setup-check")]
+    HapStreamSetupCheck { receiver_id: Option<String> },
+    /// Stored HAP: one second faded tone, persistent receiver volume, two seconds silent drain.
+    #[command(visible_alias = "stua-playback-check")]
+    HapPlaybackCheck {
+        /// Canonical ID; omit to use the existing interactive receiver picker.
+        receiver_id: Option<String>,
         /// Receiver volume in dB (-40 through -10); may persist after the test.
         #[arg(long, default_value_t = -40, allow_negative_numbers = true, value_parser = clap::value_parser!(i32).range(-40..=-10))]
         volume_db: i32,
@@ -266,7 +273,7 @@ mod interactive_tests {
 mod owntone_setup_tests {
     use super::*;
     #[test]
-    fn own_setup_requires_exact_id_and_setup_only_without_other_profiles() {
+    fn own_setup_requires_explicit_diagnostic_without_other_profiles() {
         let base = [
             "piair",
             "stream-test",
@@ -296,12 +303,6 @@ mod owntone_setup_tests {
                 "piair",
                 "stream-test",
                 "device:aabbccddeeff",
-                "--experimental-owntone-transient",
-            ],
-            vec![
-                "piair",
-                "stream-test",
-                "--setup-check",
                 "--experimental-owntone-transient",
             ],
             vec![
@@ -381,7 +382,7 @@ mod record_tests {
             "--record-check",
             "--experimental-owntone-transient"
         ])
-        .is_err());
+        .is_ok());
     }
 }
 
@@ -415,7 +416,7 @@ mod playback_diagnostic_tests {
                 mode,
                 "--experimental-owntone-transient"
             ])
-            .is_err());
+            .is_ok());
             assert!(
                 Cli::try_parse_from(["piair", "stream-test", "device:3ae5c9a302ad", mode]).is_err()
             );
@@ -451,7 +452,7 @@ mod stua_volume_tests {
             )
             .unwrap();
             assert!(
-                matches!(cli.command, Command::StuaPlaybackCheck { volume_db, .. } if volume_db == expected)
+                matches!(cli.command, Command::HapPlaybackCheck { volume_db, .. } if volume_db == expected)
             );
         }
     }
@@ -490,4 +491,46 @@ pub enum AllowlistCommand {
     Add { receiver_id: String },
     /// Revoke local approval; stored credentials are retained, no receiver contact.
     Remove { receiver_id: String },
+}
+
+#[cfg(test)]
+mod dynamic_diagnostic_tests {
+    use super::*;
+    #[test]
+    fn diagnostic_commands_accept_ids_or_existing_picker_and_legacy_aliases() {
+        for command in [
+            "hap-stream-setup-check",
+            "hap-playback-check",
+            "stua-stream-setup-check",
+            "stua-playback-check",
+        ] {
+            for id in [
+                None,
+                Some("device:112233445566"),
+                Some("device:66778899aabb"),
+            ] {
+                assert!(Cli::try_parse_from(["piair", command].into_iter().chain(id)).is_ok());
+            }
+        }
+        for mode in [
+            "--setup-check",
+            "--record-check",
+            "--stream-setup-check",
+            "--playback-check",
+        ] {
+            for id in [
+                None,
+                Some("device:112233445566"),
+                Some("device:66778899aabb"),
+            ] {
+                assert!(Cli::try_parse_from(
+                    ["piair", "stream-test"]
+                        .into_iter()
+                        .chain(id)
+                        .chain([mode, "--experimental-owntone-transient"])
+                )
+                .is_ok());
+            }
+        }
+    }
 }

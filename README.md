@@ -274,18 +274,18 @@ bounds and limitations](docs/AIRPLAY_SESSION.md).
 
 For an initial SETUP check without RECORD or audio, use `stream-test --setup-check`.
 
-For the explicit HomePod-only `--record-check --experimental-owntone-transient`
+For the explicit receiver-selected `--record-check --experimental-owntone-transient`
 diagnostic, read the [pinned contract and manually authorized one-attempt
 procedure](docs/OWNTONE_RECORD_CHECK.md). It opens events, validates an empty
 RECORD and tears down without stream SETUP, audio or volume changes. RECORD 200
 does not prove stream negotiation or audible playback. No physical test is
 authorized for Codex.
 
-For one explicitly authorized HomePod transient diagnostic, the new opt-in is:
+For an explicitly authorized compatible receiver, the transient opt-in is:
 
 ```sh
 CONFIG=/absolute/path/to/existing/piair.toml
-./target/release/piair --config "$CONFIG" -v stream-test device:3ae5c9a302ad --setup-check --experimental-owntone-transient
+./target/release/piair --config "$CONFIG" -v stream-test 'device:<canonical-id>' --setup-check --experimental-owntone-transient
 ```
 
 Use a separate checkout/binary and the existing configuration and receiver-state.
@@ -441,30 +441,27 @@ are required.
 
 See [example terminal sessions and exact post-merge Raspberry Pi verification commands](docs/CLI_VERIFICATION.md).
 
-The approved Even-Olai HomePod also has two separate opt-in diagnostics:
-`stream-test device:3ae5c9a302ad --stream-setup-check --experimental-owntone-transient`
-validates stream negotiation with zero audio or volume changes;
-`stream-test device:3ae5c9a302ad --playback-check --experimental-owntone-transient`
-sends a fixed one-second faded tone with receiver volume −40 dB (may persist).
-Both require existing approval/selection and interactive confirmation. See the
-[pinned comparison and two independently authorized Pi procedures](docs/OWNTONE_PLAYBACK_CHECK.md).
-Stream negotiation or packet transmission alone does not establish audible playback.
+Diagnostics accept a canonical receiver ID or the existing interactive picker
+when the ID is omitted. Use `piair receivers` to see friendly names and canonical
+IDs; names can repeat, so verify the ID independently before allowlisting.
 
-Stua-only persistent HAP diagnostics reuse stored credentials and the same realtime
-engine: `stua-stream-setup-check device:02d899c1833f` (zero audio/volume changes)
-and separately `stua-playback-check device:02d899c1833f` (one second faded tone,
-receiver volume defaulting to -40 dB which may persist, two seconds silent drain).
-Both require existing approval, valid stored HAP credentials and interactive confirmation. Stua uses a
-temporary operation selection from passive discovery; the selected default
-receiver remains unchanged. See
-[Stua protocol limits and exact Pi commands](docs/STUA_REALTIME_DIAGNOSTICS.md).
-Automated tests do not establish physical routing or audible playback.
+- `piair stream-test --record-check --experimental-owntone-transient`: choose an
+  approved compatible receiver and explicit transient method; zero audio.
+- `piair stream-test --stream-setup-check --experimental-owntone-transient`:
+  validate realtime stream negotiation with zero audio or volume changes.
+- `piair hap-stream-setup-check`: choose a receiver with existing stored HAP
+  credentials and validate realtime stream negotiation without audio.
+- `piair hap-playback-check 'device:<canonical-id>' --volume-db -20`: separately
+  confirmed one-second tone and two-second silent drain. Volume (-40..=-10 dB,
+  default -40) may persist after success or failure and is not restored.
 
-For Stua playback only, select an integer receiver volume from -40 through -10 dB
-with `piair stua-playback-check device:02d899c1833f --volume-db -20`.
-The default remains -40 dB. The confirmation displays the selected volume;
-receiver volume may persist after the test, including after failure, and is not
-restored. This changes only receiver volume, not the generated tone amplitude.
+The legacy `stua-stream-setup-check` and `stua-playback-check` names remain aliases.
+All operations retain approval, capability, credential and endpoint checks and
+terminal confirmation. Transient authentication does not verify persistent identity.
+Buffered playback remains blocked by its existing media readiness gate. See
+[receiver selection and diagnostics](docs/RECEIVER_DIAGNOSTICS.md) for the selection
+contract and [protocol details](docs/OWNTONE_PLAYBACK_CHECK.md).
+Automated checks do not establish physical routing or audible playback.
 
 Passive transport diagnostics: `piair receiver-plan` shows observed capabilities,
 provenance, group/stereo/proxy candidates and transport rejection reasons without

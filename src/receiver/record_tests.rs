@@ -1,6 +1,6 @@
 //! RECORD diagnostic tests: real SRP, independent cipher counters, loopback only.
 use super::*;
-use crate::receiver::session::RECORD_RECEIVER_ID;
+const RECORD_RECEIVER_ID: &str = "device:112233445566";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Case {
@@ -99,10 +99,19 @@ fn authenticated_case_at_volume(
     volume_db: i32,
 ) {
     let receiver_id = if persistent {
-        session::STUA_RECEIVER_ID
+        HAP_FIXTURE_ID
     } else {
         RECORD_RECEIVER_ID
     };
+    authenticated_receiver_case(case, playback, persistent, volume_db, receiver_id);
+}
+fn authenticated_receiver_case(
+    case: Case,
+    playback: Option<bool>,
+    persistent: bool,
+    volume_db: i32,
+    receiver_id: &'static str,
+) {
     let method = if persistent {
         Method::StoredHap
     } else {
@@ -128,14 +137,7 @@ fn authenticated_case_at_volume(
         "127.0.0.1",
         listener.local_addr().unwrap().port(),
         [
-            (
-                "deviceid",
-                if persistent {
-                    "02:D8:99:C1:83:3F"
-                } else {
-                    "3A:E5:C9:A3:02:AD"
-                },
-            ),
+            ("deviceid", receiver_id.strip_prefix("device:").unwrap()),
             ("pi", PI),
             (
                 "features",
@@ -774,10 +776,10 @@ fn authenticated_case_at_volume(
     let mut session = Session::new();
     session.cancel = cancel;
     if persistent {
-        let c = stua_credential(&store, &selected).unwrap();
+        let c = hap_credential(&store, &selected).unwrap();
         session
-            .start_stua_stream_selected(
-                || Wire::connect_stua_operation(&config, &selected, &observed, &c),
+            .start_hap_stream_selected(
+                || Wire::connect_hap_operation(&config, &selected, &observed, &c),
                 &c,
                 playback.unwrap(),
             )
@@ -785,7 +787,7 @@ fn authenticated_case_at_volume(
     } else if let Some(playback) = playback {
         session
             .start_owntone_stream_selected(
-                || Wire::connect(&config, RECORD_RECEIVER_ID, &selected, &observed),
+                || Wire::connect(&config, receiver_id, &selected, &observed),
                 &selected.capabilities,
                 playback,
             )
@@ -793,7 +795,7 @@ fn authenticated_case_at_volume(
     } else {
         session
             .start_owntone_record_selected(
-                || Wire::connect(&config, RECORD_RECEIVER_ID, &selected, &observed),
+                || Wire::connect(&config, receiver_id, &selected, &observed),
                 &selected.capabilities,
             )
             .unwrap();
@@ -943,8 +945,8 @@ fn record_rejects_unsupported_policy_and_precancel_before_connect() {
         .is_err());
     assert!(!session.record_succeeded());
     assert_eq!(session.packets_sent, 0);
-    // The lower-level gate refuses a mismatched ID before authentication bytes.
-    let (wire, server) = local_mock_method(Method::Transient, |mut socket| assert_eof(&mut socket));
+    // The lower-level gate refuses a mismatched authentication profile before bytes.
+    let (wire, server) = local_mock_method(Method::StoredHap, |mut socket| assert_eof(&mut socket));
     assert!(Session::new()
         .start_owntone_record_selected(|| Ok(wire), &owntone_caps())
         .is_err());
@@ -1081,5 +1083,15 @@ fn diagnostic_auth_mock(
 fn stua_selected_volume_reaches_encrypted_receiver_without_changing_tone() {
     for volume_db in [-40, -20, -10] {
         authenticated_case_at_volume(Case::Good, Some(true), true, volume_db);
+    }
+}
+
+#[test]
+fn diagnostics_bind_different_allowlisted_receivers_through_teardown() {
+    for id in ["device:112233445566", "device:66778899aabb"] {
+        authenticated_receiver_case(Case::Good, None, false, -40, id);
+        authenticated_receiver_case(Case::Good, Some(false), false, -40, id);
+        authenticated_receiver_case(Case::Good, Some(false), true, -40, id);
+        authenticated_receiver_case(Case::StreamWrongCseq, Some(false), true, -40, id);
     }
 }

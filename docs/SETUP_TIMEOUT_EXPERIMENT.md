@@ -1,5 +1,10 @@
 # Initial SETUP timeout experiment (PR #22)
 
+Current receiver discovery, selection and command usage is documented in
+[Receiver diagnostics](RECEIVER_DIAGNOSTICS.md). Receiver-specific observations
+and authorizations below are historical evidence, not current CLI restrictions.
+Examples use placeholders; verify the canonical ID independently.
+
 Start point: origin/main a3ebcb8, including merged PR #21.
 Operator-confirmed evidence for AppleTV6,2 / tvOS 26.6.1:
 pair-verify succeeds; encrypted GET /info returns 200 OK (1672 bytes,
@@ -50,18 +55,18 @@ install -D -m 755 target/release/piair "$HOME/.local/lib/piair-pr22/piair"
 CONFIG=/absolute/path/to/existing/piair.toml
 umask 077
 "$HOME/.local/lib/piair-pr22/piair" --config "$CONFIG" -v \
-  authenticate device:02d899c1833f --control-check \
+  authenticate 'device:<canonical-id>' --control-check \
   2>piair-pr22-options.jsonl
 printf 'OPTIONS exit status: %s\n' "$?"
 
 # Optional default-timeout comparison, also without RECORD or audio:
 "$HOME/.local/lib/piair-pr22/piair" --config "$CONFIG" -v \
-  stream-test device:02d899c1833f --setup-check \
+  stream-test 'device:<canonical-id>' --setup-check \
   2>piair-pr22-setup-default.jsonl
 printf 'Default SETUP exit status: %s\n' "$?"
 
 "$HOME/.local/lib/piair-pr22/piair" --config "$CONFIG" -v \
-  stream-test device:02d899c1833f --setup-check --setup-timeout-seconds 15 \
+  stream-test 'device:<canonical-id>' --setup-check --setup-timeout-seconds 15 \
   2>piair-pr22-setup-15s.jsonl
 printf '15-second SETUP exit status: %s\n' "$?"
 ```

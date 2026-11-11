@@ -1,7 +1,12 @@
 # HomePod initial /info 403 investigation (PR #18)
 
+Current receiver discovery, selection and command usage is documented in
+[Receiver diagnostics](RECEIVER_DIAGNOSTICS.md). Receiver-specific observations
+and authorizations below are historical evidence, not current CLI restrictions.
+Examples use placeholders; verify the canonical ID independently.
+
 Base: fresh `origin/main`, `c1e9def0abbbd9a312cb6c9aae1c3f7262ec1a31`.
-Receiver evidence supplied by the operator: `device:3ae5c9a302ad`,
+Receiver evidence supplied by the operator: `device:<canonical-id>`,
 AudioAccessory5,1, firmware 27.2; initial `GET /info RTSP/1.0` received
 `RTSP/1.0 403 Forbidden`. No packet capture, numeric peer endpoint or complete
 hardware log was supplied. No hardware requests were made in this investigation.
@@ -126,7 +131,7 @@ Keep existing approval, selection and pairing files. Review the physical receive
 and its current AirPlay advertisement before one explicitly authorized attempt:
 
 ```sh
-piair --config config.toml -v authenticate device:3ae5c9a302ad --experimental-owntone-transient
+piair --config config.toml -v authenticate 'device:<canonical-id>' --experimental-owntone-transient
 ```
 
 Type the exact receiver ID at the interactive prompt. Do not run stream-test,

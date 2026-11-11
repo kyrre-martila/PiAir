@@ -1,5 +1,10 @@
 # Receiver authentication: current evidence and safe verification
 
+Current receiver discovery, selection and command usage is documented in
+[Receiver diagnostics](RECEIVER_DIAGNOSTICS.md). Receiver-specific observations
+and authorizations below are historical evidence, not current CLI restrictions.
+Examples use placeholders; verify the canonical ID independently.
+
 Pairing means permanent, verified credential enrollment. Authentication establishes
 a session. Transient authentication uses session-scoped SRP without persistent
 receiver identity verification; it never makes a receiver permanently paired.
@@ -23,7 +28,7 @@ No physical receiver was contacted for this audit.
 | pyatv diagnostic | Explicit authenticate-only flag; HTTP HKP 4 PIN-start preamble and pyatv M1/M3 envelope/order; still verifies M4 proof | Earlier preamble 200 followed by M1 403/400; no successful PiAir authentication documented for this profile. |
 | Persistent pair-verify | Stored signed receiver ID/key, fresh X25519, verified signature/AEAD, mutual exchange M1–M4; no credential replacement | Apple TV pair-verify success reported in PR #21 evidence. Not proof of HomePod persistent compatibility. |
 | Encrypted control check | One encrypted OPTIONS on authenticated socket; validate AEAD/framing, status, matching CSeq and response shape | HomePod encrypted 403 proves a channel but failed OPTIONS acceptance. Later post-#20 success is operator-reported, not a new workspace reproduction. |
-| Stream-test | Persistent pair-verify or explicitly selected legacy transient; separate GET/info, SETUP/RECORD and media negotiation | OwnTone is available only with exact ID + `--setup-check`; pyatv remains unavailable here. Later Apple TV transport observations do not establish HomePod playback or audible output. |
+| Stream-test | Persistent pair-verify or explicitly selected legacy transient; separate GET/info, SETUP/RECORD and media negotiation | OwnTone diagnostics require their explicit opt-in flags and support canonical IDs or the existing picker; see [selection](RECEIVER_DIAGNOSTICS.md). pyatv remains unavailable here. Later Apple TV transport observations do not establish HomePod playback or audible output. |
 
 `Capabilities::decide` checks the explicitly requested method, never searches for
 another. Persistent paths require bit 46; bit 51 alone is insufficient but is not
@@ -49,7 +54,7 @@ protocol fallback or automatic extension of stream-test authentication.
 
 ## Even-Olai HomePod evidence, in order
 
-Exact independently verified receiver: `device:3ae5c9a302ad` (AudioAccessory5,1,
+Exact independently verified receiver: `device:<canonical-id>` (AudioAccessory5,1,
 reported firmware 27.2). Earlier [diagnostics](AUTHENTICATION_DIAGNOSTICS.md) and
 [pyatv experiments](PYATV_TRANSIENT_PREAMBLE.md) record HTTP 403/400; the initial
 OwnTone-reference RTSP `/info` also returned 403. The [User-Agent investigation](HOMEPOD_INFO_403.md)
@@ -79,7 +84,7 @@ procedure below records the preceding authentication/control round.
 ## Earlier Raspberry Pi diagnostic: authentication and control only
 
 1. Obtain explicit owner/operator authorization for **only** Even-Olai HomePod,
-   `device:3ae5c9a302ad`, and this single OwnTone-reference authentication/control
+   `device:<canonical-id>`, and this single OwnTone-reference authentication/control
    attempt. Do not contact Stua Apple TV. Do not change receiver access policy,
    production OwnTone/autostream services, persistent enrollment or credentials.
 2. Build this reviewed revision in a separate checkout with
@@ -93,13 +98,13 @@ procedure below records the preceding authentication/control round.
 4. Inspect the existing active selection. If it is already this ID with method
    `transient` and the correct pinned endpoint, retain it. Otherwise, only after
    explicit approval to change the active selection, run:
-   `piair --config /existing/config.toml select device:3ae5c9a302ad --method transient`.
+   `piair --config /existing/config.toml select 'device:<canonical-id>' --method transient`.
    This deliberately changes selection but neither enrolls nor replaces credentials.
    Cancellation of the subsequent authenticate command leaves that selection as is.
 5. In an interactive terminal run exactly one attempt:
 
    ```sh
-   piair --config /existing/config.toml -v authenticate device:3ae5c9a302ad --experimental-owntone-transient --control-check
+   piair --config /existing/config.toml -v authenticate 'device:<canonical-id>' --experimental-owntone-transient --control-check
    ```
 
    Review the displayed exact ID and explicitly confirm `y`/`yes` only if authorized.

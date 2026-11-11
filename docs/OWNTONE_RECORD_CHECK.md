@@ -1,7 +1,7 @@
 # Opt-in OwnTone RECORD-only diagnostic
 
-This is an explicit diagnostic for the already approved, selected Even-Olai
-HomePod **`device:3ae5c9a302ad` only**. It performs transient authentication,
+This is an explicit diagnostic for an allowlisted compatible receiver chosen by
+canonical ID or the existing interactive picker. It performs transient authentication,
 encrypted initial NTP SETUP, event-channel connection, empty RECORD, and bounded
 TEARDOWN. **RECORD 200 does not prove stream negotiation or audible playback.**
 No physical receiver test is authorized for Codex; none was performed here.
@@ -43,20 +43,20 @@ connect the locally bound data/control UDP sockets to a receiver.
 
 ## Exact PiAir contract
 
-The only invocation is:
+For an explicitly selected transient receiver (omit ID for the picker):
 
 ```sh
-piair stream-test device:3ae5c9a302ad --record-check --experimental-owntone-transient
+piair stream-test 'device:<canonical-id>' --record-check --experimental-owntone-transient
 ```
 
-It requires existing allowlist approval, explicit transient selection, current
-identity/capability/endpoint pinning and interactive `y`/`yes`. Exact ID is checked
-before discovery or contact. Missing ID/flag, `--setup-check`, `--setup-profile`,
-`--setup-timeout-seconds`, explicit `--seconds` or `--volume-db`, and other
-experimental profiles are rejected. The interactive chooser cannot select it.
-Defaults and existing credentials, including Stua Apple TV credentials, remain
-unchanged. No persistent pairing, enrollment, credential replacement or receiver
-fallback occurs. The existing public sender identity can be initialized locally.
+It requires allowlist approval, an explicitly chosen transient method, current
+identity/capability/endpoint pinning and interactive `y`/`yes`. An explicit ID
+must match the persisted selection; omitting it uses the existing picker and
+saves the provisional selection only on confirmation. Missing authentication
+flag, other diagnostic modes, setup profiles, timeout overrides, explicit duration
+or volume flags are rejected. No persistent pairing, enrollment, credential
+replacement, receiver fallback or retry occurs. See
+[selection and diagnostics](RECEIVER_DIAGNOSTICS.md).
 
 One control TCP connection and uninterrupted directional crypto counters carry:
 
@@ -96,54 +96,12 @@ The CLI reports `RECORD validated: true/false` even when subsequent cleanup fail
 Review errors as well as phase logs and exit status. Do not share raw payloads,
 decrypted headers, credentials, keys, PINs, state files or unreviewed logs.
 
-## One manually authorized Raspberry Pi attempt
+## Receiver selection and operator usage
 
-**For the human operator only, after reviewing PR #35 and explicitly authorizing
-this one attempt. Codex must not execute this procedure or contact a receiver.**
-Target only the already approved Even-Olai HomePod `device:3ae5c9a302ad` (prior
-operator endpoint `192.168.1.33:7000`, AudioAccessory5,1, firmware 27.2). Any
-identity, endpoint, capability or policy change requires stopping and review.
-Do not contact Stua Apple TV or any other receiver. Do not change production
-OwnTone, autostream, systemd services or deployed binaries.
-
-Use a separate checkout and verify its HEAD against the reviewed PR head:
-
-```sh
-git clone --branch feat/owntone-record-check --single-branch \
-  https://github.com/kyrre-martila/PiAir.git PiAir-pr35
-cd PiAir-pr35
-git rev-parse HEAD
-cargo build --release --locked
-CONFIG=/absolute/path/to/existing/piair.toml
-./target/release/piair --config "$CONFIG" config check
-./target/release/piair --config "$CONFIG" receivers
-```
-
-Use the actual existing configuration and adjacent receiver-state directory;
-never copy secrets, pair, unpair, replace credentials or create fresh test state.
-Review existing approval and selection; only the HomePod may be contacted by
-this diagnostic. `receivers` is passive discovery. Retain the correct existing
-HomePod transient selection. If it is absent or changed, stop and obtain separate
-operator authorization to review/pin selection; this procedure does not authorize
-a change of profile or endpoint.
-
-From an interactive terminal, execute **once**, with no playback options:
-
-```sh
-umask 077
-./target/release/piair --config "$CONFIG" -v \
-  stream-test device:3ae5c9a302ad --record-check --experimental-owntone-transient \
-  2>piair-pr35-record.jsonl
-result=$?
-printf 'record-check exit=%s\n' "$result"
-```
-
-Read the full ID/profile/operation before answering `y`/`yes`; Enter/no/EOF
-cancels before contact. Ctrl+C interrupts. Record commit, receiver metadata,
-initial SETUP validation, event connection, NTP request/reply count, RECORD
-status/validation, independent TEARDOWN outcome, local cleanup and exit status.
-Stop after this attempt regardless of result: no retry, fallback, alternate
-receiver, volume change or playback. Report sanitized summaries only.
+See [receiver discovery, selection and diagnostics](RECEIVER_DIAGNOSTICS.md)
+for current commands, canonical ID placeholders, picker behavior and confirmations.
+Use an independently verified allowlisted compatible receiver. No physical
+receiver contact or Raspberry Pi service changes were performed for this change.
 
 ## Limits and deterministic validation
 

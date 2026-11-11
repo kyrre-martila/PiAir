@@ -1,4 +1,9 @@
 > For the current HomePod-only opt-in (PR #33), use the
+
+Current receiver discovery, selection and command usage is documented in
+[Receiver diagnostics](RECEIVER_DIAGNOSTICS.md). Receiver-specific observations
+and authorizations below are historical evidence, not current CLI restrictions.
+Examples use placeholders; verify the canonical ID independently.
 > [OwnTone transient initial SETUP procedure](OWNTONE_TRANSIENT_SETUP_CHECK.md).
 > The Apple TV experiment below is historical and is not authorized by that procedure.
 
@@ -6,7 +11,7 @@
 
 Follow-up: [controlled 15-second SETUP timeout experiment (PR #22)](SETUP_TIMEOUT_EXPERIMENT.md).
 
-Target: Stua, device:02d899c1833f, 192.168.1.236:7000,
+Target: Stua, 'device:<canonical-id>', 192.168.1.236:7000,
 AppleTV6,2 / tvOS 26.6.1. User-supplied hardware evidence: persistent PIN
 pairing, pair-verify and encrypted OPTIONS succeed; `stream-test --seconds 3`
 times out during initial SETUP before audio. HomePod transient SRP and encrypted
@@ -102,10 +107,10 @@ checks remain strict; stop and investigate if the selected receiver changed.
 CONFIG=/absolute/path/to/existing/piair.toml
 umask 077
 "$HOME/.local/lib/piair-pr21/piair" --config "$CONFIG" -v \
-  authenticate device:02d899c1833f --control-check \
+  authenticate 'device:<canonical-id>' --control-check \
   2>piair-pr21-options.jsonl
 "$HOME/.local/lib/piair-pr21/piair" --config "$CONFIG" -v \
-  stream-test device:02d899c1833f --setup-check \
+  stream-test 'device:<canonical-id>' --setup-check \
   2>piair-pr21-setup.jsonl
 ```
 

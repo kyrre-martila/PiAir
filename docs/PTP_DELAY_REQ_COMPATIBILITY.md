@@ -1,5 +1,10 @@
 # HomePod Delay_Req compatibility
 
+Current receiver discovery, selection and command usage is documented in
+[Receiver diagnostics](RECEIVER_DIAGNOSTICS.md). Receiver-specific observations
+and authorizations below are historical evidence, not current CLI restrictions.
+Examples use placeholders; verify the canonical ID independently.
+
 ## Evidence and root cause
 
 Reported hardware evidence (not a test run performed for this change): the
@@ -80,7 +85,7 @@ consume the success budget. Diagnostics are silent at INFO.
    27.2. Stop on identity, ClockID or address conflicts; do not infer a missing
    ClockID from UDP traffic or change any service/privilege configuration.
 2. Run the existing bounded initial-SETUP-only diagnostic with debug logging:
-   `piair -v --config <config> buffered-test device:<Stua-id> --setup-check`.
+   `piair -v --config <config> buffered-test 'device:<canonical-id>' --setup-check`.
    Complete its existing terminal confirmation before it connects. Do not use
    control-check, RECORD, stream, anchor, playback, volume or group modes.
 3. Confirm authenticated SETUP supplies the expected ClockID, then observe a

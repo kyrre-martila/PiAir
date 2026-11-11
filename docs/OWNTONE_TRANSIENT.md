@@ -1,4 +1,9 @@
 > Current guidance and evidence: [receiver authentication audit and safe Pi diagnostic](RECEIVER_AUTHENTICATION.md).
+
+Current receiver discovery, selection and command usage is documented in
+[Receiver diagnostics](RECEIVER_DIAGNOSTICS.md). Receiver-specific observations
+and authorizations below are historical evidence, not current CLI restrictions.
+Examples use placeholders; verify the canonical ID independently.
 > Later operator evidence in [PR #21](INITIAL_SETUP_DIAGNOSTICS.md) reports HomePod
 > transient SRP and encrypted OPTIONS success after #20. Earlier 400/403 results
 > below are historical; no confirmed audible HomePod playback is documented.
@@ -150,7 +155,7 @@ Only after separately authorizing the exact HomePod, allowlisting it, and
 explicitly selecting it with `--method transient`, run in an interactive terminal:
 
 ```sh
-piair -v authenticate device:3ae5c9a302ad --experimental-owntone-transient
+piair -v authenticate 'device:<canonical-id>' --experimental-owntone-transient
 ```
 
 Confirm the exact receiver ID at the prompt. This invocation discovers and

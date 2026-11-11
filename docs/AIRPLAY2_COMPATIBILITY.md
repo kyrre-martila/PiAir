@@ -80,17 +80,17 @@ empty command registration, stream SETUP, audioMode and a fresh **paused** ancho
 verify no media connection; and cover malformed/changed/late headers, CSeq and
 ciphertext replay, cancellation/revocation, failed controls and cleanup.
 
-## Manual Stua-only RECORD verification (not executed)
+## Manual RECORD verification (not executed)
 
 Use an isolated checkout/build of this PR; do not replace deployed binaries or
 change Raspberry Pi, OwnTone or Autostream services. Use the existing config,
-allowlist and stored selection for **Stua `device:02d899c1833f` only**, standalone
+allowlist and stored selection for an independently verified compatible receiver, standalone
 and outside a group/stereo/proxy topology. Verify the selected device identity
 and firmware before opting in. Do not pair, alter volume or broaden permissions.
 
 1. Read `piair buffered-test --help` locally. Run the isolated binary in a terminal:
-   `piair --config <existing-config> -v buffered-test device:02d899c1833f --control-check record`.
-2. Review the discovered Stua selection and approve the existing initial SETUP
+   `piair --config <existing-config> -v buffered-test 'device:<canonical-id>' --control-check record`.
+2. Review the discovered receiver selection and approve the existing initial SETUP
    and RECORD prompts only. Confirmations occur before the fresh connection is
    opened. This command observes PTP for one second and stops after RECORD.
 3. Check sanitized logs for authenticated initial SETUP 200, valid expected

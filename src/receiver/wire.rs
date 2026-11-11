@@ -76,12 +76,12 @@ pub struct Wire {
     pending_start: usize,
     pending_end: usize,
 }
-/// Persisted operations retain exact global-selection checks. A Stua operation
+/// Persisted operations retain exact global-selection checks. A HAP diagnostic operation
 /// instead owns an immutable endpoint/capability pin and credential fingerprint.
 #[derive(Clone)]
 enum Authorization {
     Persisted(Selection),
-    StuaOperation {
+    HapOperation {
         selected: Selection,
         credential: Zeroizing<[u8; 64]>,
     },
@@ -95,14 +95,11 @@ impl Authorization {
                 store.selection()?.as_ref() == Some(selected),
                 "receiver selection changed"
             ),
-            Self::StuaOperation {
+            Self::HapOperation {
                 selected,
                 credential,
             } => {
-                ensure!(
-                    id == super::session::STUA_RECEIVER_ID && selected.id == id,
-                    "operation receiver identity changed"
-                );
+                ensure!(selected.id == id, "operation receiver identity changed");
                 let current = store
                     .credential_fingerprint(id)?
                     .context("operation credentials removed")?;
@@ -132,21 +129,22 @@ impl Wire {
             Authorization::Persisted(selected.clone()),
         )
     }
-    /// Exact Stua-only authorization; never reads or changes the default selection.
-    pub(super) fn connect_stua_operation(
+    /// Pin this operation to its selected receiver and stored credential fingerprint.
+    pub(super) fn connect_hap_operation(
         config_path: &Path,
         selected: &Selection,
         snapshot: &[Receiver],
         credential: &super::store::Credential,
     ) -> Result<Self> {
-        let id = super::session::STUA_RECEIVER_ID;
+        let id = selected.id.as_str();
         ensure!(
-            selected.id == id && selected.method == credential.authentication_method(id)?,
-            "Stua operation requires exact identity and stored HAP authentication"
+            selected.method == Method::StoredHap
+                && selected.method == credential.authentication_method(id)?,
+            "HAP operation requires exact identity and stored HAP authentication"
         );
         let snapshot_credential = super::store::Store::new(config_path)?
             .credential_snapshot(id)?
-            .context("existing Stua HAP credentials required")?;
+            .context("existing receiver HAP credentials required")?;
         use subtle::ConstantTimeEq;
         ensure!(
             credential.advertised_pi == selected.advertised_pi
@@ -162,9 +160,9 @@ impl Wire {
         selected.capabilities.decide(selected.method)?;
         ensure!(
             selected.capabilities.features & ((1 << 9) | (1 << 19)) == ((1 << 9) | (1 << 19)),
-            "Stua must advertise audio and ALAC"
+            "receiver must advertise audio and ALAC"
         );
-        let authorization = Authorization::StuaOperation {
+        let authorization = Authorization::HapOperation {
             selected: selected.clone(),
             credential: snapshot_credential.fingerprint,
         };
