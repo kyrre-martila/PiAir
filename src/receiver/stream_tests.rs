@@ -106,7 +106,7 @@ fn timing_probe(destination: u16) {
     assert_eq!(&reply[..4], &[0x80, 0xd3, 0x12, 0x34]);
     assert_eq!(&reply[8..16], &query[24..]);
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Mode {
     Good,
     RecordLatency(Option<&'static str>),
@@ -476,7 +476,9 @@ fn receiver_authenticated(
             .unwrap();
         let mut first_packet = None;
         let mut previous: Option<(u16, u32, u64, u32)> = None;
-        let mut index = 0u64;
+        // Decode only after RTP stops: constructing an independent decoder for
+        // every packet must not compete with the sender's realtime scheduler.
+        let mut payloads = Vec::new();
         let mut b = [0; 2048];
         while !media_stop.load(Ordering::Relaxed) {
             match data.recv_from(&mut b) {
@@ -509,22 +511,7 @@ fn receiver_authenticated(
                         &packet[4..12],
                     )
                     .unwrap();
-                    let samples = crate::audio::alac::tests::decode_at_rate(&payload, 44100);
-                    assert_eq!(samples.len(), 352);
-                    for sample in samples {
-                        let expected = if index >= 44100 {
-                            0
-                        } else {
-                            let phase = (index % 100) as i16;
-                            if phase < 50 {
-                                phase * 164 - 4100
-                            } else {
-                                (100 - phase) * 164 - 4100
-                            }
-                        };
-                        assert_eq!(sample, [expected, expected]);
-                        index += 1;
-                    }
+                    payloads.push(payload);
                     if previous.is_none() {
                         first_packet = Some(packet.to_vec());
                         let mut request = [0x80, 0xd5, 0, 1, 0, 0, 0, 1];
@@ -543,6 +530,25 @@ fn receiver_authenticated(
                     if [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::TimedOut]
                         .contains(&e.kind()) => {}
                 Err(e) => panic!("{e}"),
+            }
+        }
+        let mut index = 0u64;
+        for payload in payloads {
+            let samples = crate::audio::alac::tests::decode_at_rate(&payload, 44100);
+            assert_eq!(samples.len(), 352);
+            for sample in samples {
+                let expected = if index >= 44100 {
+                    0
+                } else {
+                    let phase = (index % 100) as i16;
+                    if phase < 50 {
+                        phase * 164 - 4100
+                    } else {
+                        (100 - phase) * 164 - 4100
+                    }
+                };
+                assert_eq!(sample, [expected, expected]);
+                index += 1;
             }
         }
     });
@@ -654,9 +660,19 @@ fn full_authenticated_realtime_session_encodes_encrypts_synchronizes_and_tears_d
         session.negotiate_realtime().unwrap();
         assert_eq!(session.state(), State::Ready);
         assert_eq!(session.packets_sent, 0);
-        session.transmit_test(1).unwrap();
+        let began = std::time::Instant::now();
+        session.transmit_test(1).unwrap_or_else(|error| {
+            panic!(
+                "{mode:?}: packets={} elapsed={:?}: {error:#}",
+                session.packets_sent,
+                began.elapsed()
+            );
+        });
+        // One second of signal plus the unchanged two-second lead/drain.
+        // Production still rejects individual scheduler stalls at 100 ms.
+        assert!((Duration::from_millis(2800)..Duration::from_secs(4)).contains(&began.elapsed()));
         assert_eq!(session.state(), State::Streaming);
-        assert!(session.packets_sent > 350);
+        assert_eq!(session.packets_sent, 132300_u64.div_ceil(352));
         assert!(session.resends > 0);
         assert!(session.timing_exchanges > 0);
         let sent = session.packets_sent;
