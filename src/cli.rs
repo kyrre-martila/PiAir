@@ -19,6 +19,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Manage local receiver approval; never discover or contact receivers.
+    Allowlist {
+        #[command(subcommand)]
+        command: AllowlistCommand,
+    },
     /// Capture-only audio tools; no receiver discovery or connections.
     Audio {
         #[command(subcommand)]
@@ -472,4 +477,17 @@ mod stua_volume_tests {
             ));
         }
     }
+}
+
+#[derive(Subcommand)]
+#[command(
+    after_help = "Examples:\n  piair allowlist list\n  piair allowlist add device:aabbccddeeff\n  piair allowlist remove device:aabbccddeeff\n\nChanges require an interactive terminal and y/yes. Adding requires independent physical identity verification (device label or trusted local settings); mDNS alone is insufficient. Approval grants eligibility for later receiver operations, not authentication."
+)]
+pub enum AllowlistCommand {
+    /// List exact approved IDs and the resolved configuration path.
+    List,
+    /// Approve an independently physically verified canonical receiver ID.
+    Add { receiver_id: String },
+    /// Revoke local approval; stored credentials are retained, no receiver contact.
+    Remove { receiver_id: String },
 }

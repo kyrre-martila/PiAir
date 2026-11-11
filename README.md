@@ -37,6 +37,53 @@ linker, target ALSA development library and pkg-config sysroot matching the Pi's
 glibc; installing only the Rust target is insufficient. Native ARM64 builds are
 the recommended path. No Docker, systemd installation or root execution is needed.
 
+## Manage receiver approval locally
+
+```sh
+piair allowlist list
+piair allowlist add device:aabbccddeeff
+piair allowlist remove device:aabbccddeeff
+piair --config ./config.toml allowlist list
+```
+
+Use the actual receiver ID: exactly `device:` followed by 12 lowercase hex
+characters. Zero and broadcast IDs, names, IP addresses, service names, aliases,
+and endpoint suffixes are rejected. Invalid or duplicate identities already in
+the file must be corrected before these commands can proceed.
+
+**Before adding, independently physically verify the ID** against the receiver's
+label or trusted local device settings. An mDNS advertisement, advertised name,
+or network address alone cannot establish physical identity and can be spoofed.
+Adding asks you to attest to that verification, then confirm the exact change
+with `y` or `yes`. Removing asks for change confirmation. Changes require stdin
+and stdout to be interactive terminals; there is no unattended approval flag.
+Any other answer cancels without writing. Existing additions and absent removals
+are reported as harmless no-ops without prompting.
+
+Approval makes a receiver eligible for later operations; it does not prove
+identity cryptographically or bypass selection, pairing, authentication or
+playback gates. Removing approval does not delete stored credentials (use
+`unpair` separately if needed). These commands never perform discovery, select a
+receiver, connect, pair, authenticate, capture audio or play anything.
+
+Resolution is unchanged: `--config`, then `PIAIR_CONFIG`, then
+`$XDG_CONFIG_HOME/piair/config.toml` or `$HOME/.config/piair/config.toml`.
+An explicitly named missing file is an error. A missing default file lists an
+empty allowlist; a confirmed addition creates it and any missing parent
+directories, with a private file mode. The resolved path is displayed.
+
+Edits retain unrelated settings, TOML formatting, comments and existing receiver
+entries, and validate the whole configuration before publishing. Existing file
+permissions and ownership are preserved; read-only files and symlinks are refused.
+Writes use a flushed temporary file in the same directory and atomic replacement,
+followed by directory sync. Temporary files are cleaned up on pre-commit failures.
+Allowlist writers take a nonblocking directory lock and reject stale content or
+metadata after confirmation and immediately before replacement. If a competing
+write is detected, rerun and review the new state. Other tools and manual editors
+must honor the same directory lock to serialize the final replacement; avoid
+editing/calibrating the same configuration concurrently. A directory-sync error
+reports that the complete file was saved but durability could not be confirmed.
+
 ## Identify and monitor a USB input
 
 ```sh

@@ -39,3 +39,5 @@ socket2 = "0.5" # Safe loopback socket fault injection (MIT/Apache-2.0).
 # Independent codec decoder only; not an AirPlay sender or runtime dependency.
 symphonia-codec-alac = "0.5.5"
 symphonia-core = "0.5.5"
+# Safe PTY support for interactive allowlist integration tests.
+rustix = { version = "1", features = ["pty"] }
