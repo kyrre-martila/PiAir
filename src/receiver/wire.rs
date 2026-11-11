@@ -610,8 +610,8 @@ impl Wire {
                 cseq = self.seq, body_length = body.len(),
                 headers = "CSeq,User-Agent,X-Apple-ProtocolVersion,Content-Length,Client-Instance,DACP-ID,Active-Remote,X-Apple-Client-Name",
                 extra_header_names = ?headers.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-                operation_budget_ms = self.budget.as_millis() as u64,
-                socket_wait_cap_ms = if self.setup_response_wait.is_some() { 100u64 } else { 3000u64 },
+                operation_budget_ms = self.feedback_budget.map_or(self.budget, |budget| self.budget.min(budget)).as_millis() as u64,
+                socket_wait_cap_ms = if self.setup_response_wait.is_some() || self.feedback_budget.is_some() { 100u64 } else { 3000u64 },
                 setup_response_budget_ms = self.setup_response_wait.as_ref().map(|(budget, _)| budget.as_millis() as u64),
                 uri_kind = if uri.starts_with("rtsp://") { "session" } else { "endpoint" },
                 "authenticated request start");
@@ -630,6 +630,11 @@ impl Wire {
                 && self.feedback_budget.is_none()
             {
                 self.deadline = Instant::now() + self.budget.min(Duration::from_secs(3));
+                self.polling_response = true;
+            }
+            if self.feedback_budget.is_some() {
+                // Keep the original total feedback deadline across partial frames,
+                // checking cancellation/authorization between bounded read waits.
                 self.polling_response = true;
             }
             let response = self.response().context("response read/validation");

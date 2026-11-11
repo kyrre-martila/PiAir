@@ -17,7 +17,8 @@ enum Case {
     PollReject,
     PollTimeout,
     PollClose,
-    PollSlow,
+    PollDelay15,
+    PollDelay40,
     PollBadType,
     PollCancel,
     RevokeStream,
@@ -68,7 +69,8 @@ impl Case {
                 | Self::PollReject
                 | Self::PollTimeout
                 | Self::PollClose
-                | Self::PollSlow
+                | Self::PollDelay15
+                | Self::PollDelay40
                 | Self::PollBadType
                 | Self::PollCancel
                 | Self::CancelStream
@@ -83,7 +85,14 @@ impl Case {
         )
     }
     fn success(self) -> bool {
-        matches!(self, Self::Good | Self::NoTiming | Self::NoLengthOrLatency)
+        matches!(
+            self,
+            Self::Good
+                | Self::PollDelay15
+                | Self::PollDelay40
+                | Self::NoTiming
+                | Self::NoLengthOrLatency
+        )
     }
 }
 fn state_files(root: &std::path::Path) -> BTreeMap<std::ffi::OsString, Vec<u8>> {
@@ -676,6 +685,7 @@ fn authenticated_receiver_input(
                             let mut first_ts = 0u32;
                             let mut first_nonce = 0u64;
                             let mut count = 0u64;
+                            let mut delayed_feedback: Option<(Request, std::time::Instant)> = None;
                             let expected_packets = 132300_u64.div_ceil(352);
                             let mut b = [0; 2048];
                             while count < expected_packets {
@@ -772,6 +782,30 @@ fn authenticated_receiver_input(
                                     assert!(pcm.iter().flatten().all(|x| *x == 0));
                                 }
                                 count += 1;
+                                if delayed_feedback
+                                    .as_ref()
+                                    .is_some_and(|(_, due)| std::time::Instant::now() >= *due)
+                                {
+                                    let (poll, _) = delayed_feedback.take().unwrap();
+                                    assert!(
+                                        count - 251
+                                            >= if case == Case::PollDelay40 { 4 } else { 1 },
+                                        "RTP must progress while feedback is withheld"
+                                    );
+                                    send_reply(
+                                        &mut socket,
+                                        &mut keys,
+                                        &poll,
+                                        Some(profile::dict([(
+                                            "streams",
+                                            Value::Array(vec![profile::dict([
+                                                ("streamID", profile::uint(7)),
+                                                ("type", profile::uint(96)),
+                                            ])]),
+                                        )])),
+                                        "",
+                                    );
+                                }
                                 if wav && count == 251 {
                                     let poll = read_message(&mut socket, &mut keys);
                                     assert_eq!(poll.method, "POST");
@@ -780,6 +814,15 @@ fn authenticated_receiver_input(
                                     assert_eq!(poll.headers["session"], "test-session");
                                     assert_eq!(poll.headers["cseq"], seq(next_seq));
                                     next_seq += 1;
+                                    if matches!(case, Case::PollDelay15 | Case::PollDelay40) {
+                                        let delay = if case == Case::PollDelay15 { 15 } else { 40 };
+                                        delayed_feedback = Some((
+                                            poll,
+                                            std::time::Instant::now()
+                                                + Duration::from_millis(delay),
+                                        ));
+                                        continue;
+                                    }
                                     match case {
                                         Case::PollReject => {
                                             socket.write_all(&keys.encrypt(format!("RTSP/1.0 403 private-reason\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n", poll.headers["cseq"]).as_bytes()).unwrap()).unwrap();
@@ -792,9 +835,6 @@ fn authenticated_receiver_input(
                                         }
                                         Case::PollTimeout => {}
                                         _ => {
-                                            if case == Case::PollSlow {
-                                                std::thread::sleep(Duration::from_millis(25));
-                                            }
                                             send_reply(
                                                 &mut socket,
                                                 &mut keys,
@@ -825,10 +865,9 @@ fn authenticated_receiver_input(
                                             | Case::PollTimeout
                                             | Case::PollClose
                                             | Case::PollCancel
-                                            | Case::PollSlow
                                             | Case::PollBadType
                                     ) {
-                                        if matches!(case, Case::PollSlow | Case::PollBadType) {
+                                        if case == Case::PollBadType {
                                             let end = read_message(&mut socket, &mut keys);
                                             assert_eq!(end.method, "TEARDOWN");
                                             send_reply(&mut socket, &mut keys, &end, None, "");
@@ -989,11 +1028,14 @@ fn authenticated_receiver_input(
         Case::PollReject
             | Case::PollTimeout
             | Case::PollClose
-            | Case::PollSlow
             | Case::PollBadType
             | Case::PollCancel
     ) {
-        assert_eq!(session.packets_sent, 251);
+        assert!(
+            (251..=330).contains(&session.packets_sent),
+            "{case:?}: {}",
+            session.packets_sent
+        );
         assert!(output.contains("feedback outcome"), "{case:?}: {output}");
         assert!(output.contains("session cleanup complete"));
         let expected = match case {
@@ -1001,7 +1043,6 @@ fn authenticated_receiver_input(
             Case::PollTimeout => "classification\":\"timed_out",
             Case::PollCancel => "feedback outcome",
             Case::PollClose => "classification\":\"connection_closed",
-            Case::PollSlow => "scheduler_budget_exceeded",
             Case::PollBadType => "classification\":\"invalid_or_error",
             _ => unreachable!(),
         };
@@ -1026,7 +1067,8 @@ fn authenticated_receiver_input(
             "{case:?}: {output}"
         );
     }
-    if playback == Some(true) && case == Case::Good {
+    if playback == Some(true) && matches!(case, Case::Good | Case::PollDelay15 | Case::PollDelay40)
+    {
         for field in [
             "diagnostic policy",
             if wav {
@@ -1045,7 +1087,7 @@ fn authenticated_receiver_input(
             assert!(output.contains(field), "missing {field}: {output}");
         }
     }
-    if wav && case == Case::Good {
+    if wav && matches!(case, Case::Good | Case::PollDelay15 | Case::PollDelay40) {
         for field in [
             "feedback outcome",
             "status\":200",
@@ -1338,10 +1380,24 @@ fn wav_feedback_failures_stop_media_and_release_authenticated_resources() {
         Case::PollReject,
         Case::PollTimeout,
         Case::PollClose,
-        Case::PollSlow,
         Case::PollBadType,
         Case::PollCancel,
     ] {
+        authenticated_receiver_input(
+            case,
+            Some(true),
+            true,
+            -20,
+            HAP_FIXTURE_ID,
+            true,
+            Method::PinDisplay,
+        );
+    }
+}
+
+#[test]
+fn wav_feedback_round_trips_of_15_and_40_ms_do_not_hold_rtp() {
+    for case in [Case::PollDelay15, Case::PollDelay40] {
         authenticated_receiver_input(
             case,
             Some(true),
