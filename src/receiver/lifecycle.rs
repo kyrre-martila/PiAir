@@ -75,6 +75,10 @@ pub enum Stage {
 /// No media socket, queued PCM or reusable playback grant exists.
 pub struct Session {
     state: State,
+    last_accepted: &'static str,
+    attempted: &'static str,
+    final_ptp: Option<ptp::State>,
+    teardown: &'static str,
     control: Option<Wire>,
     timing: Option<ptp::Service>,
     events: Option<Worker>,
@@ -100,6 +104,10 @@ impl Session {
         };
         Self {
             state: State::Authorization,
+            last_accepted: "none",
+            attempted: "none",
+            final_ptp: None,
+            teardown: "not attempted",
             control: None,
             timing: None,
             events: None,
@@ -118,6 +126,17 @@ impl Session {
     }
     pub fn state(&self) -> State {
         self.state
+    }
+    /// Fixed vocabulary only: never includes addresses, tokens, keys or payloads.
+    /// PTP is a snapshot before cleanup, not a continuing lock assertion.
+    pub fn diagnostic(&self) -> String {
+        let ptp = self
+            .timing
+            .as_ref()
+            .map(ptp::Service::state)
+            .or(self.final_ptp);
+        format!("session: {:?}; last accepted: {}; attempted: {}; PTP snapshot: {ptp:?}; receiver clock adoption: unverified; TEARDOWN: {}; audio bytes: 0",
+            self.state(), self.last_accepted, self.attempted, self.teardown)
     }
     fn check(&self) -> Result<()> {
         ensure!(
@@ -181,6 +200,17 @@ impl Session {
         body: &[u8],
     ) -> Result<super::wire::Reply> {
         if method != "TEARDOWN" {
+            self.attempted = match (method, path) {
+                ("GET", _) => "info",
+                ("RECORD", _) => "RECORD",
+                ("SETPEERS", _) => "SETPEERS",
+                ("POST", Some("/command")) => "command registration",
+                ("POST", Some("/audioMode")) => "audioMode",
+                ("SETUP", _) if self.stage.is_some() => "stream SETUP",
+                ("SETUP", _) => "initial SETUP",
+                ("SETRATEANCHORTIME", _) => "paused anchor",
+                _ => "control",
+            };
             self.check()?;
         }
         let mut headers = Vec::new();
@@ -281,6 +311,7 @@ impl Session {
         self.attempted_setup = true;
         let response = Self::plist(&self.call("SETUP", None, &offer)?)?;
         let setup = InitialSetup::parse(&response, peer, self.clock_id)?;
+        self.last_accepted = "initial SETUP";
         self.check()?;
         let wire = self.control.as_mut().context("control absent")?;
         let (events, timing) = resources(wire, setup, self.clock_id)?;
@@ -296,7 +327,9 @@ impl Session {
     }
     fn ack(&mut self, method: &str, path: Option<&str>, body: &[u8]) -> Result<()> {
         let reply = self.call(method, path, body)?;
-        ptp::control::validate_reply(&reply, None)
+        ptp::control::validate_reply(&reply, None)?;
+        self.last_accepted = self.attempted;
+        Ok(())
     }
     fn progress_inner(&mut self, target: Stage) -> Result<()> {
         ensure!(
@@ -328,6 +361,7 @@ impl Session {
         let offer = prepared.setup_offer(connection_id)?;
         let response = Self::plist(&self.call("SETUP", None, &offer)?)?;
         let stream = NegotiatedStream::parse(&response, connection_id)?;
+        self.last_accepted = "stream SETUP";
         self.prepared = Some(prepared);
         self.stream = Some(stream);
         let mode = profile::binary(&mut profile::dict([(
@@ -362,6 +396,7 @@ impl Session {
             "timing lost during anchor request"
         );
         anchor.validate(clock, Instant::now())?;
+        self.last_accepted = "paused anchor";
         self.anchor_accepted = true;
         self.stage = Some(Stage::Anchor);
         Ok(())
@@ -422,6 +457,9 @@ impl Session {
         if !matches!(self.state, State::Closed | State::Failed | State::Stopping) {
             self.state.advance(State::Stopping)?;
         }
+        if let Some(timing) = &self.timing {
+            self.final_ptp = Some(timing.state());
+        }
         // Healthy timing continues during bounded teardown. A cancelled/lost
         // service must not prevent an otherwise authorized cleanup request.
         if self.cancel.load(Ordering::Relaxed)
@@ -437,6 +475,7 @@ impl Session {
         self.anchor_accepted = false;
         let result = (|| {
             if self.attempted_setup {
+                self.teardown = "unacknowledged; remote expiry unconfirmed";
                 self.attempted_setup = false;
                 let wire = self.control.as_mut().context("control absent")?;
                 wire.limit_cleanup();
@@ -447,6 +486,7 @@ impl Session {
                 let body = profile::binary(&mut profile::dict([]))?;
                 let reply = self.call("TEARDOWN", None, &body)?;
                 ptp::control::acknowledgement(&reply.body, None)?;
+                self.teardown = "acknowledged";
             }
             Ok(())
         })();

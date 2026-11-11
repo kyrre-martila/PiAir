@@ -135,9 +135,12 @@ pub fn acknowledgement(body: &[u8], expected: Option<&Value>) -> Result<()> {
     let dict = profile::dictionary(&value)?;
     for (key, value) in dict {
         if key == "status" {
+            let status = value
+                .as_signed_integer()
+                .ok_or_else(|| anyhow::anyhow!("invalid timing control status"))?;
             ensure!(
-                value.as_signed_integer() == Some(0),
-                "timing control rejected"
+                status == 0,
+                "timing control rejected in-band: status={status}"
             );
         } else {
             ensure!(

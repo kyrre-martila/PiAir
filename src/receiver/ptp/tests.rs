@@ -310,7 +310,18 @@ fn control_bplist_precision_acknowledgements_and_anchor_generation() {
     let mut ack = profile::dict([("status", profile::uint(0))]);
     assert!(acknowledgement(&profile::binary(&mut ack).unwrap(), None).is_ok());
     let mut ack = profile::dict([("status", profile::uint(1))]);
-    assert!(acknowledgement(&profile::binary(&mut ack).unwrap(), None).is_err());
+    assert_eq!(
+        acknowledgement(&profile::binary(&mut ack).unwrap(), None)
+            .unwrap_err()
+            .to_string(),
+        "timing control rejected in-band: status=1"
+    );
+    let mut malformed = profile::dict([(
+        "status",
+        plist::Value::String("private receiver text".into()),
+    )]);
+    let error = acknowledgement(&profile::binary(&mut malformed).unwrap(), None).unwrap_err();
+    assert_eq!(error.to_string(), "invalid timing control status");
     assert!(acknowledgement(b"garbage", None).is_err());
     assert!(acknowledgement(&bytes, Some(&v)).is_ok());
     let mut bad = v.clone();
@@ -1320,4 +1331,65 @@ fn ptp_debug_diagnostics_are_bounded_and_payload_free() {
     assert!(output.contains("invalid PTP size"));
     assert!(!output.contains("secret-payload-not-for-logs"));
     assert!(!output.contains("1122334455667788"));
+}
+
+#[test]
+fn inbound_sync_and_different_timeline_follow_up_never_refresh_liveness() {
+    let now = Instant::now();
+    let mut clock = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(5)).unwrap();
+    peer(&mut clock, now, 1);
+    let generation = clock.generation();
+    let mut sync = request(Kind::Sync, 0x1234);
+    sync.flags = 0x0608;
+    sync.interval = -3;
+    let sync = sync.encode().unwrap();
+    // A receiver can emit its own two-step Sync while we remain fixed GM.
+    assert!(clock
+        .receive(&sync, now + Duration::from_secs(1))
+        .unwrap_err()
+        .to_string()
+        .contains("unsupported message for fixed grandmaster"));
+    let mut follow = request(Kind::FollowUp, 0x1234);
+    follow.flags = 0x0408;
+    follow
+        .body
+        .extend_from_slice(&[0, 3, 0, 28, 0, 0x80, 0xc2, 0, 0, 1]);
+    follow.body.extend_from_slice(&[0; 22]);
+    follow
+        .body
+        .extend_from_slice(&[0, 3, 0, 16, 0, 0x0d, 0x93, 0, 0, 4]);
+    follow
+        .body
+        .extend_from_slice(&0x1122334455667788u64.to_be_bytes());
+    follow.body.extend_from_slice(&[0; 2]);
+    let mut bytes = follow.encode().unwrap();
+    // Hypothesis fixture, NOT a Stua capture: TLV names our timeline while
+    // sourcePortIdentity names the receiver. This is not authenticated adoption.
+    bytes[86..94].copy_from_slice(&42u64.to_be_bytes());
+    for _ in 0..2 {
+        assert!(clock
+            .receive_general(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting Apple clock TLV"));
+    }
+    assert!(clock.receive_general(&bytes[..95]).is_err());
+    assert!(clock
+        .receive(
+            &request(Kind::DelayReq, 1).encode().unwrap(),
+            now + Duration::from_secs(2)
+        )
+        .is_err());
+    let mut wrong = request(Kind::DelayReq, 2);
+    wrong.source[..8].copy_from_slice(&43u64.to_be_bytes());
+    assert!(clock
+        .receive(&wrong.encode().unwrap(), now + Duration::from_secs(2))
+        .is_err());
+    assert_eq!(clock.generation(), generation);
+    assert_eq!(clock.state(), State::PeerObserved);
+    assert!(!clock.media_permitted());
+    assert!(clock
+        .check(now + Duration::from_millis(3001), false)
+        .is_err());
+    assert_eq!(clock.state(), State::Lost);
 }

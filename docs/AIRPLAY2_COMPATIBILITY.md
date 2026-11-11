@@ -1,3 +1,11 @@
+# Post-PR #49 clock adoption investigation
+
+See [the focused investigation](CLOCK_ADOPTION_INVESTIGATION.md) for the pinned
+reference comparison, identity/role uncertainties, diagnostic changes and safe
+Stua-only staged verification. Receiver adoption remains unverified. In the
+historical ledger below, “source clock” describes the reference builders; the
+universal semantics of receiver-generated Apple subtype4 remain unknown.
+
 # Single-receiver protocol progression (PR #43)
 
 Base: main `28e5806` (PR #42 merged). PRs #39–42 supplied capability planning,
