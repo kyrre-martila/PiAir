@@ -100,10 +100,15 @@ impl Packet {
             Kind::DelayResp => 3,
             _ => 5,
         };
+        // controlField is legacy; Stua HomePod uses zero for Delay_Req.
+        // Keep this exception message-specific and encode IEEE values.
         ensure!(
             b[32] == expected_control
                 || (b[32] == 0
-                    && matches!(p.kind, Kind::FollowUp | Kind::DelayResp | Kind::Announce)),
+                    && matches!(
+                        p.kind,
+                        Kind::DelayReq | Kind::FollowUp | Kind::DelayResp | Kind::Announce
+                    )),
             "invalid PTP control field"
         );
         p.validate()?;

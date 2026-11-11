@@ -1108,3 +1108,216 @@ fn connected_udp_rejects_unsolicited_source_and_authenticated_clock_mismatch() {
     assert!(service.clock.last_peer.is_some());
     assert!(!service.clock.media_permitted());
 }
+
+// Reconstructed from reported Stua firmware 27.2 header fields, not a capture.
+// Identity and remaining valid fields are synthetic; never encode this fixture.
+fn stua_delay_req(sequence: u16) -> [u8; 44] {
+    let mut bytes = [
+        0x11, 2, 0, 44, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x22, 0x33, 0x44,
+        0x55, 0x66, 0x77, 0x88, 0x80, 5, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    bytes[30..32].copy_from_slice(&sequence.to_be_bytes());
+    bytes
+}
+
+#[test]
+fn stua_zero_control_delay_req_raw_regression() {
+    for sequence in 1..=9 {
+        let bytes = stua_delay_req(sequence);
+        let decoded = Packet::decode(&bytes).unwrap();
+        assert_eq!(decoded.kind, Kind::DelayReq);
+        assert_eq!(decoded.sequence, sequence);
+        let mut standard = bytes;
+        standard[32] = 1;
+        assert_eq!(Packet::decode(&standard).unwrap(), decoded);
+        // Encoding continues to use the IEEE legacy value.
+        assert_eq!(decoded.encode().unwrap()[32], 1);
+    }
+}
+
+#[test]
+fn control_field_compatibility_is_message_specific() {
+    for kind in [
+        Kind::Sync,
+        Kind::DelayReq,
+        Kind::PdelayReq,
+        Kind::PdelayResp,
+        Kind::FollowUp,
+        Kind::DelayResp,
+        Kind::PdelayFollowUp,
+        Kind::Announce,
+        Kind::Signaling,
+    ] {
+        let packet = Packet::new(
+            kind,
+            42,
+            7,
+            vec![
+                0;
+                match kind {
+                    Kind::Sync | Kind::DelayReq | Kind::FollowUp | Kind::Signaling => 10,
+                    Kind::Announce => 30,
+                    _ => 20,
+                }
+            ],
+        );
+        let mut bytes = packet.encode().unwrap();
+        let standard = bytes[32];
+        for control in 0..=255 {
+            bytes[32] = control;
+            let allowed = control == standard
+                || (control == 0
+                    && matches!(
+                        kind,
+                        Kind::DelayReq | Kind::FollowUp | Kind::DelayResp | Kind::Announce
+                    ));
+            assert_eq!(
+                Packet::decode(&bytes).is_ok(),
+                allowed,
+                "{kind:?} {control}"
+            );
+        }
+    }
+}
+
+#[test]
+fn stua_delay_exchange_preserves_validation_and_timestamp() {
+    let now = Instant::now();
+    let mut clock = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+    for sequence in 1..=9 {
+        let received = now + Duration::from_nanos(u64::from(sequence) * 123_456_789);
+        let bytes = stua_delay_req(sequence);
+        // Invalid requests must neither consume the sequence nor pin an identity.
+        for (index, value) in [
+            (0, 0x21),
+            (1, 1),
+            (3, 45),
+            (4, 1),
+            (6, 2),
+            (15, 1),
+            (20, 0x12),
+            (29, 6),
+            (32, 2),
+            (40, 255),
+        ] {
+            let mut bad = bytes;
+            bad[index] = value;
+            // First request has no pinned port yet; a zero port is always invalid.
+            if index == 29 && sequence == 1 {
+                bad[28] = 0;
+                bad[29] = 0;
+            }
+            assert!(clock.receive(&bad, received).is_err(), "index {index}");
+        }
+        let response = clock.receive(&bytes, received).unwrap().remove(0);
+        assert_eq!(response.kind, Kind::DelayResp);
+        assert_eq!(response.sequence, sequence);
+        assert_eq!(
+            response.source,
+            Packet::new(Kind::Sync, 42, 0, vec![0; 10]).source
+        );
+        assert_eq!(response.body[10..], bytes[20..30]);
+        assert_eq!(
+            response.timestamp().unwrap(),
+            ts(i128::from(sequence) * 123_456_789)
+        );
+        assert_eq!(response.correction, 0);
+        assert_eq!(response.flags, 0x0400);
+        assert_eq!(
+            Packet::decode(&response.encode().unwrap()).unwrap(),
+            response
+        );
+        assert_eq!(clock.state(), State::PeerObserved);
+        assert!(!clock.media_permitted());
+        assert!(clock.receive(&bytes, received).is_err());
+        let mut standard = bytes;
+        standard[32] = 1;
+        assert!(clock.receive(&standard, received).is_err()); // same replay slot
+    }
+}
+
+#[test]
+fn stua_delay_req_service_routes_response_to_general_channel() {
+    let fixture = authorized_ptp_fixture();
+    let (event, peer_event) = udp_pair();
+    let (general, peer_general) = udp_pair();
+    let mut service = Service::attach(
+        fixture_clock(),
+        event,
+        general,
+        fixture.wire.ptp_lease().unwrap(),
+    )
+    .unwrap();
+    let cancel = AtomicBool::new(false);
+    service.poll(&cancel).unwrap();
+    let mut buffer = [0; 513];
+    let n = peer_event.recv(&mut buffer).unwrap();
+    assert_eq!(Packet::decode(&buffer[..n]).unwrap().kind, Kind::Sync);
+    for expected in [Kind::Announce, Kind::FollowUp] {
+        let n = peer_general.recv(&mut buffer).unwrap();
+        assert_eq!(Packet::decode(&buffer[..n]).unwrap().kind, expected);
+    }
+    // Keep scheduled traffic out of this routing assertion.
+    service.clock.next_sync = Instant::now() + Duration::from_secs(2);
+    service.clock.next_announce = service.clock.next_sync;
+    peer_general.send(&stua_delay_req(1)).unwrap();
+    service.poll(&cancel).unwrap();
+    assert_eq!(service.state(), State::Synchronizing);
+    no_datagram(&peer_event);
+    no_datagram(&peer_general);
+    peer_general.set_nonblocking(false).unwrap();
+    for sequence in 1..=9 {
+        peer_event.send(&stua_delay_req(sequence)).unwrap();
+        let before = service.clock.timestamp(Instant::now()).unwrap();
+        service.poll(&cancel).unwrap();
+        let after = service.clock.timestamp(Instant::now()).unwrap();
+        let n = peer_general.recv(&mut buffer).unwrap();
+        let response = Packet::decode(&buffer[..n]).unwrap();
+        assert_eq!(response.kind, Kind::DelayResp);
+        assert_eq!(response.sequence, sequence);
+        assert_eq!(response.body[10..], stua_delay_req(sequence)[20..30]);
+        assert!((before.ns()..=after.ns()).contains(&response.timestamp().unwrap().ns()));
+        assert_eq!(service.state(), State::PeerObserved);
+        assert!(!service.clock.media_permitted());
+        no_datagram(&peer_event);
+    }
+    assert_eq!(service.diagnostics.exchanges, Diagnostics::LIMIT);
+    // One wrong-channel request was rejected.
+    assert_eq!(service.diagnostics.rejected, 1);
+    // Authorization still wins over a valid queued zero-control request.
+    peer_event.send(&stua_delay_req(10)).unwrap();
+    fixture.revoke();
+    assert!(service.poll(&cancel).is_err());
+    assert_eq!(service.state(), State::Shutdown);
+    no_datagram(&peer_general);
+}
+
+#[test]
+fn ptp_debug_diagnostics_are_bounded_and_payload_free() {
+    use crate::receiver::diagnostics::tests::capture;
+    let emit = || {
+        let mut diagnostics = Diagnostics::default();
+        let bytes = b"secret-payload-not-for-logs";
+        let reason = Packet::decode(bytes).unwrap_err();
+        for sequence in 0..1000 {
+            diagnostics.reject("event", bytes, &reason);
+            diagnostics.reject("general", &[], &reason);
+            diagnostics.exchange(sequence);
+        }
+        assert_eq!(diagnostics.rejected, Diagnostics::LIMIT);
+        assert_eq!(diagnostics.exchanges, Diagnostics::LIMIT);
+    };
+    assert!(capture(tracing::Level::INFO, emit).is_empty());
+    let output = capture(tracing::Level::DEBUG, emit);
+    assert_eq!(output.lines().count(), 16);
+    assert_eq!(output.matches("rejected PTP datagram").count(), 8);
+    assert_eq!(
+        output
+            .matches("accepted Delay_Req; sent Delay_Resp")
+            .count(),
+        8
+    );
+    assert!(output.contains("invalid PTP size"));
+    assert!(!output.contains("secret-payload-not-for-logs"));
+    assert!(!output.contains("1122334455667788"));
+}
