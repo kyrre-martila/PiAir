@@ -9,8 +9,10 @@ use plist::Value;
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError},
         Arc,
     },
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -377,39 +379,41 @@ impl Session {
             .context("control absent")?
             .request(method, &uri, &headers, body)
             .with_context(|| format!("RTSP method={method}"))?;
-        (|| {
-            if let Some(raw) = response.headers.get("session") {
-                let mut parts = raw.split(';');
-                let token = parts.next().unwrap_or("");
+        Self::validate_session_header(&mut self.session_header, response)
+            .with_context(|| format!("RTSP method={method} status=200 response validation failed"))
+    }
+    fn validate_session_header(
+        session_header: &mut Option<String>,
+        response: Reply,
+    ) -> Result<Reply> {
+        if let Some(raw) = response.headers.get("session") {
+            let mut parts = raw.split(';');
+            let token = parts.next().unwrap_or("");
+            ensure!(
+                !token.is_empty()
+                    && token.len() <= 128
+                    && token
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
+                "invalid receiver session identifier"
+            );
+            for parameter in parts {
+                let n = parameter
+                    .trim()
+                    .strip_prefix("timeout=")
+                    .context("unsupported Session parameter")?;
                 ensure!(
-                    !token.is_empty()
-                        && token.len() <= 128
-                        && token
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
-                    "invalid receiver session identifier"
+                    n.parse::<u32>().is_ok_and(|n| (1..=3600).contains(&n)),
+                    "invalid Session timeout"
                 );
-                for parameter in parts {
-                    let n = parameter
-                        .trim()
-                        .strip_prefix("timeout=")
-                        .context("unsupported Session parameter")?;
-                    ensure!(
-                        n.parse::<u32>().is_ok_and(|n| (1..=3600).contains(&n)),
-                        "invalid Session timeout"
-                    );
-                }
-                ensure!(
-                    self.session_header
-                        .as_deref()
-                        .is_none_or(|old| old == token),
-                    "receiver session identifier changed"
-                );
-                self.session_header = Some(token.to_owned());
             }
-            Ok(response)
-        })()
-        .with_context(|| format!("RTSP method={method} status=200 response validation failed"))
+            ensure!(
+                session_header.as_deref().is_none_or(|old| old == token),
+                "receiver session identifier changed"
+            );
+            *session_header = Some(token.to_owned());
+        }
+        Ok(response)
     }
     fn plist_response(reply: &Reply) -> Result<Value> {
         ensure!(
@@ -680,10 +684,33 @@ impl Session {
         }
         Ok(())
     }
-    fn feedback(&mut self) -> Result<()> {
-        let reply = self.call("POST", Some("/feedback"), &[], &[])?;
+    fn feedback_result(
+        result: Result<Reply>,
+        stream_id: Option<u32>,
+        started: Instant,
+    ) -> Result<()> {
+        let status = match &result {
+            Ok(_) => Some(200),
+            Err(error) => match error.downcast_ref::<super::wire::ResponseFailure>() {
+                Some(super::wire::ResponseFailure::Rejected(status)) => Some(*status),
+                _ => None,
+            },
+        };
+        let result = result.and_then(|reply| Self::validate_feedback(stream_id, &reply));
+        let classification = match &result {
+            Ok(()) => "accepted",
+            Err(error) => error
+                .downcast_ref::<super::wire::ResponseFailure>()
+                .map_or("invalid_or_error", super::wire::ResponseFailure::outcome),
+        };
+        tracing::debug!(target: "piair::rtsp", phase = "feedback", status,
+            classification, elapsed_us = started.elapsed().as_micros() as u64,
+            "feedback outcome; receiver acceptance of audio unverified");
+        result
+    }
+    fn validate_feedback(stream_id: Option<u32>, reply: &Reply) -> Result<()> {
         if !reply.body.is_empty() {
-            let value = Self::plist_response(&reply)?;
+            let value = Self::plist_response(reply)?;
             let d = profile::dictionary(&value)?;
             let streams = d
                 .get("streams")
@@ -694,7 +721,7 @@ impl Session {
                 let d = profile::dictionary(stream)?;
                 if d.contains_key("streamID") {
                     ensure!(
-                        self.stream_id.map(u64::from) == Some(profile::integer(d, "streamID")?),
+                        stream_id.map(u64::from) == Some(profile::integer(d, "streamID")?),
                         "feedback stream identifier changed"
                     );
                 }
@@ -718,7 +745,8 @@ impl Session {
     }
     fn transmit_input(&mut self, seconds: u32, wav: Option<&[[i16; 2]]>) -> Result<()> {
         let attempted = Instant::now();
-        let result = (|| {
+        let mut feedback_worker = None;
+        let mut result = (|| {
             ensure!(
                 wav.is_none() || (self.stream_check && self.playback_check),
                 "WAV requires an authenticated realtime playback diagnostic"
@@ -736,6 +764,14 @@ impl Session {
                 "test duration must be 1..3 seconds"
             );
             let clock = self.clock.as_ref().context("session clock absent")?.clone();
+            if !self.playback_check || wav.is_some() {
+                feedback_worker = Some(FeedbackWorker::start(
+                    self.control.take().context("control absent")?,
+                    self.session_header.clone(),
+                    self.stream_id,
+                    self.cancel.clone(),
+                )?);
+            }
             let start = Instant::now();
             let mut sent = 0u64;
             ensure!(
@@ -749,26 +785,31 @@ impl Session {
             // reduces to next RTP timestamp minus our sender buffer.
             let total = signal + u64::from(realtime::PLAYBACK_LEAD_SAMPLES);
             let mut sync_at = 0;
-            let mut feedback_at = Instant::now() + Duration::from_secs(2);
+            let mut feedback_at = start + Duration::from_secs(2);
             let mut retry_budget = 1024;
             let mut sync_packets = 0_u64;
             let mut max_lateness_us = 0_u64;
             tracing::debug!(target: "piair::rtsp", phase = "playback policy",
-                feedback_polling = !self.playback_check,
+                feedback_polling = !self.playback_check || wav.is_some(),
                 retransmissions_allowed = !self.playback_check,
                 signal_frames = signal, total_frames = total,
                 expected_packets = total.div_ceil(profile::SPF as u64),
                 "diagnostic policy; UDP sends do not establish receiver acceptance");
             while sent < total {
                 self.workers()?;
+                if let Some(worker) = &mut feedback_worker {
+                    worker.check()?;
+                }
                 let deadline = start + realtime::sample_time(sent);
                 ensure!(
                     Instant::now().saturating_duration_since(deadline) < Duration::from_millis(100),
                     "audio scheduler stalled; no uncontrolled catch-up"
                 );
-                if !self.playback_check && Instant::now() >= feedback_at {
-                    self.feedback()?;
-                    feedback_at += Duration::from_secs(2);
+                if let Some(worker) = &mut feedback_worker {
+                    if Instant::now() >= feedback_at {
+                        worker.request()?;
+                        feedback_at += Duration::from_secs(2);
+                    }
                 }
                 if let Some((first, count)) = self.media.as_ref().unwrap().retransmit()? {
                     tracing::debug!(target: "piair::rtsp", phase = "receiver control",
@@ -869,12 +910,33 @@ impl Session {
             let drained = start + realtime::sample_time(total);
             while let Some(remaining) = drained.checked_duration_since(Instant::now()) {
                 self.workers()?;
+                if let Some(worker) = &mut feedback_worker {
+                    worker.check()?;
+                    if Instant::now() >= feedback_at {
+                        worker.request()?;
+                        feedback_at += Duration::from_secs(2);
+                    }
+                }
                 std::thread::park_timeout(remaining.min(Duration::from_millis(5)));
             }
             self.timing_exchanges = self.media.as_ref().unwrap().timing.count();
             self.workers()?;
             Ok(())
         })();
+        // Reclaim the same connection before finish/TEARDOWN. Joining can wait
+        // only after the RTP loop has stopped, and surfaces even a late error.
+        if let Some(worker) = feedback_worker {
+            let (control, session_header, feedback) = worker.reclaim();
+            self.control = control;
+            self.session_header = session_header;
+            result = match (result, feedback) {
+                (Ok(()), feedback) => feedback,
+                (Err(error), Ok(())) => Err(error),
+                (Err(error), Err(feedback)) => {
+                    Err(error.context(format!("feedback also failed: {feedback:#}")))
+                }
+            };
+        }
         tracing::info!(target: "piair::rtsp", phase = "playback", rtp_packets = self.packets_sent,
             ntp_replies = self.media.as_ref().map_or(0, |m| m.timing.count()),
             elapsed_ms = attempted.elapsed().as_millis() as u64, success = result.is_ok(),
@@ -1008,5 +1070,234 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+// While RTP runs with feedback enabled, this worker is the sole owner of Wire, its CSeq and
+// directional cipher counters. The scheduler only uses bounded channels.
+struct FeedbackWorker {
+    commands: Option<SyncSender<()>>,
+    outcomes: Receiver<Result<()>>,
+    thread: Option<JoinHandle<(Wire, Option<String>)>>,
+    pending: bool,
+}
+impl FeedbackWorker {
+    fn start(
+        mut wire: Wire,
+        mut session_header: Option<String>,
+        stream_id: Option<u32>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        let (commands, requests) = mpsc::sync_channel(1);
+        let (outcomes, responses) = mpsc::sync_channel(1);
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+        let thread = thread::Builder::new()
+            .name("piair-feedback".into())
+            .spawn(move || {
+                tracing::dispatcher::with_default(&dispatcher, || {
+                    wire.feedback_budget = Some(Duration::from_millis(500));
+                    let previous_cancel = wire.diagnostic_cancel.replace(cancel.clone());
+                    while requests.recv().is_ok() {
+                        let started = Instant::now();
+                        let result = (|| {
+                            ensure!(!cancel.load(Ordering::Relaxed), "diagnostic interrupted");
+                            let headers: Vec<_> = session_header
+                                .iter()
+                                .map(|token| ("Session", token.clone()))
+                                .collect();
+                            let reply = wire
+                                .request("POST", "/feedback", &headers, &[])
+                                .context("RTSP method=POST")?;
+                            Session::validate_session_header(&mut session_header, reply)
+                        })();
+                        let result = Session::feedback_result(result, stream_id, started);
+                        let failed = result.is_err();
+                        if outcomes.send(result).is_err() || failed {
+                            break;
+                        }
+                    }
+                    wire.feedback_budget = None;
+                    wire.diagnostic_cancel = previous_cancel;
+                    (wire, session_header)
+                })
+            })
+            .context("start feedback worker")?;
+        Ok(Self {
+            commands: Some(commands),
+            outcomes: responses,
+            thread: Some(thread),
+            pending: false,
+        })
+    }
+    fn check(&mut self) -> Result<()> {
+        if !self.pending {
+            ensure!(
+                !self
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| thread.is_finished()),
+                "feedback worker stopped unexpectedly"
+            );
+        }
+        if self.pending {
+            match self.outcomes.try_recv() {
+                Ok(result) => {
+                    self.pending = false;
+                    result?;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    bail!("feedback worker stopped without an outcome")
+                }
+            }
+        }
+        Ok(())
+    }
+    fn request(&mut self) -> Result<()> {
+        self.check()?;
+        ensure!(!self.pending, "previous feedback request still pending");
+        self.commands
+            .as_ref()
+            .context("feedback worker stopped")?
+            .try_send(())
+            .context("submit feedback request")?;
+        self.pending = true;
+        Ok(())
+    }
+    fn reclaim(mut self) -> (Option<Wire>, Option<String>, Result<()>) {
+        self.join()
+    }
+    fn join(&mut self) -> (Option<Wire>, Option<String>, Result<()>) {
+        self.commands.take(); // No queued future polls or concurrent TEARDOWN.
+        match self.thread.take().map(JoinHandle::join) {
+            Some(Ok((wire, session_header))) => (Some(wire), session_header, self.check()),
+            Some(Err(_)) => (None, None, Err(anyhow::anyhow!("feedback worker panicked"))),
+            None => (None, None, Ok(())),
+        }
+    }
+}
+impl Drop for FeedbackWorker {
+    fn drop(&mut self) {
+        // Also join on unwinding; never detach a thread that owns control keys.
+        let _ = self.join();
+    }
+}
+
+#[cfg(test)]
+mod feedback_tests {
+    use super::*;
+    fn mock_wire() -> (Wire, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let peer = listener.accept().unwrap().0;
+        (Wire::mock(socket, Duration::from_millis(500), "test"), peer)
+    }
+    #[test]
+    fn pending_feedback_is_nonblocking_bounded_and_late_errors_are_not_lost() {
+        for failed in [false, true] {
+            let (wire, _peer) = mock_wire();
+            let (commands, requests) = mpsc::sync_channel(1);
+            let (outcomes, responses) = mpsc::sync_channel(1);
+            let (started, ready) = mpsc::sync_channel(0);
+            let (release, gate) = mpsc::sync_channel(1);
+            let thread = thread::spawn(move || {
+                requests.recv().unwrap();
+                started.send(()).unwrap();
+                gate.recv_timeout(Duration::from_secs(1)).unwrap();
+                outcomes
+                    .send(if failed {
+                        Err(anyhow::anyhow!("late invalid feedback"))
+                    } else {
+                        Ok(())
+                    })
+                    .unwrap();
+                // Reclaim must close the command channel; no second request queues.
+                assert!(matches!(
+                    requests.recv_timeout(Duration::from_secs(1)),
+                    Err(mpsc::RecvTimeoutError::Disconnected)
+                ));
+                (wire, Some("pinned-session".into()))
+            });
+            let mut worker = FeedbackWorker {
+                commands: Some(commands),
+                outcomes: responses,
+                thread: Some(thread),
+                pending: false,
+            };
+            worker.request().unwrap();
+            ready.recv_timeout(Duration::from_secs(1)).unwrap();
+            for _ in 0..100 {
+                worker.check().unwrap();
+            }
+            assert!(worker.pending);
+            assert!(worker.request().is_err());
+            release.send(()).unwrap();
+            // Simulate RTP ending before the pending response is observed.
+            let (wire, session, result) = worker.reclaim();
+            assert!(wire.is_some());
+            assert_eq!(session.as_deref(), Some("pinned-session"));
+            assert_eq!(result.is_err(), failed);
+            if let Err(error) = result {
+                assert!(error.to_string().contains("late invalid feedback"));
+            }
+        }
+    }
+    #[test]
+    fn idle_worker_drop_joins_and_worker_panics_propagate() {
+        let (wire, _peer) = mock_wire();
+        let (commands, requests) = mpsc::sync_channel(1);
+        let (_outcomes, responses) = mpsc::sync_channel(1);
+        let joined = Arc::new(AtomicBool::new(false));
+        let done = joined.clone();
+        let thread = thread::spawn(move || {
+            assert!(requests.recv().is_err());
+            done.store(true, Ordering::Relaxed);
+            (wire, None)
+        });
+        drop(FeedbackWorker {
+            commands: Some(commands),
+            outcomes: responses,
+            thread: Some(thread),
+            pending: false,
+        });
+        assert!(joined.load(Ordering::Relaxed));
+
+        let (commands, _requests) = mpsc::sync_channel(1);
+        let (_outcomes, responses) = mpsc::sync_channel(1);
+        let worker = FeedbackWorker {
+            commands: Some(commands),
+            outcomes: responses,
+            thread: Some(thread::spawn(|| panic!("test feedback worker panic"))),
+            pending: true,
+        };
+        let (wire, _, result) = worker.reclaim();
+        assert!(wire.is_none());
+        assert!(result.unwrap_err().to_string().contains("worker panicked"));
+    }
+    #[test]
+    fn feedback_validation_preserves_stream_identity_and_type() {
+        for (id, kind, accepted) in [(7, 96, true), (8, 96, false), (7, 103, false)] {
+            let value = profile::dict([(
+                "streams",
+                Value::Array(vec![profile::dict([
+                    ("streamID", profile::uint(id)),
+                    ("type", profile::uint(kind)),
+                ])]),
+            )]);
+            let mut body = Vec::new();
+            value.to_writer_binary(&mut body).unwrap();
+            let reply = Reply {
+                body: body.into(),
+                headers: [(
+                    "content-type".into(),
+                    "application/x-apple-binary-plist".into(),
+                )]
+                .into(),
+            };
+            assert_eq!(
+                Session::validate_feedback(Some(7), &reply).is_ok(),
+                accepted
+            );
+        }
     }
 }
