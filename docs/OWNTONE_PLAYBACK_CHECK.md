@@ -1,6 +1,7 @@
-# Approved HomePod stream negotiation and bounded playback diagnostics
+# Receiver stream negotiation and bounded playback diagnostics
 
-Only `device:3ae5c9a302ad` (Even-Olai HomePod) is authorized for these modes.
+These modes use an allowlisted compatible receiver selected by canonical ID or
+the existing interactive picker. See [receiver selection](RECEIVER_DIAGNOSTICS.md).
 No receiver was contacted during development. Do not merge automatically.
 
 ## Evidence and source comparison
@@ -65,10 +66,10 @@ counters remain as documented in [PR #35](OWNTONE_RECORD_CHECK.md).
 
 ## Fixed limits and authorization
 
-Both flags require `--experimental-owntone-transient`, exact receiver ID,
-existing allowlist approval, already selected transient method, current mDNS
+Both flags require `--experimental-owntone-transient`,
+existing allowlist approval, explicitly selected transient method, current mDNS
 identity/capability/endpoint agreement, pinned control peer and interactive
-y/yes confirmation. Neither mode permits chooser selection, another diagnostic,
+y/yes confirmation. Omit the receiver ID to use the existing picker. Neither mode permits another diagnostic,
 `--seconds`, `--volume-db`, setup profile or setup timeout override. Unsupported
 selected capabilities fail before control contact; encrypted capabilities are
 validated before SETUP. No pairing, enrollment, credential deletion, receiver
@@ -104,75 +105,12 @@ atomic replacement, malformed TOML or read failure is evaluated immediately;
 there is no mtime/TTL cache. Selection is still reloaded and compared every time.
 Failed checks remain errors. Deterministic replacement/revocation tests cover it.
 
-## Two separate human-authorized Raspberry Pi procedures
+## Receiver selection and operator usage
 
-These commands are **for the human operator only**. Codex must not run them.
-Each procedure requires its own explicit authorization for one attempt against
-Even-Olai `device:3ae5c9a302ad`, previously observed at 192.168.1.33:7000,
-AudioAccessory5,1 / firmware 27.2. Stop on changed metadata or endpoints and
-obtain review. Do not change selection or approval as part of this procedure.
-Do not test other receivers or alter running production services.
-
-Common preparation in a separate checkout (do not install over deployed binary):
-
-```sh
-git clone --branch feat/owntone-playback-check --single-branch \
-  https://github.com/kyrre-martila/PiAir.git PiAir-pr36
-cd PiAir-pr36
-git rev-parse HEAD # compare with reviewed PR head
-cargo build --release --locked
-CONFIG=/absolute/path/to/existing/piair.toml
-./target/release/piair --config "$CONFIG" config check
-./target/release/piair --config "$CONFIG" receivers
-umask 077
-```
-
-Use the existing configuration and adjacent receiver-state directory. Never copy
-secrets, pair/unpair or replace credentials. Review exact current selected ID,
-transient method, approval and discovery pins. Passive discovery proves no
-playback. The existing public sender identity may be initialized locally if
-absent; no receiver enrollment occurs.
-
-### A. Stream SETUP only — independently authorized once
-
-From an interactive terminal, after authorizing this operation only:
-
-```sh
-./target/release/piair --config "$CONFIG" -v stream-test \
-  device:3ae5c9a302ad --stream-setup-check --experimental-owntone-transient \
-  2>piair-pr36-stream-setup.jsonl
-result=$?
-printf 'stream-setup-check exit=%s\n' "$result"
-```
-
-Read the operation/ID before answering yes. Enter/no/EOF cancels before contact.
-Record commit, current metadata, initial SETUP/event/RECORD outcomes, negotiated
-ports, NTP reply count, **0 RTP packets**, absence of volume command, independent
-TEARDOWN outcome and local cleanup. Stop after this one attempt regardless of
-result. Success does not authorize procedure B or establish audible playback.
-
-### B. Playback — separately authorized once
-
-Only after reviewing A and explicitly authorizing **one second tone and a
-potentially persistent −40 dB receiver volume**. Be physically present, ensure
-playback is appropriate, and be ready to use Ctrl+C or the receiver's local
-controls. Do not add duration/volume flags or run retries.
-
-```sh
-./target/release/piair --config "$CONFIG" -v stream-test \
-  device:3ae5c9a302ad --playback-check --experimental-owntone-transient \
-  2>piair-pr36-playback.jsonl
-result=$?
-printf 'playback-check exit=%s\n' "$result"
-```
-
-Confirm the precise displayed volume/persistence warning. Record negotiated
-ports, volume acknowledgement, timing readiness, NTP count, RTP count (376 on
-success), elapsed transmission (~3 seconds), TEARDOWN result, local cleanup and
-exit status. Separately record whether a brief, quiet tone was actually heard,
-its onset/duration and any anomalies. Do not infer audibility from logs. Stop
-after the attempt; no retry, fallback or automated volume restoration. Any
-subsequent receiver volume adjustment needs an independent operator decision.
+See [receiver discovery, selection and diagnostics](RECEIVER_DIAGNOSTICS.md)
+for current commands, canonical ID placeholders, picker behavior and confirmations.
+Use an independently verified allowlisted compatible receiver. No physical
+receiver contact or Raspberry Pi service changes were performed for this change.
 
 ## Validation and remaining uncertainty
 

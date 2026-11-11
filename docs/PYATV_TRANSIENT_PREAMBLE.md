@@ -1,5 +1,10 @@
 # Explicit pyatv transient HTTP framing and M1 ordering experiment
 
+Current receiver discovery, selection and command usage is documented in
+[Receiver diagnostics](RECEIVER_DIAGNOSTICS.md). Receiver-specific observations
+and authorizations below are historical evidence, not current CLI restrictions.
+Examples use placeholders; verify the canonical ID independently.
+
 This is a controlled hardware experiment, not a compatibility fix. No hardware
 success is established here; HomePod support is unverified. The normal transient
 path remains unchanged and the experiment is disabled by default.
@@ -7,7 +12,7 @@ path remains unchanged and the experiment is disabled by default.
 For an allowlisted receiver already explicitly selected with `--method transient`:
 
 ```sh
-piair -v authenticate device:3ae5c9a302ad --experimental-pyatv-transient-preamble
+piair -v authenticate 'device:<canonical-id>' --experimental-pyatv-transient-preamble
 ```
 
 An interactive terminal and exact receiver-ID confirmation are required before

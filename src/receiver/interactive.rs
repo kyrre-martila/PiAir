@@ -492,6 +492,18 @@ mod tests {
         assert!(output.contains("(device:aa1122334455)"));
         assert!(!output.contains("Ready"));
         assert!(require_approval(&loaded, &receivers[0].id).is_err());
+        assert!(choose(&loaded, &receivers, &mut "1\n".as_bytes(), &mut Vec::new()).is_err());
+        let mut loaded = loaded;
+        loaded.config.receiver_allowlist = receivers.iter().map(|r| r.id.clone()).collect();
+        for (input, expected) in [
+            ("1\n", "device:aa1122334455"),
+            ("2\n", "device:bb1122334455"),
+        ] {
+            assert_eq!(
+                choose(&loaded, &receivers, &mut input.as_bytes(), &mut Vec::new()).unwrap(),
+                expected
+            );
+        }
     }
 }
 
@@ -609,6 +621,32 @@ mod persistence_tests {
             )
         }
     }
+    #[test]
+    fn stored_hap_picker_uses_existing_credentials_and_confirmation() {
+        let f = Fixture::new(true);
+        let before = f.files();
+        let proposed = f.propose("1\n1\n", false).unwrap().unwrap();
+        assert_eq!(proposed.selected.id, NEW);
+        assert_eq!(proposed.selected.method, Method::PinDisplay);
+        assert_eq!(f.files(), before);
+        assert!(f.authorize(&proposed, "n\n").is_err());
+        assert_eq!(f.files(), before);
+        f.authorize(&proposed, "yes\n").unwrap();
+        assert!(
+            Store::new(&f.loaded.path)
+                .unwrap()
+                .selection()
+                .unwrap()
+                .unwrap()
+                == proposed.selected
+        );
+        let f = Fixture::new(false);
+        let before = f.files();
+        let proposed = f.propose("1\n1\n", false).unwrap().unwrap();
+        assert!(f.authorize(&proposed, "yes\n").is_err());
+        assert_eq!(f.files(), before);
+    }
+
     #[test]
     fn cancelled_pairing_and_playback_leave_all_persisted_bytes_unchanged() {
         for enrollment in [true, false] {

@@ -102,13 +102,13 @@ fn run_with_discovery(
                 control_check,
             )?;
         }
-        Command::StuaStreamSetupCheck { receiver_id } => {
-            receiver::stua_check(&loaded, &receiver_id, false, -40)?
+        Command::HapStreamSetupCheck { receiver_id } => {
+            receiver::hap_check(&loaded, receiver_id.as_deref(), false, -40)?
         }
-        Command::StuaPlaybackCheck {
+        Command::HapPlaybackCheck {
             receiver_id,
             volume_db,
-        } => receiver::stua_check(&loaded, &receiver_id, true, volume_db)?,
+        } => receiver::hap_check(&loaded, receiver_id.as_deref(), true, volume_db)?,
         Command::Unpair { receiver_id } => receiver::unpair(&loaded, &receiver_id)?,
         Command::Audio { command } => audio::run(command, &loaded)?,
         Command::Status => {

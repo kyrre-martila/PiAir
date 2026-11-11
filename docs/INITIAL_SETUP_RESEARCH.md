@@ -1,5 +1,10 @@
 # Initial realtime audio SETUP investigation (PR #10)
 
+Current receiver discovery, selection and command usage is documented in
+[Receiver diagnostics](RECEIVER_DIAGNOSTICS.md). Receiver-specific observations
+and authorizations below are historical evidence, not current CLI restrictions.
+Examples use placeholders; verify the canonical ID independently.
+
 Historical findings below describe PR #10. See [PR #21 investigation](INITIAL_SETUP_DIAGNOSTICS.md)
 for persistent sender identity, current diagnostics and the initial-SETUP-only hardware check.
 
@@ -103,11 +108,11 @@ claim READY. No hardware success is claimed here.
    idle: stream-test can take over playback and the low test volume can persist.
    Do not run during other playback.
 3. Keep the existing config, allowlist, selection and credentials. Confirm the
-   selected/pinned receiver is `device:02d899c1833f` (Stua Apple TV). If identity,
+   selected/pinned receiver is `device:<canonical-id>` (Stua Apple TV). If identity,
    endpoint or authorization validation fails, stop and review; do not re-pair
    or bypass checks as part of this test.
 4. From an interactive terminal run once:
-   `target/release/piair --config <existing-config.toml> stream-test device:02d899c1833f --seconds 1`.
+   `target/release/piair --config <existing-config.toml> stream-test 'device:<canonical-id>' --seconds 1`.
    Read the volume/takeover prompt and confirm the exact receiver ID only when
    authorized. This sends the existing bounded low-level test signal.
 5. Record only stage/method/status, READY/failure, packet/timing counts, teardown

@@ -1,5 +1,10 @@
 # Clock adoption investigation after PR #49
 
+Current receiver discovery, selection and command usage is documented in
+[Receiver diagnostics](RECEIVER_DIAGNOSTICS.md). Receiver-specific observations
+and authorizations below are historical evidence, not current CLI restrictions.
+Examples use placeholders; verify the canonical ID independently.
+
 Scope: main `83862dd`, reported deployed Stua HomePod firmware 27.2.
 The operator reports authenticated initial SETUP, accepted Delay_Req sequences
 1–8, Delay_Resp transmission, PeerObserved, and encrypted TEARDOWN success.
@@ -97,10 +102,10 @@ change volume, or automatically retry. Read local `--help` first.
 Run each command once, stopping to review its result before proceeding:
 
 ```text
-piair --config <config> buffered-test device:<Stua-id> --setup-check
-piair --config <config> buffered-test device:<Stua-id> --control-check record
-piair --config <config> buffered-test device:<Stua-id> --control-check stream
-piair --config <config> buffered-test device:<Stua-id> --control-check anchor
+piair --config <config> buffered-test 'device:<canonical-id>' --setup-check
+piair --config <config> buffered-test 'device:<canonical-id>' --control-check record
+piair --config <config> buffered-test 'device:<canonical-id>' --control-check stream
+piair --config <config> buffered-test 'device:<canonical-id>' --control-check anchor
 ```
 
 Honor every existing terminal confirmation; all confirmations precede timing.

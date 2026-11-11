@@ -5,7 +5,7 @@ SETUP is not audible playback, stream readiness, persistent pairing, or durable
 receiver identity verification. No physical success is claimed for this change.
 
 Operator-confirmed PR #33 evidence on 2026-11-08: Even-Olai HomePod,
-`device:3ae5c9a302ad`, `192.168.1.33:7000`, AudioAccessory5,1 firmware 27.2:
+`device:<canonical-id>`, `192.168.1.33:7000`, AudioAccessory5,1 firmware 27.2:
 transient SRP M1–M4, encrypted GET /info and initial NTP SETUP RTSP 200
 succeeded, including plist/timing-profile/port validation. Encrypted TEARDOWN
 CSeq 6 timed out after about three seconds with zero response bytes. No RECORD
@@ -18,13 +18,14 @@ observations and unresolved hypotheses.
 The exact opt-in is:
 
 ```sh
-piair stream-test device:3ae5c9a302ad --setup-check --experimental-owntone-transient
+piair stream-test 'device:<canonical-id>' --setup-check --experimental-owntone-transient
 ```
 
-An exact ID and an already explicitly selected transient method are required.
-Unsupported capability/policy states, persistent selection, playback mode and
-any `--setup-profile a|b|c` combination fail without fallback. The chooser never
-selects this profile, and names/models never choose authentication. Without the
+An explicitly chosen transient method is required. Supply the persisted canonical
+ID or omit it to use the existing interactive picker. Unsupported capability/policy
+states, persistent selection, playback mode and any `--setup-profile a|b|c`
+combination fail without fallback. The picker never infers authentication from
+names/models. See [receiver selection](RECEIVER_DIAGNOSTICS.md). Without the
 flag, stream-test retains its legacy transient or persistent path. The separate
 pyatv experiment remains authenticate-only. The existing optional
 `--setup-timeout-seconds 15` remains explicitly scoped to initial SETUP; omit it
@@ -48,61 +49,12 @@ semantics; an omitted `timingProtocol` or `timingPort` is permitted. PTP fails.
 No event connection, RECORD, stream SETUP, audio packets or volume changes occur.
 No persistent enrollment, credential replacement or service changes occur.
 
-## One authorized Raspberry Pi attempt
+## Receiver selection and operator usage
 
-The already approved test target is **only** the independently verified HomePod
-above. Run the single operator attempt below without retries. Do not contact
-Stua Apple TV or any other receiver. Keep production OwnTone/autostream, systemd units and deployed
-binaries unchanged. Build in a separate checkout; never install over a service
-executable:
-
-```sh
-git clone --branch feat/owntone-setup-early-ntp --single-branch \
-  https://github.com/kyrre-martila/PiAir.git PiAir-pr34
-cd PiAir-pr34
-git rev-parse HEAD  # compare with the reviewed PR head
-cargo build --release --locked
-CONFIG=/absolute/path/to/existing/piair.toml
-./target/release/piair --config "$CONFIG" config check
-./target/release/piair --config "$CONFIG" receivers
-```
-
-Set CONFIG to your actual **existing** absolute configuration path. Keep its
-adjacent receiver-state directory in place; do not copy secrets, pair, unpair,
-replace credentials or create a fresh configuration for this test. Check that
-the existing allowlist authorizes only the intended HomePod for this attempt.
-Passive discovery may display other receivers; it never contacts their RTSP
-endpoints. Independently confirm ID, endpoint and transient policy; stop on a
-change instead of bypassing the pin checks.
-
-Retain the existing HomePod transient selection if correct. If it is absent or
-different, change it only with explicit operator authorization after reviewing
-the current discovery evidence:
-
-```sh
-./target/release/piair --config "$CONFIG" select device:3ae5c9a302ad --method transient
-```
-
-Selection is local and pins the discovered endpoint. It does not connect or
-replace pairing credentials. If it cannot select transient, stop. Do not choose
-another profile. In an interactive terminal, run **once**:
-
-```sh
-umask 077
-./target/release/piair --config "$CONFIG" -v \
-  stream-test device:3ae5c9a302ad --setup-check --experimental-owntone-transient \
-  2>piair-pr34-setup.jsonl
-result=$?
-printf 'setup-check exit=%s\n' "$result"
-```
-
-Review the displayed full ID, profile and operation before explicitly answering
-`y`/`yes`. No/Enter/EOF cancels before contact; Ctrl+C interrupts. Current
-allowlist, selection, identity, capabilities and endpoints are revalidated before
-contact and authorization is rechecked during the exchange. The existing public
-sender identity may be initialized; transient secrets are never saved as receiver
-credentials. The default operation deadline and bounded socket waits remain;
-a silent initial SETUP normally fails after the existing 3-second read cap.
+See [receiver discovery, selection and diagnostics](RECEIVER_DIAGNOSTICS.md)
+for current commands, canonical ID placeholders, picker behavior and confirmations.
+Use an independently verified allowlisted compatible receiver. No physical
+receiver contact or Raspberry Pi service changes were performed for this change.
 
 ## Report phases and cleanup separately
 

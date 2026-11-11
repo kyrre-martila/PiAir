@@ -313,8 +313,10 @@ fn owntone_experiment_is_authentication_or_explicit_setup_only_and_mutually_excl
     let allowed = run(&["stream-test", "device:aabbccddeeff", "--setup-check", flag]);
     assert_eq!(allowed.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&allowed.stderr).contains("not approved"));
+    let picker = run(&["stream-test", "--setup-check", flag]);
+    assert_eq!(picker.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&picker.stderr).contains("interactive terminal"));
     for extra in [
-        vec![],
         vec!["--setup-profile", "a"],
         vec!["--setup-profile", "b"],
         vec!["--setup-profile", "c"],
@@ -422,7 +424,7 @@ fn pairing_help_identifies_enrollment_prerequisites() {
 }
 
 #[test]
-fn record_diagnostic_rejects_other_receivers_before_discovery_or_terminal() {
+fn record_diagnostic_accepts_allowlisted_id_but_requires_terminal_before_discovery() {
     use std::fs;
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("piair.toml");
@@ -439,12 +441,12 @@ fn record_diagnostic_rejects_other_receivers_before_discovery_or_terminal() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("approved HomePod exact ID"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
     assert!(!dir.path().join("receiver-state").exists());
 }
 
 #[test]
-fn stream_diagnostics_reject_other_ids_without_state_or_contact() {
+fn stream_diagnostics_require_terminal_without_state_or_contact() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("piair.toml");
     std::fs::write(&config, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
@@ -461,26 +463,28 @@ fn stream_diagnostics_reject_other_ids_without_state_or_contact() {
             .output()
             .unwrap();
         assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("exact approved HomePod"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
         assert!(!dir.path().join("receiver-state").exists());
     }
 }
 
 #[test]
-fn stua_diagnostics_require_exact_id_and_explicit_modes_without_contact() {
-    for mode in ["stua-stream-setup-check", "stua-playback-check"] {
-        assert_eq!(run(&[mode]).status.code(), Some(2));
-        for id in [
-            "Stua",
-            "device:3ae5c9a302ad",
-            "device:02D899C1833F",
-            "device:02d899c1833f:7000",
-        ] {
+fn hap_diagnostics_and_legacy_aliases_require_authorization_without_contact() {
+    for mode in [
+        "hap-stream-setup-check",
+        "hap-playback-check",
+        "stua-stream-setup-check",
+        "stua-playback-check",
+    ] {
+        let picker = run(&[mode]);
+        assert_eq!(picker.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&picker.stderr).contains("interactive terminal"));
+        for id in ["Stua", "device:02D899C1833F", "device:02d899c1833f:7000"] {
             let output = run(&[mode, id]);
             assert_eq!(output.status.code(), Some(1));
             assert!(String::from_utf8(output.stderr)
                 .unwrap()
-                .contains("requires device:02d899c1833f"));
+                .contains("exact stable device:"));
         }
         for flag in [
             "--seconds=1",
@@ -496,13 +500,19 @@ fn stua_diagnostics_require_exact_id_and_explicit_modes_without_contact() {
         let output = run(&[mode, "device:02d899c1833f", "--volume-db=-40"]);
         assert_eq!(
             output.status.code(),
-            Some(if mode == "stua-playback-check" { 1 } else { 2 })
+            Some(if mode.ends_with("playback-check") {
+                1
+            } else {
+                2
+            })
         );
-        let output = run(&[mode, "device:02d899c1833f"]);
-        assert_eq!(output.status.code(), Some(1));
-        assert!(String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("not approved"));
+        for id in ["device:112233445566", "device:66778899aabb"] {
+            let output = run(&[mode, id]);
+            assert_eq!(output.status.code(), Some(1));
+            assert!(String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("not approved"));
+        }
     }
 }
 

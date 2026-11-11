@@ -366,9 +366,9 @@ pub fn stream_test(
     let stream_diagnostic = stream_setup_check || playback_check;
     ensure!(!stream_diagnostic || (!setup_check && !record_check
         && !(stream_setup_check && playback_check) && experimental_owntone_transient
-        && id == Some(session::RECORD_RECEIVER_ID) && setup_profile.is_none()
+        && setup_profile.is_none()
         && setup_timeout_seconds.is_none() && seconds == 1 && volume_db == -30),
-        "stream diagnostics require the exact approved HomePod, OwnTone transient, fixed defaults and no conflicting modes");
+        "stream diagnostics require an approved compatible receiver, OwnTone transient, fixed defaults and no conflicting modes");
     ensure!(
         setup_profile.is_none() || setup_check,
         "profiles require --setup-check"
@@ -378,13 +378,14 @@ pub fn stream_test(
         "SETUP timeout experiment requires --setup-check and 15 seconds"
     );
     ensure!(
-        !experimental_owntone_transient || ((setup_check || record_check || stream_diagnostic) && id.is_some() && setup_profile.is_none()),
-        "OwnTone transient requires an exact ID, an explicit diagnostic and no --setup-profile; no fallback"
+        !experimental_owntone_transient
+            || ((setup_check || record_check || stream_diagnostic) && setup_profile.is_none()),
+        "OwnTone transient requires an explicit diagnostic and no --setup-profile; no fallback"
     );
     ensure!(!record_check || (!setup_check && experimental_owntone_transient
-        && id == Some(session::RECORD_RECEIVER_ID) && setup_profile.is_none()
+        && setup_profile.is_none()
         && setup_timeout_seconds.is_none()),
-        "RECORD requires the approved HomePod exact ID, OwnTone transient and no other diagnostic profile");
+        "RECORD requires an approved compatible receiver, OwnTone transient and no other diagnostic profile");
     let proposed = if id.is_none() {
         Some(interactive::choose_for_stream(loaded)?)
     } else {
@@ -552,41 +553,58 @@ pub fn stream_test(
     Ok(())
 }
 
-/// Deliberate Stua-only diagnostics; never invoked by capture or production startup.
-pub fn stua_check(loaded: &Loaded, id: &str, playback: bool, volume_db: i32) -> Result<()> {
-    ensure!(
-        id == session::STUA_RECEIVER_ID,
-        "Stua diagnostic requires device:02d899c1833f; no other receiver contact"
-    );
+/// Deliberate stored-HAP diagnostics; never invoked by capture or production startup.
+pub fn hap_check(loaded: &Loaded, id: Option<&str>, playback: bool, volume_db: i32) -> Result<()> {
+    let proposed = if id.is_none() {
+        Some(interactive::choose_for_stream(loaded)?)
+    } else {
+        None
+    };
+    let id = id.unwrap_or_else(|| &proposed.as_ref().unwrap().selected.id);
+    exact_id(id)?;
     ensure!(loaded.config.allows(id), "receiver is not approved");
     let store = store::Store::new(&loaded.path)?;
     let credential = store
         .credential(id)?
-        .context("existing Stua HAP credentials required; no automatic pairing")?;
+        .context("existing receiver HAP credentials required; no automatic pairing")?;
     let method = credential.authentication_method(id)?;
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "Stua diagnostic requires an interactive terminal and explicit confirmation"
+        "Receiver diagnostic requires an interactive terminal and explicit confirmation"
     );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
     // Validate the exact endpoint before confirmation as well as at Wire::connect.
     let selected = validate_selection(loaded, id, method, &snapshot)?;
-    stua_credential(&store, &selected)?;
+    if let Some(proposed) = &proposed {
+        ensure!(
+            proposed.selected.method != Method::Transient,
+            "HAP diagnostic requires a persistent selection and existing credentials; no fallback"
+        );
+        // Persisted methods describe enrollment intent; StoredHap is deliberately
+        // operation-only and derived from the existing validated credential.
+        let mut operation = proposed.selected.clone();
+        operation.method = method;
+        ensure!(
+            operation.matches_observation(&selected),
+            "receiver changed; review and select again explicitly"
+        );
+    }
+    hap_credential(&store, &selected)?;
     interactive::describe(&snapshot, id)?;
-    println!("Persistent HAP pair-verify using existing stored keys; no pairing, credential writes, retries or receiver fallback. Only NTP realtime ALAC is supported; PTP/FairPlay/MFi requirements fail closed. Stua uses HomePod 2 as default output; routing and audible playback remain unverified.");
+    println!("Persistent HAP pair-verify using existing stored keys; no pairing, credential writes, retries or receiver fallback. Only NTP realtime ALAC is supported; PTP/FairPlay/MFi requirements fail closed. Routing and audible playback remain unverified.");
     let prompt = if playback {
         println!("One second original faded tone, receiver volume {volume_db} dB, two seconds silent drain. WARNING: receiver volume may persist after the test, including after failure; it is not restored. Packet transmission does not prove audible playback.");
-        format!("Authorize Stua tone and persistent {volume_db} dB receiver volume? [y/N]: ")
+        format!("Authorize receiver tone and persistent {volume_db} dB receiver volume? [y/N]: ")
     } else {
         println!("Stream SETUP-only: authentication, NTP SETUP, event connection, RECORD, stream SETUP and TEARDOWN. Zero audio, zero sync packets, no volume changes. Negotiation does not prove audible playback.");
-        "Start Stua zero-audio stream SETUP-only check? [y/N]: ".to_owned()
+        "Start receiver zero-audio stream SETUP-only check? [y/N]: ".to_owned()
     };
-    interactive::confirm_operation(loaded, None, &snapshot, &prompt)?;
+    interactive::confirm_operation(loaded, proposed.as_ref(), &snapshot, &prompt)?;
     let mut session = session::Session::new();
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
-    session.start_stua_stream_selected(
-        || wire::Wire::connect_stua_operation(&loaded.path, &selected, &snapshot, &credential),
+    session.start_hap_stream_selected(
+        || wire::Wire::connect_hap_operation(&loaded.path, &selected, &snapshot, &credential),
         &credential,
         playback,
     )?;
@@ -594,33 +612,29 @@ pub fn stua_check(loaded: &Loaded, id: &str, playback: bool, volume_db: i32) -> 
         session.prepare_playback_check_at_volume(volume_db)?;
         session.transmit_test(1)?;
         session.stop()?;
-        println!("Stua: {} RTP packets transmitted; TEARDOWN acknowledged; local cleanup complete. Volume {volume_db} dB may persist. Audible playback unverified.", session.packets_sent);
+        println!("Receiver: {} RTP packets transmitted; TEARDOWN acknowledged; local cleanup complete. Volume {volume_db} dB may persist. Audible playback unverified.", session.packets_sent);
     } else {
         session.check_stream()?;
-        println!("Stua stream SETUP validated; TEARDOWN acknowledged; local cleanup complete. Audio packets: 0; volume unchanged. Audible playback unverified.");
+        println!("Receiver stream SETUP validated; TEARDOWN acknowledged; local cleanup complete. Audio packets: 0; volume unchanged. Audible playback unverified.");
     }
     Ok(())
 }
 
-fn stua_credential(store: &store::Store, selected: &Selection) -> Result<store::Credential> {
-    ensure!(
-        selected.id == session::STUA_RECEIVER_ID,
-        "operation selection must be Stua; no selection changes or fallback"
-    );
+fn hap_credential(store: &store::Store, selected: &Selection) -> Result<store::Credential> {
     ensure!(
         selected.method == Method::StoredHap,
-        "Stua requires stored persistent HAP authentication; no method guessing or fallback"
+        "Receiver requires stored persistent HAP authentication; no method guessing or fallback"
     );
     selected.capabilities.decide(selected.method)?;
     ensure!(
         selected.capabilities.features & ((1 << 9) | (1 << 19)) == ((1 << 9) | (1 << 19)),
-        "Stua must advertise audio and ALAC"
+        "Receiver must advertise audio and ALAC"
     );
     let credential = store
         .credential(&selected.id)?
-        .context("existing Stua HAP credentials required; no automatic pairing")?;
+        .context("existing receiver HAP credentials required; no automatic pairing")?;
     ensure!(
-        credential.authentication_method(session::STUA_RECEIVER_ID)? == selected.method,
+        credential.authentication_method(&selected.id)? == selected.method,
         "credential authentication method differs from operation"
     );
     ensure!(

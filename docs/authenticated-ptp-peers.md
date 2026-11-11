@@ -1,5 +1,10 @@
 # Authenticated PTP timing peer selection
 
+Current receiver discovery, selection and command usage is documented in
+[Receiver diagnostics](RECEIVER_DIAGNOSTICS.md). Receiver-specific observations
+and authorizations below are historical evidence, not current CLI restrictions.
+Examples use placeholders; verify the canonical ID independently.
+
 The encrypted initial SETUP response may delegate timing to an address different
 from the authorized RTSP endpoint. PiAir accepts only numeric addresses explicitly
 listed in `timingPeerInfo.Addresses`, bound to that response's mandatory valid
@@ -78,9 +83,9 @@ pairing, fallback or receiver command is introduced.
 ## Hardware verification (not performed)
 
 On the authorized Raspberry Pi installation, build the release binary, retain
-the existing allowlist/selection for Stua (`device:0a05559f132f`, RTSP
+the existing allowlist/selection for Stua (`device:<canonical-id>`, RTSP
 192.168.1.119), and use only the existing initial buffered SETUP diagnostic.
-Run `piair --config <config> -v buffered-test device:0a05559f132f --setup-check`
+Run `piair --config <config> -v buffered-test 'device:<canonical-id>' --setup-check`
 only when ready to perform that authorized hardware check. The `-v` flag enables
 the bounded debug diagnostics.
 Check the authorized IP, advertised count, bounded validated candidate/rejection

@@ -36,10 +36,6 @@ pub enum State {
     Failed,
 }
 
-pub(super) const RECORD_RECEIVER_ID: &str = "device:3ae5c9a302ad";
-
-pub(super) const STUA_RECEIVER_ID: &str = "device:02d899c1833f";
-
 pub struct Session {
     record_only: bool,
     stream_check: bool,
@@ -128,7 +124,7 @@ impl Session {
             SetupProfile::A,
         )
     }
-    /// Explicit RECORD diagnostic is limited to the approved HomePod identity.
+    /// Explicit RECORD diagnostic uses the receiver authorized by Wire.
     pub fn start_owntone_record_selected(
         &mut self,
         connect: impl FnOnce() -> Result<Wire>,
@@ -144,10 +140,6 @@ impl Session {
             || {
                 let mut wire = connect()?;
                 wire.diagnostic_cancel = Some(cancel);
-                ensure!(
-                    wire.receiver_id() == RECORD_RECEIVER_ID,
-                    "RECORD receiver ID is not approved for this diagnostic"
-                );
                 Ok(wire)
             },
             capabilities,
@@ -164,13 +156,18 @@ impl Session {
         self.start_owntone_record_selected(connect, capabilities)
     }
     /// Persistent HAP authentication feeds the same realtime diagnostic engine.
-    pub fn start_stua_stream_selected(
+    pub fn start_hap_stream_selected(
         &mut self,
         connect: impl FnOnce() -> Result<Wire>,
         credential: &Credential,
         playback: bool,
     ) -> Result<()> {
-        credential.validate(STUA_RECEIVER_ID)?;
+        credential.validate(&credential.receiver_id)?;
+        ensure!(
+            credential.authentication_method(&credential.receiver_id)?
+                == super::compatibility::Method::StoredHap,
+            "diagnostic requires stored persistent HAP credentials"
+        );
         ensure!(
             self.state == State::Disconnected,
             "session already started or failed"
@@ -183,9 +180,9 @@ impl Session {
             || {
                 let mut wire = connect()?;
                 ensure!(
-                    wire.receiver_id() == STUA_RECEIVER_ID
-                        && wire.method() != super::compatibility::Method::Transient,
-                    "Stua diagnostic requires exact receiver and persistent HAP; no fallback"
+                    wire.receiver_id() == credential.receiver_id
+                        && wire.method() == super::compatibility::Method::StoredHap,
+                    "HAP diagnostic requires matching receiver and stored persistent HAP; no fallback"
                 );
                 wire.diagnostic_cancel = Some(cancel);
                 Ok(wire)

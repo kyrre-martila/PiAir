@@ -1,4 +1,9 @@
 > Current guidance and evidence: [receiver authentication audit and safe Pi diagnostic](RECEIVER_AUTHENTICATION.md).
+
+Current receiver discovery, selection and command usage is documented in
+[Receiver diagnostics](RECEIVER_DIAGNOSTICS.md). Receiver-specific observations
+and authorizations below are historical evidence, not current CLI restrictions.
+Examples use placeholders; verify the canonical ID independently.
 > Later operator evidence in [PR #21](INITIAL_SETUP_DIAGNOSTICS.md) reports HomePod
 > transient SRP and encrypted OPTIONS success after #20. Earlier 400/403 results
 > below are historical; no confirmed audible HomePod playback is documented.
@@ -159,7 +164,7 @@ timeout/disconnect, encrypted OPTIONS, terminal failure, cleanup, capability and
 endpoint authorization, no fallback, plus persistent pairing/media regressions.
 
 For the next Raspberry Pi check, follow the [current authentication-only procedure](RECEIVER_AUTHENTICATION.md#next-raspberry-pi-diagnostic-authentication-and-control-only).
-It uses only independently verified `device:3ae5c9a302ad`, explicit owner approval,
+It uses only independently verified `device:<canonical-id>`, explicit owner approval,
 explicit transient selection and the OwnTone-reference authenticate flag. It does
 not enroll or replace credentials and does not attempt audio. Legacy transient
 and pyatv profiles are separate explicit experiments, with no automatic fallback.
