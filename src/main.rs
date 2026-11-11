@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod allowlist;
 mod audio;
 mod cli;
 mod config;
@@ -22,6 +23,7 @@ fn run_with_discovery(
 ) -> Result<()> {
     let loaded = config::load(cli.config)?;
     match cli.command {
+        Command::Allowlist { command } => allowlist::run(&loaded, command)?,
         Command::Receivers => {
             receiver::list(&loaded, &discover(loaded.config.discovery_timeout_secs)?)?
         }
@@ -169,5 +171,29 @@ fn main() -> std::process::ExitCode {
             tracing::error!(error = %format!("{error:#}"), "command failed");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod allowlist_dispatch_tests {
+    use super::*;
+    #[test]
+    fn local_allowlist_dispatch_never_invokes_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
+        for args in [
+            vec!["list"],
+            vec!["add", "device:aabbccddeeff"],
+            vec!["remove", "device:112233445566"],
+        ] {
+            let cli = Cli::parse_from(
+                ["piair", "--config", path.to_str().unwrap(), "allowlist"]
+                    .into_iter()
+                    .chain(args),
+            );
+            run_with_discovery(cli, |_| panic!("allowlist must never discover receivers")).unwrap();
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }
