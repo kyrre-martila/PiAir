@@ -3010,3 +3010,149 @@ fn buffered_transient_cancellation_during_srp_closes_before_setup() {
     drop(owner);
     server.join().unwrap();
 }
+
+#[test]
+fn wav_authentication_is_explicit_and_preserves_selection_and_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::Store::new(&dir.path().join("config.toml")).unwrap();
+    let mut selected = selection(7000);
+    selected.capabilities.features |= (1 << 9) | (1 << 19);
+    let error = wav_authentication(&store, &selected, false).err().unwrap();
+    assert!(error
+        .to_string()
+        .contains("existing receiver HAP credentials required"));
+    store.save(&credential()).unwrap();
+    store.select(&selected).unwrap();
+    let credential_path = dir.path().join("receiver-state/aabbccddeeff.toml");
+    let before = std::fs::read(&credential_path).unwrap();
+    for method in [Method::PinDisplay, Method::SetupCode] {
+        selected.method = method;
+        let (operation, c) = wav_authentication(&store, &selected, false).unwrap();
+        assert_eq!(operation.method, Method::StoredHap);
+        assert_eq!(operation.id, selected.id);
+        assert_eq!(c.unwrap().receiver_key, credential().receiver_key);
+        assert!(wav_authentication(&store, &selected, true).is_err());
+    }
+    selected.method = Method::Transient;
+    selected.capabilities.features |= 1 << 48;
+    selected.capabilities.flags = Some(0);
+    assert!(wav_authentication(&store, &selected, false).is_err());
+    let (operation, c) = wav_authentication(&store, &selected, true).unwrap();
+    assert_eq!(operation.method, Method::Transient);
+    assert!(c.is_none());
+    selected.capabilities.flags = Some(1 << 9);
+    assert!(wav_authentication(&store, &selected, true).is_err());
+    selected.method = Method::PinDisplay;
+    selected.advertised_pi = Some("changed".into());
+    assert!(wav_authentication(&store, &selected, false).is_err());
+    selected.advertised_pi = Some(PI.into());
+    selected.capabilities.features &= !(1 << 19);
+    assert!(wav_authentication(&store, &selected, false).is_err());
+    selected.capabilities.features |= 1 << 19;
+    selected.capabilities.access_control = Some(1);
+    assert!(wav_authentication(&store, &selected, false).is_err());
+    assert_eq!(std::fs::read(&credential_path).unwrap(), before);
+    assert_eq!(
+        store.selection().unwrap().unwrap().method,
+        Method::PinDisplay
+    );
+}
+
+#[test]
+fn persisted_wav_selection_validates_stored_hap_and_rejects_drift_without_fallback() {
+    for method in [Method::PinDisplay, Method::SetupCode] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let approved = format!("receiver_allowlist=['{HAP_FIXTURE_ID}']");
+        std::fs::write(&path, &approved).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let observed = stua_snapshot(port);
+        let selected = Selection::from_receiver(&observed[0], method).unwrap();
+        let store = store::Store::new(&path).unwrap();
+        let mut c = credential();
+        c.receiver_id = HAP_FIXTURE_ID.into();
+        store.save(&c).unwrap();
+        store.select(&selected).unwrap();
+        let selection_path = dir.path().join("receiver-state/selected.toml");
+        let credential_path = dir.path().join("receiver-state/02d899c1833f.toml");
+        let selection_bytes = std::fs::read(&selection_path).unwrap();
+        let credential_bytes = std::fs::read(&credential_path).unwrap();
+        // Match stream-test's complete pre-confirmation transition, including
+        // the comparison between the derived operation and fresh discovery.
+        let prepare = |snapshot: &[Receiver]| -> Result<(Selection, Credential)> {
+            let loaded = config::load(Some(path.clone()))?;
+            let enrollment = store.selection()?.context("selection required")?;
+            let (operation, credential) = wav_authentication(&store, &enrollment, false)?;
+            let validated =
+                validate_selection(&loaded, HAP_FIXTURE_ID, Method::StoredHap, snapshot)?;
+            ensure!(
+                operation.matches_observation(&validated),
+                "receiver changed"
+            );
+            Ok((
+                operation,
+                credential.context("stored credentials required")?,
+            ))
+        };
+        let (operation, confirmed) = prepare(&observed).unwrap();
+        assert_eq!(operation.method, Method::StoredHap);
+        assert_eq!(operation.id, selected.id);
+        assert_eq!(confirmed.receiver_key, c.receiver_key);
+        assert!(wav_authentication(&store, &selected, true).is_err());
+        let mut transient = selected.clone();
+        transient.method = Method::Transient;
+        assert!(wav_authentication(&store, &transient, false).is_err());
+        for change in 0..9 {
+            let mut drifted = stua_snapshot(port);
+            match change {
+                0 => drifted[0].id = ID.into(),
+                1 => {
+                    // Reparse a different receiver's advertisement so the
+                    // discovery fixture's cached stable identity changes too.
+                    drifted[0].services = snapshot(port).remove(0).services;
+                }
+                2 => {
+                    drifted[0].services[0]
+                        .capabilities
+                        .insert("pi".into(), "changed".into());
+                }
+                3 => drifted[0].services[0].port = if port == 65535 { port - 1 } else { port + 1 },
+                4 => drifted[0].services[0].addresses = ["127.0.0.2".parse().unwrap()].into(),
+                5 => {
+                    drifted[0].services[0]
+                        .capabilities
+                        .insert("pw".into(), "true".into());
+                }
+                6 => std::fs::write(&path, "receiver_allowlist=[]").unwrap(),
+                7 | 8 => {
+                    let mut invalid = credential();
+                    invalid.receiver_id = HAP_FIXTURE_ID.into();
+                    if change == 7 {
+                        invalid.version = 1;
+                    } else {
+                        invalid.receiver_id = ID.into();
+                    }
+                    std::fs::write(&credential_path, toml::to_string(&invalid).unwrap()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(prepare(&drifted).is_err(), "accepted drift case {change}");
+            // Even with already-confirmed keys, the socket boundary must reject
+            // the drift/revocation instead of attempting another auth method.
+            assert!(Wire::connect_hap_operation(&path, &operation, &drifted, &confirmed).is_err());
+            assert!(listener.accept().is_err());
+            std::fs::write(&path, &approved).unwrap();
+            std::fs::write(&credential_path, &credential_bytes).unwrap();
+        }
+        c.seed = [33; 32];
+        std::fs::write(&credential_path, toml::to_string(&c).unwrap()).unwrap();
+        assert!(Wire::connect_hap_operation(&path, &operation, &observed, &confirmed).is_err());
+        assert!(listener.accept().is_err());
+        std::fs::write(&credential_path, &credential_bytes).unwrap();
+        assert!(prepare(&observed).is_ok());
+        assert_eq!(std::fs::read(&selection_path).unwrap(), selection_bytes);
+        assert_eq!(std::fs::read(&credential_path).unwrap(), credential_bytes);
+    }
+}

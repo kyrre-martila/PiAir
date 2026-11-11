@@ -75,8 +75,8 @@ pub enum Command {
         /// Playback duration: 1..3 seconds for tone, 1..30 for WAV (stops earlier at EOF).
         #[arg(long, default_value_t=1, value_parser=clap::value_parser!(u32).range(1..=30))]
         seconds: u32,
-        /// Bounded PCM WAV playback through the OwnTone realtime diagnostic.
-        #[arg(long, group = "owntone_diagnostic", requires = "experimental_owntone_transient", conflicts_with_all = ["setup_check", "record_check", "stream_setup_check", "playback_check", "setup_profile", "setup_timeout_seconds"])]
+        /// Bounded PCM WAV playback using stored HAP, or explicitly opted-in OwnTone transient.
+        #[arg(long, group = "owntone_diagnostic", conflicts_with_all = ["setup_check", "record_check", "stream_setup_check", "playback_check", "setup_profile", "setup_timeout_seconds"])]
         audio_file: Option<std::path::PathBuf>,
         /// Validate initial SETUP and tear down before RECORD or audio transmission.
         #[arg(long, group = "owntone_diagnostic")]
@@ -563,35 +563,48 @@ mod wav_arguments {
     use super::*;
     #[test]
     fn wav_modes_and_bounds() {
-        let base = [
-            "piair",
-            "stream-test",
-            "--experimental-owntone-transient",
-            "--audio-file",
-            "test.wav",
-        ];
-        for seconds in ["1", "30"] {
-            let c = Cli::try_parse_from(base.into_iter().chain([
-                "--seconds",
-                seconds,
-                "--volume-db",
-                "-20",
-            ]))
-            .unwrap();
-            assert!(c.validate().is_ok());
+        for transient in [false, true] {
+            let mut base = vec![
+                "piair",
+                "stream-test",
+                "device:02d899c1833f",
+                "--audio-file",
+                "test.wav",
+            ];
+            if transient {
+                base.push("--experimental-owntone-transient");
+            }
+            for seconds in ["1", "30"] {
+                for volume in ["-60", "-20", "-10"] {
+                    let c = Cli::try_parse_from(base.iter().copied().chain([
+                        "--seconds",
+                        seconds,
+                        "--volume-db",
+                        volume,
+                    ]))
+                    .unwrap();
+                    assert!(c.validate().is_ok());
+                }
+            }
+            for flag in [
+                "--setup-check",
+                "--record-check",
+                "--stream-setup-check",
+                "--playback-check",
+            ] {
+                assert!(Cli::try_parse_from(base.iter().copied().chain([flag])).is_err());
+            }
+            for (flag, value) in [
+                ("--seconds", "0"),
+                ("--seconds", "31"),
+                ("--volume-db", "-61"),
+                ("--volume-db", "-9"),
+                ("--setup-profile", "a"),
+                ("--setup-timeout-seconds", "15"),
+            ] {
+                assert!(Cli::try_parse_from(base.iter().copied().chain([flag, value])).is_err());
+            }
         }
-        for flag in [
-            "--setup-check",
-            "--record-check",
-            "--stream-setup-check",
-            "--playback-check",
-        ] {
-            assert!(Cli::try_parse_from(base.into_iter().chain([flag])).is_err());
-        }
-        for seconds in ["0", "31"] {
-            assert!(Cli::try_parse_from(base.into_iter().chain(["--seconds", seconds])).is_err());
-        }
-        assert!(Cli::try_parse_from(["piair", "stream-test", "--audio-file", "x.wav"]).is_err());
         assert!(
             Cli::try_parse_from(["piair", "stream-test", "--seconds", "4"])
                 .unwrap()

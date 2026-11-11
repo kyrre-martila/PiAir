@@ -7,6 +7,36 @@ with the receiver already approved and explicitly selected for transient authent
 ./target/release/piair -v stream-test device:0a05559f132f --experimental-owntone-transient --audio-file tests/assets/audio/Pachelbel_Canon_audio_test.wav --seconds 30 --volume-db -20
 ```
 
+For Stua Apple TV (`device:02d899c1833f`, AppleTV6,2), approve and explicitly
+select that receiver using its persistent pairing method, and retain its existing
+local HAP pairing. After deploying a release build:
+
+```sh
+./target/release/piair -v stream-test device:02d899c1833f \
+  --audio-file tests/assets/audio/Pachelbel_Canon_audio_test.wav \
+  --seconds 30 \
+  --volume-db -20
+```
+
+Without `--experimental-owntone-transient`, WAV requires a persistent selection
+and validated local HAP credentials. The stored keys establish an operation-only
+StoredHap method, then pair-verify cryptographically verifies receiver identity.
+The existing credential fingerprint and approval checks remain active throughout
+the operation. No pairing, credential update, receiver switch or authentication
+fallback is attempted. Missing credentials require explicit pairing first;
+a changed endpoint or policy requires investigation and explicit reselection.
+A transient selection requires the explicit experimental flag and policy approval;
+that flag cannot be combined with a persistent selection. Apple TV's receiver
+policy disallows transient authentication.
+
+Hardware evidence before this change: HomePod Stua played 30 seconds of this WAV
+audibly and continuously at -20 dB using OwnTone transient; subsequent TEARDOWN
+failed. Apple TV's stored-HAP tone diagnostic completed pair-verify, encrypted
+SETUP/RECORD, stream SETUP, volume, 376 RTP packets, TEARDOWN HTTP 200 and cleanup,
+but the one-second -40 dB tone was not audible. **Apple TV WAV audibility still
+requires deployment and physical listening on hardware.** Record that result
+separately from transport success. Existing HAP tone commands are unchanged.
+
 Run in an interactive terminal and enter `y` or `yes` only after reviewing the
 receiver and volume warning. Receiver volume may persist after success or failure;
 it is not restored. Start at -20 dB. The permitted receiver range is -60..=-10 dB.
@@ -36,3 +66,23 @@ balance, clean start/end and absence of repeated audio. Check the reported packe
 count (for 30 seconds plus drain: ceil(32 * 44100 / 352) = 4010 packets), teardown
 and cleanup. Record the actual listening result separately. CI uses synthetic WAV
 fixtures and loopback encrypted receivers; it cannot verify HomePod audibility.
+
+## HomePod duration-boundary investigation (follow-up)
+
+The `bounded transmission outcome` log's `success` field is computed from
+`Session::transmit_input` before `Session::stop` attempts TEARDOWN. A subsequent
+TEARDOWN failure therefore cannot explain `success=false` in that playback log.
+The duration limit itself exits the packet loop normally, sends the existing
+silent drain and checks worker health before returning success. Failures can
+still arise from worker health/NTP freshness, scheduler guards, send errors,
+revoked authorization, cancellation or prohibited retransmission requests;
+the exact hardware error chain is needed to identify which occurred. No causal
+claim beyond the ordering is established, and this change does not alter timing,
+feedback, retransmission handling or TEARDOWN. Investigate with the playback error
+chain, packet count and timestamps in a separate PR.
+
+PR #53 records two pre-existing timing-sensitive tests:
+`both_stream_modes_report_failed_remote_teardown_and_release_locally` and
+`transient_session_negotiates_encrypted_audio_and_acknowledges_teardown`.
+Scheduler stalls under CI load must be distinguished from new failures; do not
+relax production timing guards to make loopback tests pass.
