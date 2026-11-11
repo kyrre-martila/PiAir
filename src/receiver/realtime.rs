@@ -102,9 +102,9 @@ impl Encoder {
     pub(super) fn from_verified_key(key: Zeroizing<[u8; 32]>) -> Result<Self> {
         let mut encoder = Self::new()?;
         encoder.key = key;
-        // The fixed diagnostic uses at most 376 packets. Choose an initial
-        // sequence that cannot wrap in that budget, preserving OwnTone's
-        // little-endian sequence nonce without reproducing its wrap reuse.
+        // Retain the initial sequence policy used by the short diagnostic.
+        // Longer WAV streams may wrap RTP sequence numbers; the independent
+        // u64 nonce keeps increasing and must never be reset at that wrap.
         encoder.sequence %= u16::MAX - 375;
         encoder.nonce = u64::from(encoder.sequence);
         Ok(encoder)
@@ -280,7 +280,14 @@ mod tests {
         // Initial sync and periodic syncs, including RTP and NTP era wrap.
         // Periodic scheduling rounds up to a packet boundary just as Session does.
         let interval = u64::from(RATE).div_ceil(SPF as u64) * SPF as u64;
-        for sent in [0, interval, 2 * interval, 3 * interval] {
+        for sent in [
+            0,
+            interval,
+            2 * interval,
+            3 * interval,
+            10 * interval,
+            30 * interval,
+        ] {
             let next = origin.wrapping_add(sent as u32);
             let elapsed = sample_time(sent);
             let ntp = clock.instant(mono + elapsed);
@@ -298,7 +305,7 @@ mod tests {
             assert!(expected_ticks.abs_diff(ticks) <= 5);
             assert_eq!(next.wrapping_sub(origin), sent as u32);
         }
-        for seconds in 1..=3_u64 {
+        for seconds in [1, 2, 3, 10, 30] {
             let signal = seconds * u64::from(RATE);
             let total = signal + u64::from(PLAYBACK_LEAD_SAMPLES);
             let transmitted = total.div_ceil(SPF as u64) * SPF as u64;
@@ -338,6 +345,56 @@ mod tests {
         let third = e.packet(&pcm).unwrap();
         assert_eq!(third[1], 0xe0);
         assert_eq!(&third[third.len() - 8..], &2_u64.to_le_bytes());
+    }
+    #[test]
+    fn ten_and_thirty_second_wavs_round_trip_through_sequence_wrap() {
+        use std::collections::HashSet;
+        for (seconds, expected_packets) in [(10, 1504), (30, 4010)] {
+            let wav = super::super::wav::Playback::open(
+                std::path::Path::new("tests/assets/audio/Pachelbel_Canon_audio_test.wav"),
+                seconds,
+            )
+            .unwrap();
+            assert_eq!(wav.frames.len(), seconds as usize * RATE as usize);
+            let mut encoder = Encoder::from_verified_key(Zeroizing::new([42; 32])).unwrap();
+            // Force wrap inside both durations, including the old 376 packet bound.
+            encoder.sequence = u16::MAX - 400;
+            encoder.nonce = u64::from(encoder.sequence);
+            let origin = encoder.timestamp;
+            let first_nonce = encoder.nonce;
+            let total = wav.frames.len() + PLAYBACK_LEAD_SAMPLES as usize;
+            let mut nonces = HashSet::new();
+            let mut packets = 0;
+            for sent in (0..total).step_by(SPF) {
+                let pcm: Vec<_> = (sent..sent + SPF)
+                    .map(|n| wav.frames.get(n).copied().unwrap_or([0; 2]))
+                    .collect();
+                let packet = encoder.packet(&pcm).unwrap();
+                let nonce: [u8; 8] = packet[packet.len() - 8..].try_into().unwrap();
+                assert!(nonces.insert(nonce));
+                assert_eq!(u64::from_le_bytes(nonce), first_nonce + packets);
+                assert_eq!(
+                    u16::from_be_bytes(packet[2..4].try_into().unwrap()),
+                    (u16::MAX - 400).wrapping_add(packets as u16)
+                );
+                assert_eq!(
+                    u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+                    origin.wrapping_add(sent as u32)
+                );
+                assert_eq!(packet.len(), 1452); // 12 RTP + 1416 ALAC + 16 tag + 8 nonce
+                let payload = crypto::open(
+                    &[42; 32],
+                    &crypto::nonce(&nonce),
+                    &packet[12..packet.len() - 8],
+                    &packet[4..12],
+                )
+                .unwrap();
+                assert_eq!(alac::tests::decode_at_rate(&payload, RATE), pcm);
+                packets += 1;
+            }
+            assert_eq!(packets, expected_packets);
+            assert_eq!(nonces.len(), expected_packets as usize);
+        }
     }
     #[test]
     fn cache_retries_and_key_lifecycle_are_bounded() {

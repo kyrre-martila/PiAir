@@ -751,6 +751,14 @@ impl Session {
             let mut sync_at = 0;
             let mut feedback_at = Instant::now() + Duration::from_secs(2);
             let mut retry_budget = 1024;
+            let mut sync_packets = 0_u64;
+            let mut max_lateness_us = 0_u64;
+            tracing::debug!(target: "piair::rtsp", phase = "playback policy",
+                feedback_polling = !self.playback_check,
+                retransmissions_allowed = !self.playback_check,
+                signal_frames = signal, total_frames = total,
+                expected_packets = total.div_ceil(profile::SPF as u64),
+                "diagnostic policy; UDP sends do not establish receiver acceptance");
             while sent < total {
                 self.workers()?;
                 let deadline = start + realtime::sample_time(sent);
@@ -763,6 +771,9 @@ impl Session {
                     feedback_at += Duration::from_secs(2);
                 }
                 if let Some((first, count)) = self.media.as_ref().unwrap().retransmit()? {
+                    tracing::debug!(target: "piair::rtsp", phase = "receiver control",
+                        first_sequence = first, requested_packets = count,
+                        allowed = !self.playback_check, "receiver requested retransmission");
                     ensure!(
                         !self.playback_check,
                         "playback check forbids retransmissions"
@@ -792,13 +803,30 @@ impl Session {
                     Instant::now().saturating_duration_since(deadline) < Duration::from_millis(100),
                     "control feedback stalled the sample timeline"
                 );
+                max_lateness_us = max_lateness_us.max(
+                    Instant::now()
+                        .saturating_duration_since(deadline)
+                        .as_micros() as u64,
+                );
                 if sent >= sync_at {
                     let next = self.encoder.as_ref().unwrap().timestamp;
+                    let sync_ntp = clock.instant(start + realtime::sample_time(sent));
                     self.media.as_ref().unwrap().sync(&realtime::sync(
                         sent == 0,
                         next,
-                        clock.instant(start + realtime::sample_time(sent)),
+                        sync_ntp,
                     ))?;
+                    sync_packets += 1;
+                    tracing::debug!(target: "piair::rtsp", phase = "sync",
+                        initial = sent == 0, sync_packets, sync_ntp, sent_frames = sent,
+                        next_sequence = self.encoder.as_ref().unwrap().sequence,
+                        next_timestamp = next,
+                        sync_position = next.wrapping_sub(realtime::SYNC_OFFSET_SAMPLES),
+                        scheduled_elapsed_us = realtime::sample_time(sent).as_micros() as u64,
+                        max_lateness_us,
+                        ntp_replies = self.media.as_ref().unwrap().timing.count(),
+                        ntp_age_ms = self.media.as_ref().unwrap().timing.age().as_millis() as u64,
+                        "sync datagram sent; receiver scheduling unverified");
                     sync_at = sent + u64::from(profile::RATE);
                 }
                 let pcm: Vec<_> = (sent..sent + profile::SPF as u64)
@@ -827,6 +855,13 @@ impl Session {
                     .collect();
                 let packet = self.encoder.as_mut().unwrap().packet(&pcm)?;
                 self.media.as_ref().unwrap().send(&packet)?;
+                if sent == 0 || sent + profile::SPF as u64 >= total {
+                    tracing::debug!(target: "piair::rtsp", phase = "RTP boundary",
+                        initial = sent == 0, sequence = u16::from_be_bytes([packet[2], packet[3]]),
+                        timestamp = u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+                        marker = packet[1] & 0x80 != 0, datagram_bytes = packet.len(),
+                        sent_frames = sent, "media datagram sent; receiver acceptance unverified");
+                }
                 self.packets_sent += 1;
                 self.state = State::Streaming;
                 sent += profile::SPF as u64;
