@@ -711,8 +711,22 @@ impl Session {
     /// Test input only. The transport, codec, crypto, sockets and timing are real.
     /// Signal amplitude <= -18 dBFS and receiver volume uses the explicitly authorized test setting.
     pub fn transmit_test(&mut self, seconds: u32) -> Result<()> {
+        self.transmit_input(seconds, None)
+    }
+    pub fn transmit_wav(&mut self, frames: &[[i16; 2]]) -> Result<()> {
+        self.transmit_input(1, Some(frames))
+    }
+    fn transmit_input(&mut self, seconds: u32, wav: Option<&[[i16; 2]]>) -> Result<()> {
         let attempted = Instant::now();
         let result = (|| {
+            ensure!(
+                wav.is_none() || (self.stream_check && self.playback_check),
+                "WAV requires an authenticated realtime playback diagnostic"
+            );
+            ensure!(
+                wav.is_none_or(|f| !f.is_empty() && f.len() <= 30 * profile::RATE as usize),
+                "WAV input must contain at most 30 seconds"
+            );
             ensure!(
                 self.state == State::Ready,
                 "successful session negotiation required"
@@ -728,7 +742,9 @@ impl Session {
                 !self.playback_check || seconds == 1,
                 "playback check is fixed at one second"
             );
-            let signal = u64::from(seconds) * u64::from(profile::RATE);
+            let signal = wav.map_or(u64::from(seconds) * u64::from(profile::RATE), |f| {
+                f.len() as u64
+            });
             // No unsent PCM at sync time: OwnTone's pos + input - output
             // reduces to next RTP timestamp minus our sender buffer.
             let total = signal + u64::from(realtime::PLAYBACK_LEAD_SAMPLES);
@@ -789,6 +805,8 @@ impl Session {
                     .map(|n| {
                         if n >= signal {
                             [0, 0]
+                        } else if let Some(frames) = wav {
+                            frames[n as usize]
                         } else {
                             let phase = (n % 100) as i16;
                             let x = if phase < 50 {

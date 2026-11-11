@@ -72,6 +72,7 @@ fn run_with_discovery(
             record_check,
             stream_setup_check,
             playback_check,
+            audio_file,
             setup_timeout_seconds,
             setup_profile,
             experimental_owntone_transient,
@@ -84,6 +85,7 @@ fn run_with_discovery(
             record_check,
             stream_setup_check,
             playback_check,
+            audio_file.as_deref(),
             setup_timeout_seconds,
             setup_profile,
             experimental_owntone_transient,
@@ -164,6 +166,9 @@ fn run_with_discovery(
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    if let Err(error) = cli.validate() {
+        error.exit();
+    }
     logging::init(cli.verbose);
     match run(cli) {
         Ok(()) => std::process::ExitCode::SUCCESS,

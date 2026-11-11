@@ -112,6 +112,16 @@ fn authenticated_receiver_case(
     volume_db: i32,
     receiver_id: &'static str,
 ) {
+    authenticated_receiver_input(case, playback, persistent, volume_db, receiver_id, false);
+}
+fn authenticated_receiver_input(
+    case: Case,
+    playback: Option<bool>,
+    persistent: bool,
+    volume_db: i32,
+    receiver_id: &'static str,
+    wav: bool,
+) {
     let method = if persistent {
         Method::StoredHap
     } else {
@@ -722,6 +732,14 @@ fn authenticated_receiver_case(
                                 let pcm = crate::audio::alac::tests::decode_at_rate(&codec, 44100);
                                 assert_eq!(pcm.len(), 352);
                                 assert!(pcm.iter().flatten().all(|x| x.abs() <= 4100));
+                                if wav && count * 352 < 44100 {
+                                    for (i, frame) in pcm.iter().enumerate() {
+                                        let n = count as usize * 352 + i;
+                                        let expected =
+                                            if n < 44100 { [1234, -2345] } else { [0, 0] };
+                                        assert_eq!(*frame, expected);
+                                    }
+                                }
                                 if count * 352 >= 44100 {
                                     assert!(pcm.iter().flatten().all(|x| *x == 0));
                                 }
@@ -809,13 +827,19 @@ fn authenticated_receiver_case(
             None => session.check_record(),
             Some(false) => session.check_stream(),
             Some(true) => {
-                let prepared = if persistent {
+                let prepared = if persistent || wav {
                     session.prepare_playback_check_at_volume(volume_db)
                 } else {
                     session.prepare_playback_check()
                 };
                 prepared
-                    .and_then(|()| session.transmit_test(1))
+                    .and_then(|()| {
+                        if wav {
+                            session.transmit_wav(&vec![[1234, -2345]; 44100])
+                        } else {
+                            session.transmit_test(1)
+                        }
+                    })
                     .and_then(|()| session.stop())
             }
         };
@@ -1093,5 +1117,17 @@ fn diagnostics_bind_different_allowlisted_receivers_through_teardown() {
         authenticated_receiver_case(Case::Good, Some(false), false, -40, id);
         authenticated_receiver_case(Case::Good, Some(false), true, -40, id);
         authenticated_receiver_case(Case::StreamWrongCseq, Some(false), true, -40, id);
+    }
+}
+
+#[test]
+fn wav_uses_existing_encrypted_transport_and_cleans_up_on_failure() {
+    for case in [
+        Case::Good,
+        Case::TeardownReject,
+        Case::CancelStream,
+        Case::StreamReject,
+    ] {
+        authenticated_receiver_input(case, Some(true), false, -20, RECORD_RECEIVER_ID, true);
     }
 }

@@ -613,3 +613,33 @@ fn buffered_control_checks_are_explicit_and_noninteractive_runs_fail_closed() {
         Some(2)
     );
 }
+
+#[test]
+fn wav_diagnostic_arguments_fail_before_receiver_contact() {
+    let base = [
+        "stream-test",
+        "device:0a05559f132f",
+        "--experimental-owntone-transient",
+        "--audio-file",
+        "tests/assets/audio/Pachelbel_Canon_audio_test.wav",
+    ];
+    for extra in [
+        vec!["--seconds", "31"],
+        vec!["--volume-db", "-9"],
+        vec!["--playback-check"],
+        vec!["--setup-check"],
+        vec!["--record-check"],
+        vec!["--stream-setup-check"],
+    ] {
+        let args: Vec<_> = base.iter().copied().chain(extra).collect();
+        assert_eq!(run(&args).status.code(), Some(2));
+    }
+    let bad = run(&[
+        "stream-test",
+        "--experimental-owntone-transient",
+        "--audio-file",
+        "/no-such-piair-test.wav",
+    ]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("open WAV"));
+}
