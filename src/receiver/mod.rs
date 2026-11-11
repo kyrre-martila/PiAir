@@ -696,22 +696,18 @@ pub fn buffered_test(
     let mut session = lifecycle::Session::new();
     let cancel = session.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
-    session.start(
-        || wire::Wire::connect(&loaded.path, id, &selected, &snapshot),
-        credential.as_ref(),
-    )?;
-    let observed = session.observe(std::time::Duration::from_secs(1))?;
-    if let Some(stage) = control_check {
-        session.progress(stage)?;
-        println!(
-            "Control stage {stage:?} accepted; receiver clock adoption unproven; audio bytes: 0."
-        );
-    }
-    session.stop()?;
-    println!(
-        "PTP activity: {observed:?}; session: {:?}; TEARDOWN acknowledged. Audio bytes: 0. {}",
-        session.state(),
-        lifecycle::PLAYBACK_BLOCKER
-    );
+    let result = (|| {
+        session.start(
+            || wire::Wire::connect(&loaded.path, id, &selected, &snapshot),
+            credential.as_ref(),
+        )?;
+        session.observe(std::time::Duration::from_secs(1))?;
+        if let Some(stage) = control_check {
+            session.progress(stage)?;
+        }
+        session.stop()
+    })();
+    println!("Buffered diagnostic: {}", session.diagnostic());
+    result?;
     Ok(())
 }

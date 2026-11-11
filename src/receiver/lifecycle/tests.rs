@@ -407,6 +407,9 @@ fn revocation_prevents_timing_and_teardown_network_writes() {
     std::fs::write(approval.path().join("config.toml"), "receiver_allowlist=[]").unwrap();
     let error = owner.observe(Duration::from_millis(1)).unwrap_err();
     assert!(format!("{error:#}").contains("revoked"));
+    assert!(owner
+        .diagnostic()
+        .contains("TEARDOWN: unacknowledged; remote expiry unconfirmed"));
     assert!(owner.control.is_none());
     assert!(owner.timing.is_none());
     server.join().unwrap();
@@ -428,6 +431,9 @@ fn teardown_stall_is_bounded_and_does_not_leave_a_control_socket() {
     });
     owner.negotiate_with(attach_test_timing).unwrap();
     assert!(owner.stop().is_err());
+    assert!(owner
+        .diagnostic()
+        .contains("TEARDOWN: unacknowledged; remote expiry unconfirmed"));
     assert_eq!(owner.state(), State::Failed);
     assert!(owner.control.is_none());
     assert!(owner.timing.is_none());
@@ -620,6 +626,18 @@ fn control_stages_validate_order_payloads_and_never_connect_media() {
         assert!(count >= 2);
         assert!(media.accept().is_err());
         owner.stop().unwrap();
+        let accepted = match target {
+            Stage::Record => "RECORD",
+            Stage::Stream => "audioMode",
+            Stage::Anchor => "paused anchor",
+        };
+        assert!(owner
+            .diagnostic()
+            .contains(&format!("last accepted: {accepted};")));
+        assert!(owner.diagnostic().contains("TEARDOWN: acknowledged"));
+        assert!(owner
+            .diagnostic()
+            .contains("receiver clock adoption: unverified"));
         assert!(owner.prepared.is_none());
         assert!(owner.stream.is_none());
         server.join().unwrap();
@@ -660,7 +678,15 @@ fn rejected_record_never_advances_and_attempts_teardown() {
             ))
         })
         .unwrap();
-    assert!(owner.progress(Stage::Stream).is_err());
+    let error = owner.progress(Stage::Stream).unwrap_err();
+    assert!(error.to_string().contains("rejected in-band: status=1"));
+    assert!(owner
+        .diagnostic()
+        .contains("last accepted: initial SETUP; attempted: RECORD"));
+    assert!(owner.diagnostic().contains("TEARDOWN: acknowledged"));
+    assert!(owner
+        .diagnostic()
+        .contains("receiver clock adoption: unverified"));
     assert_eq!(owner.state(), State::Failed);
     assert!(owner.prepared.is_none());
     assert!(owner.control.is_none());
@@ -731,6 +757,22 @@ fn inband_rejections_at_every_control_stage_discard_session_and_key() {
             .unwrap();
         owner.observe(Duration::from_millis(1)).unwrap();
         assert!(owner.progress(Stage::Anchor).is_err());
+        let (accepted, attempted) = match rejected_seq {
+            3 => ("initial SETUP", "RECORD"),
+            4 => ("RECORD", "SETPEERS"),
+            5 => ("SETPEERS", "command registration"),
+            6 => ("command registration", "stream SETUP"),
+            7 => ("stream SETUP", "audioMode"),
+            8 => ("audioMode", "paused anchor"),
+            _ => unreachable!(),
+        };
+        assert!(owner.diagnostic().contains(&format!(
+            "last accepted: {accepted}; attempted: {attempted}"
+        )));
+        assert!(owner
+            .diagnostic()
+            .contains("PTP snapshot: Some(PeerObserved)"));
+        assert!(owner.diagnostic().contains("TEARDOWN: acknowledged"));
         assert_eq!(owner.state(), State::Failed);
         assert!(owner.prepared.is_none());
         assert!(owner.stream.is_none());
@@ -796,6 +838,14 @@ fn pending_record_cancel_revocation_timing_loss_and_tcp_close_fail_closed() {
             release.send(()).unwrap();
         });
         assert!(owner.progress(Stage::Stream).is_err());
+        assert!(owner
+            .diagnostic()
+            .contains("last accepted: initial SETUP; attempted: RECORD"));
+        assert!(owner.diagnostic().contains(if fault == 2 {
+            "TEARDOWN: acknowledged"
+        } else {
+            "TEARDOWN: unacknowledged; remote expiry unconfirmed"
+        }));
         assert_eq!(owner.state(), State::Failed);
         assert!(owner.control.is_none());
         assert!(owner.timing.is_none());
