@@ -252,7 +252,12 @@ impl Session {
     fn negotiate(&mut self) -> Result<()> {
         self.negotiate_with(|wire, setup, clock_id| {
             let events = wire.event(setup.event_port)?;
-            let timing = wire.start_ptp(clock_id, setup.clock_id, Duration::from_secs(30))?;
+            let timing = wire.start_ptp(
+                clock_id,
+                setup.clock_id,
+                setup.peer,
+                Duration::from_secs(30),
+            )?;
             Ok((Some(events), timing))
         })
     }
@@ -308,8 +313,11 @@ impl Session {
             return Ok(());
         }
         let wire = self.control.as_ref().context("control absent")?;
-        let peers =
-            ptp::control::Peers::new(wire.ptp_lease()?.peer(), wire.local_ip()?)?.encode()?;
+        let peers = ptp::control::Peers::new(
+            self.timing.as_ref().context("timing absent")?.peer(),
+            wire.local_ip()?,
+        )?
+        .encode()?;
         self.ack("SETPEERS", None, &peers)?;
         // This CLI implements no MediaRemote remote-control commands. Register
         // an honest empty table rather than advertising unsupported operations.
@@ -553,6 +561,7 @@ fn initial_offer(
     ]))
 }
 struct InitialSetup {
+    peer: TimingPeer,
     event_port: u16,
     clock_id: u64,
 }
@@ -612,19 +621,20 @@ impl InitialSetup {
             clock != 0 && clock != u64::MAX && clock != local_clock,
             "invalid receiver clock identity"
         );
+        tracing::debug!(target: "piair::ptp", authorized_peer = %peer,
+            expected_clock_id = format_args!("{clock:016x}"), "authenticated timing identity");
         let addresses = timing
             .get("Addresses")
             .and_then(Value::as_array)
             .context("timing addresses absent")?;
-        ensure!(
-            addresses.len() == 1
-                && addresses[0]
-                    .as_string()
-                    .and_then(|v| v.parse::<IpAddr>().ok())
-                    == Some(peer),
-            "timing peer differs from authorized control peer; no address fallback"
-        );
+        let selected = TimingPeer::select(addresses, peer)
+            .context("authenticated timing address validation failed")?;
+        tracing::debug!(target: "piair::ptp", authorized_peer = %peer,
+            selected_peer = %selected.0, expected_clock_id = format_args!("{clock:016x}"),
+            reason = if selected.0 == peer { "authorized RTSP peer advertised" } else { "first compatible advertised peer" },
+            "authenticated timing peer selected");
         Ok(Self {
+            peer: selected,
             event_port: profile::port(root, "eventPort")?,
             clock_id: clock,
         })
@@ -633,3 +643,64 @@ impl InitialSetup {
 
 #[cfg(test)]
 mod tests;
+
+/// Address delegation is created only by authenticated SETUP parsing. The Wire
+/// retains the original receiver authorization independently of this destination.
+#[derive(Clone, Copy)]
+pub(super) struct TimingPeer(IpAddr);
+impl TimingPeer {
+    pub(super) fn ip(self) -> IpAddr {
+        self.0
+    }
+    pub(super) fn select(addresses: &[Value], authorized: IpAddr) -> Result<Self> {
+        tracing::debug!(target: "piair::ptp", authorized_peer = %authorized,
+            advertised_count = addresses.len(), "validating advertised timing addresses");
+        ensure!(
+            !addresses.is_empty() && addresses.len() <= 32,
+            "timing address count outside 1..=32"
+        );
+        let mut candidates = Vec::new();
+        for (index, value) in addresses.iter().enumerate() {
+            // Never include unvalidated strings in diagnostics.
+            let address = value
+                .as_string()
+                .filter(|s| s.len() <= 45)
+                .and_then(|s| s.parse::<IpAddr>().ok());
+            let Some(ip) = address else {
+                tracing::debug!(target: "piair::ptp", index, reason = "malformed numeric IP", "timing address rejected");
+                bail!("malformed timing address at index {index}");
+            };
+            let unsafe_address = ip.is_unspecified()
+                || ip.is_multicast()
+                || (ip.is_loopback() && !(cfg!(test) && ip == authorized))
+                || match ip {
+                    IpAddr::V4(v) => v.is_broadcast() || v.octets()[0] == 0 || v.octets()[0] >= 240,
+                    IpAddr::V6(v) => v.to_ipv4_mapped().is_some(),
+                };
+            if unsafe_address {
+                tracing::debug!(target: "piair::ptp", index, address = %ip, reason = "unsafe address", "timing address rejected");
+                continue;
+            }
+            if ip.is_ipv4() != authorized.is_ipv4()
+                || matches!(ip, IpAddr::V6(v) if v.is_unicast_link_local())
+            {
+                tracing::debug!(target: "piair::ptp", index, address = %ip, reason = "incompatible family or unsupported IPv6 scope", "timing address rejected");
+                continue;
+            }
+            if !candidates.contains(&ip) {
+                tracing::debug!(target: "piair::ptp", index, address = %ip, "validated timing candidate");
+                candidates.push(ip);
+            } else {
+                tracing::debug!(target: "piair::ptp", index, address = %ip,
+                    reason = "duplicate", "timing address ignored");
+            }
+        }
+        let ip = candidates
+            .iter()
+            .find(|&&ip| ip == authorized)
+            .or(candidates.first())
+            .copied()
+            .context("no usable advertised timing address")?;
+        Ok(Self(ip))
+    }
+}

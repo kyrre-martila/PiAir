@@ -873,11 +873,16 @@ impl Wire {
         &self,
         clock_id: u64,
         peer_clock_id: u64,
+        selected: super::lifecycle::TimingPeer,
         timeout: Duration,
     ) -> Result<super::ptp::Service> {
-        let lease = self.ptp_lease()?;
-        let peer = self.socket.peer_addr()?.ip();
+        let mut lease = self.ptp_lease()?;
+        let peer = selected.ip();
+        // Delegate only the timing destination. The authorization retains the
+        // original persisted receiver and control selection for revocation.
+        lease.peer = peer;
         let local = self.socket.local_addr()?.ip();
+        validate_timing_interface(local, peer).context("timing interface validation failed")?;
         let event = UdpSocket::bind(SocketAddr::new(local, 319))?;
         event.connect(SocketAddr::new(peer, 319))?;
         let general = UdpSocket::bind(SocketAddr::new(local, 320))?;
@@ -2180,5 +2185,53 @@ impl Wire {
     pub(super) fn owntone_test_identity(&mut self) {
         self.client_instance = 0x123456789abcdef0;
         self.active_remote = 123456789;
+    }
+}
+
+/// Local route lookup only; UDP connect does not transmit a datagram.
+fn validate_timing_interface(local: IpAddr, peer: IpAddr) -> Result<()> {
+    ensure!(peer != local, "timing peer is the local control address");
+    ensure!(
+        !matches!(local, IpAddr::V6(v) if v.is_unicast_link_local()),
+        "IPv6 link-local timing interface scope unsupported"
+    );
+    ensure!(
+        local.is_ipv4() == peer.is_ipv4(),
+        "timing interface address family mismatch"
+    );
+    // Route lookup only: UDP connect sends no packet. Reject a destination
+    // whose default route selects a different local interface/address.
+    let wildcard: IpAddr = if local.is_ipv4() { "0.0.0.0" } else { "::" }.parse()?;
+    let route = UdpSocket::bind(SocketAddr::new(wildcard, 0))?;
+    route
+        .connect(SocketAddr::new(peer, 319))
+        .context("timing interface route unavailable")?;
+    tracing::debug!(target: "piair::ptp", selected_peer = %peer,
+            control_local = %local, route_local = %route.local_addr()?.ip(),
+            "validating timing interface route");
+    ensure!(
+        route.local_addr()?.ip() == local,
+        "timing peer route differs from authorized control interface"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod timing_interface_tests {
+    use super::*;
+    #[test]
+    fn route_must_use_control_local_address_and_supported_family() {
+        let local = "127.0.0.1".parse().unwrap();
+        assert!(validate_timing_interface(local, "127.0.0.2".parse().unwrap()).is_ok());
+        for (local, peer) in [
+            ("127.0.0.2", "127.0.0.3"),
+            ("127.0.0.1", "127.0.0.1"),
+            ("127.0.0.1", "2001:db8::1"),
+            ("fe80::1", "2001:db8::1"),
+        ] {
+            assert!(
+                validate_timing_interface(local.parse().unwrap(), peer.parse().unwrap()).is_err()
+            );
+        }
     }
 }
