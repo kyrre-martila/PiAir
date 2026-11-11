@@ -84,6 +84,8 @@ pub struct Session {
     events: Option<Worker>,
     uri: String,
     token: Option<String>,
+    // Initial SETUP fixes token presence for this owner and its exclusive Wire.
+    session_bound: bool,
     attempted_setup: bool,
     observed: bool,
     stage: Option<Stage>,
@@ -113,6 +115,7 @@ impl Session {
             events: None,
             uri: String::new(),
             token: None,
+            session_bound: false,
             attempted_setup: false,
             observed: false,
             stage: None,
@@ -251,6 +254,14 @@ impl Session {
             }
             response
         })?;
+        // Only initial SETUP may establish a token. Omission later keeps the
+        // original binding; a tokenless session cannot acquire a token late.
+        // Timing state separately proves semantic SETUP/resource validation.
+        let initial_setup = method == "SETUP"
+            && self.state == State::Negotiation
+            && self.attempted_setup
+            && !self.session_bound
+            && self.stage.is_none();
         if let Some(token) = reply.headers.get("session") {
             // Strict diagnostic subset: parameterized sessions are unsupported.
             ensure!(
@@ -262,10 +273,15 @@ impl Session {
                 "unsupported receiver session token"
             );
             ensure!(
-                self.token.as_ref().is_none_or(|old| old == token),
-                "receiver session changed"
+                initial_setup || self.token.as_ref() == Some(token),
+                "receiver session changed or unexpectedly introduced"
             );
-            self.token = Some(token.clone());
+            if initial_setup {
+                self.token = Some(token.clone());
+            }
+        }
+        if initial_setup {
+            self.session_bound = true;
         }
         Ok(reply)
     }
@@ -337,8 +353,8 @@ impl Session {
             "control stages already used or unavailable"
         );
         ensure!(
-            self.token.is_some(),
-            "initial SETUP session token required for progression"
+            self.session_bound,
+            "validated initial SETUP session binding required for progression"
         );
         self.ack("RECORD", None, &[])?;
         self.stage = Some(Stage::Record);
@@ -496,6 +512,7 @@ impl Session {
             wire.close();
         }
         self.token = None;
+        self.session_bound = false;
         result
     }
     fn finish(&mut self, result: Result<()>) -> Result<()> {
