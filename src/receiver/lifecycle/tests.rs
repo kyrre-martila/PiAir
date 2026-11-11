@@ -881,3 +881,33 @@ fn rejected_formats_send_no_setup_and_allocate_no_timing() {
         server.join().unwrap();
     }
 }
+
+#[test]
+fn signed_mask_reconciliation_reaches_the_existing_authenticated_gate() {
+    for (mask, list, accepted) in [
+        (i64::MIN + 2097152, vec![21, 23, 72], true),
+        (i64::MIN + 2097152, vec![21, 63], true),
+        (i64::MIN, vec![21, 72], false),
+        (i64::MIN + 2097152, vec![23, 72], false),
+        (i64::MIN, vec![23, 72], false),
+        (i64::MIN + 2097152, vec![21, 21], false),
+    ] {
+        let mut value = info();
+        let root = value.as_dictionary_mut().unwrap();
+        root.insert(
+            "supportedFormats".into(),
+            profile::dict([("bufferStream", Value::Integer(mask.into()))]),
+        );
+        root.insert(
+            "supportedAudioFormatsExtended".into(),
+            profile::dict([(
+                "bufferStream",
+                Value::Array(list.into_iter().map(profile::uint).collect()),
+            )]),
+        );
+        assert_eq!(
+            validate_info(&value, "device:112233445566").is_ok(),
+            accepted
+        );
+    }
+}
