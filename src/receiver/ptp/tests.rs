@@ -560,7 +560,16 @@ fn unauthenticated_timing_is_rejected_before_io() {
         .buffered_timing("rtsp://127.0.0.2/session".into(), &clock)
         .is_err());
     assert!(wire
-        .start_ptp(42, 0x1122334455667788, Duration::from_secs(1))
+        .start_ptp(
+            42,
+            0x1122334455667788,
+            crate::receiver::lifecycle::TimingPeer::select(
+                &[plist::Value::String("127.0.0.1".into())],
+                "127.0.0.1".parse().unwrap()
+            )
+            .unwrap(),
+            Duration::from_secs(1)
+        )
         .is_err());
     drop(wire);
     t.join().unwrap();
@@ -781,7 +790,16 @@ fn ptp_requires_both_authentication_and_concrete_authorization() {
     let _approval = wire.ptp_test_authorization().unwrap();
     assert!(wire.ptp_lease().is_err()); // allowlist alone is not authentication
     assert!(wire
-        .start_ptp(42, 0x1122334455667788, Duration::from_secs(1))
+        .start_ptp(
+            42,
+            0x1122334455667788,
+            crate::receiver::lifecycle::TimingPeer::select(
+                &[plist::Value::String("127.0.0.1".into())],
+                "127.0.0.1".parse().unwrap()
+            )
+            .unwrap(),
+            Duration::from_secs(1)
+        )
         .is_err());
     let mut wire = wire
         .secure(
@@ -804,7 +822,16 @@ fn ptp_requires_both_authentication_and_concrete_authorization() {
         .unwrap();
     assert!(wire.ptp_lease().is_err()); // keys alone cannot use legacy None leases
     assert!(wire
-        .start_ptp(42, 0x1122334455667788, Duration::from_secs(1))
+        .start_ptp(
+            42,
+            0x1122334455667788,
+            crate::receiver::lifecycle::TimingPeer::select(
+                &[plist::Value::String("127.0.0.1".into())],
+                "127.0.0.1".parse().unwrap()
+            )
+            .unwrap(),
+            Duration::from_secs(1)
+        )
         .is_err());
     assert!(wire
         .buffered_timing("rtsp://127.0.0.1/session".into(), &fixture_clock())
@@ -1051,4 +1078,33 @@ fn announce_sequence_is_independent_and_quality_is_truthful() {
     assert_eq!(second[0].kind, Kind::Announce);
     assert_eq!(second[0].sequence, 1);
     assert_eq!(second[1].sequence, 2);
+}
+
+#[test]
+fn connected_udp_rejects_unsolicited_source_and_authenticated_clock_mismatch() {
+    let fixture = authorized_ptp_fixture();
+    let (event, peer_event) = udp_pair();
+    let (general, _peer_general) = udp_pair();
+    let destination = event.local_addr().unwrap();
+    let mut service = Service::attach(
+        fixture_clock(),
+        event,
+        general,
+        fixture.wire.ptp_lease().unwrap(),
+    )
+    .unwrap();
+    let attacker = UdpSocket::bind((Ipv4Addr::new(127, 0, 0, 2), 0)).unwrap();
+    let valid = request(Kind::DelayReq, 1).encode().unwrap();
+    attacker.send_to(&valid, destination).unwrap();
+    service.poll(&AtomicBool::new(false)).unwrap();
+    assert!(service.clock.last_peer.is_none());
+    let mut wrong = request(Kind::DelayReq, 2);
+    wrong.source[0] ^= 1;
+    peer_event.send(&wrong.encode().unwrap()).unwrap();
+    service.poll(&AtomicBool::new(false)).unwrap();
+    assert!(service.clock.last_peer.is_none());
+    peer_event.send(&valid).unwrap();
+    service.poll(&AtomicBool::new(false)).unwrap();
+    assert!(service.clock.last_peer.is_some());
+    assert!(!service.clock.media_permitted());
 }

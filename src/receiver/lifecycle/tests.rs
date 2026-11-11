@@ -206,7 +206,7 @@ fn initial_setup_pins_clock_address_protocol_and_ports() {
         (
             "Addresses",
             Value::Array(vec![
-                Value::String("127.0.0.2".into()),
+                Value::String("bad numeric IP".into()),
                 Value::String("127.0.0.3".into()),
             ]),
         ),
@@ -909,5 +909,136 @@ fn signed_mask_reconciliation_reaches_the_existing_authenticated_gate() {
             validate_info(&value, "device:112233445566").is_ok(),
             accepted
         );
+    }
+}
+
+#[test]
+fn advertised_timing_selection_is_bounded_and_deterministic() {
+    fn select(authorized: &str, addresses: &[&str]) -> Result<IpAddr> {
+        let values: Vec<_> = addresses
+            .iter()
+            .map(|s| Value::String((*s).into()))
+            .collect();
+        TimingPeer::select(&values, authorized.parse().unwrap()).map(TimingPeer::ip)
+    }
+    let authorized = "192.168.1.119";
+    for addresses in [
+        vec![authorized],
+        vec!["192.168.1.120", authorized],
+        vec![authorized, authorized],
+    ] {
+        assert_eq!(
+            select(authorized, &addresses).unwrap().to_string(),
+            authorized
+        );
+    }
+    assert_eq!(
+        select(authorized, &["192.168.1.120", "192.168.1.121"])
+            .unwrap()
+            .to_string(),
+        "192.168.1.120"
+    );
+    assert_eq!(
+        select(authorized, &["2001:db8::1", "192.168.1.120"])
+            .unwrap()
+            .to_string(),
+        "192.168.1.120"
+    );
+    assert_eq!(
+        select("2001:db8::1", &["192.168.1.119", "2001:db8::2"])
+            .unwrap()
+            .to_string(),
+        "2001:db8::2"
+    );
+    for addresses in [
+        vec![],
+        vec!["not-an-ip"],
+        vec!["192.168.1.119", "bad"],
+        vec!["0.0.0.0", "224.0.0.1", "255.255.255.255", "127.0.0.1"],
+        vec!["::ffff:192.168.1.119"],
+        vec![authorized; 33],
+    ] {
+        assert!(select(authorized, &addresses).is_err(), "{addresses:?}");
+    }
+    for address in [
+        "fe80::1",
+        "fe80::1%eth0",
+        "::",
+        "ff02::1",
+        "::1",
+        "::ffff:192.168.1.119",
+    ] {
+        assert!(select("2001:db8::1", &[address]).is_err(), "{address}");
+    }
+    assert!(TimingPeer::select(&[Value::Integer(1.into())], authorized.parse().unwrap()).is_err());
+}
+
+#[test]
+fn selected_advertised_peer_is_carried_with_authenticated_clock() {
+    let mut response = setup(123);
+    response
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("timingPeerInfo")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .insert(
+            "Addresses".into(),
+            Value::Array(vec![Value::String("192.168.1.120".into())]),
+        );
+    let selected = InitialSetup::parse(&response, "192.168.1.119".parse().unwrap(), 42).unwrap();
+    assert_eq!(selected.peer.ip().to_string(), "192.168.1.120");
+    assert_eq!(selected.clock_id, 123);
+}
+
+#[test]
+fn advertised_address_failure_and_selected_peer_attachment_failure_teardown() {
+    for malformed in [true, false] {
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            let mut keys = server_keys();
+            read_request(&mut socket, &mut keys);
+            reply(&mut socket, &mut keys, 1, Some(info()));
+            read_request(&mut socket, &mut keys);
+            let mut response = setup(123);
+            response
+                .as_dictionary_mut()
+                .unwrap()
+                .get_mut("timingPeerInfo")
+                .unwrap()
+                .as_dictionary_mut()
+                .unwrap()
+                .insert(
+                    "Addresses".into(),
+                    Value::Array(vec![Value::String(
+                        if malformed {
+                            "malformed"
+                        } else {
+                            "192.168.1.120"
+                        }
+                        .into(),
+                    )]),
+                );
+            reply(&mut socket, &mut keys, 2, Some(response));
+            let (head, _) = read_request(&mut socket, &mut keys);
+            assert!(head.starts_with("TEARDOWN "));
+            reply(&mut socket, &mut keys, 3, None);
+        });
+        let result = owner.negotiate_with(|_, setup, _| {
+            assert!(!malformed);
+            assert_eq!(setup.peer.ip().to_string(), "192.168.1.120");
+            assert_eq!(setup.clock_id, 123);
+            bail!("timing interface unavailable (injected)")
+        });
+        let error = owner.finish(result).unwrap_err();
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains(if malformed {
+            "address validation failed"
+        } else {
+            "interface unavailable"
+        }));
+        assert_eq!(owner.state(), State::Failed);
+        assert!(owner.control.is_none() && owner.timing.is_none() && owner.events.is_none());
+        server.join().unwrap();
     }
 }

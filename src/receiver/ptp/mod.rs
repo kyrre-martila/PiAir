@@ -525,6 +525,9 @@ impl Service {
         self.event.take();
         self.general.take();
     }
+    pub(super) fn peer(&self) -> std::net::IpAddr {
+        self.lease.peer()
+    }
     pub fn clock(&self) -> &Grandmaster {
         &self.clock
     }
