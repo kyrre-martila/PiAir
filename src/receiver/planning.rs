@@ -94,36 +94,11 @@ impl Evidence {
                 .map(Claim::Observed)
                 .unwrap_or(Claim::Invalid)
         };
-        let mask = integer(&["supportedFormats", "bufferStream"]);
-        let extended = value
-            .as_dictionary()
-            .and_then(|d| d.get("supportedAudioFormatsExtended"))
-            .and_then(Value::as_dictionary)
-            .and_then(|d| d.get("bufferStream"));
-        let list = match extended {
-            None if value
-                .as_dictionary()
-                .and_then(|d| d.get("supportedAudioFormatsExtended"))
-                .is_some_and(|v| v.as_dictionary().is_none()) =>
-            {
-                Claim::Invalid
-            }
-            None if value.as_dictionary().is_none() => Claim::Invalid,
-            None => Claim::Unknown,
-            Some(v) => match v.as_array() {
-                Some(a) if a.len() <= 64 => a
-                    .iter()
-                    .map(Value::as_unsigned_integer)
-                    .collect::<Option<BTreeSet<_>>>()
-                    .filter(|ids| ids.len() == a.len())
-                    .map(Claim::Observed)
-                    .unwrap_or(Claim::Invalid),
-                _ => Claim::Invalid,
-            },
-        };
+        let mask = legacy_buffered_mask(value);
+        let list = extended_buffered_formats(value);
         let raw_mask = mask.clone();
         let raw_list = list.clone();
-        let mask = match mask {
+        let mask: Claim<BTreeSet<u64>> = match mask {
             Claim::Observed(m) => {
                 Claim::Observed((0..64).filter(|bit| m & (1u64 << bit) != 0).collect())
             }
@@ -134,8 +109,14 @@ impl Evidence {
         // that range cannot contradict it and remain unknown codec evidence.
         let buffered_formats = match (mask, list) {
             (Claim::Observed(mask), Claim::Observed(list)) => {
-                if mask == list.iter().copied().filter(|id| *id < 64).collect() {
-                    Claim::Observed(list)
+                if mask.contains(&21) == list.contains(&21) {
+                    // Only advertise mutually confirmed low IDs; high IDs have
+                    // no legacy representation. ID 21 alone gates local ALAC.
+                    Claim::Observed(
+                        list.into_iter()
+                            .filter(|id| *id >= 64 || mask.contains(id))
+                            .collect(),
+                    )
                 } else {
                     Claim::Conflict
                 }
@@ -174,6 +155,62 @@ impl Evidence {
             realtime_format,
             buffered_formats,
         }
+    }
+}
+/// A mask is a bit pattern, unlike numeric feature/status fields. Negative
+/// plist integers encode the high bit; byte conversion preserves all 64 bits.
+fn integer_mask(integer: &plist::Integer) -> u64 {
+    integer.as_unsigned().unwrap_or_else(|| {
+        u64::from_ne_bytes(
+            integer
+                .as_signed()
+                .expect("plist integer is i64 or u64")
+                .to_ne_bytes(),
+        )
+    })
+}
+fn legacy_buffered_mask(value: &Value) -> Claim<u64> {
+    let Some(root) = value.as_dictionary() else {
+        return Claim::Invalid;
+    };
+    let Some(parent) = root.get("supportedFormats") else {
+        return Claim::Unknown;
+    };
+    let Some(parent) = parent.as_dictionary() else {
+        return Claim::Invalid;
+    };
+    match parent.get("bufferStream") {
+        None => Claim::Unknown,
+        Some(Value::Integer(integer)) => Claim::Observed(integer_mask(integer)),
+        Some(_) => Claim::Invalid,
+    }
+}
+fn extended_buffered_formats(value: &Value) -> Claim<BTreeSet<u64>> {
+    let extended = value
+        .as_dictionary()
+        .and_then(|d| d.get("supportedAudioFormatsExtended"))
+        .and_then(Value::as_dictionary)
+        .and_then(|d| d.get("bufferStream"));
+    match extended {
+        None if value
+            .as_dictionary()
+            .and_then(|d| d.get("supportedAudioFormatsExtended"))
+            .is_some_and(|v| v.as_dictionary().is_none()) =>
+        {
+            Claim::Invalid
+        }
+        None if value.as_dictionary().is_none() => Claim::Invalid,
+        None => Claim::Unknown,
+        Some(v) => match v.as_array() {
+            Some(a) if a.len() <= 64 => a
+                .iter()
+                .map(Value::as_unsigned_integer)
+                .collect::<Option<BTreeSet<_>>>()
+                .filter(|ids| ids.len() == a.len())
+                .map(Claim::Observed)
+                .unwrap_or(Claim::Invalid),
+            _ => Claim::Invalid,
+        },
     }
 }
 /// Fixed allowlist of fields and types; never format arbitrary plist values.
@@ -223,18 +260,21 @@ pub fn buffered_format_diagnostic(value: &Value) -> String {
                     ids.contains(&21)
                 );
             }
-            Some(Value::Integer(i)) => {
-                if let Some(mask) = i.as_unsigned() {
-                    let ids: Vec<_> = (0..64).filter(|bit| mask & (1u64 << bit) != 0).collect();
-                    let _ = write!(
+            Some(Value::Integer(i)) if field == "supportedFormats" => {
+                let mask = integer_mask(i);
+                let representation = if i.as_unsigned().is_some() {
+                    "unsigned-compatible"
+                } else {
+                    "signed-negative"
+                };
+                let ids: Vec<_> = (0..64).filter(|bit| mask & (1u64 << bit) != 0).collect();
+                let _ = write!(
                         out,
-                        " count={} ids={ids:?} required21={}",
+                        " representation={representation} mask=0x{mask:016x} bit63={} count={} ids={ids:?} required21={}",
+                        mask & (1u64 << 63) != 0,
                         ids.len(),
                         ids.contains(&21)
                     );
-                } else {
-                    out.push_str(" invalid-unsigned-mask");
-                }
             }
             _ => (),
         }
@@ -254,7 +294,20 @@ pub fn buffered_format_diagnostic(value: &Value) -> String {
             ids.contains(&21),
         ),
     };
-    let _ = write!(out, "result={state} required21={present}");
+    let legacy21 = match legacy_buffered_mask(value) {
+        Claim::Observed(mask) => Claim::Observed(mask & (1 << 21) != 0),
+        Claim::Unknown => Claim::Unknown,
+        _ => Claim::Invalid,
+    };
+    let extended21 = match extended_buffered_formats(value) {
+        Claim::Observed(ids) => Claim::Observed(ids.contains(&21)),
+        Claim::Unknown => Claim::Unknown,
+        _ => Claim::Invalid,
+    };
+    let _ = write!(
+        out,
+        "legacy21={legacy21:?} extended21={extended21:?}; result={state} required21={present}"
+    );
     out
 }
 fn reconcile<T: PartialEq>(a: Claim<T>, b: Claim<T>) -> Claim<T> {

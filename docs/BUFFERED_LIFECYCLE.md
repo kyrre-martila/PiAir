@@ -260,6 +260,12 @@ receiver is still unknown. No receiver was contacted during this development.
 
 ### Evidence and interpretation
 
+The following records Prompt 45's implementation and investigation. Its unsigned-only
+mask parsing, whole low-ID comparison and `invalid-unsigned-mask` diagnostic are
+superseded by [Prompt 47's signed-mask correction](BUFFERED_FORMAT_MASKS.md).
+Current validation compares format-21 claims, preserves signed mask bits, and
+continues to reject malformed supplied evidence. No hardware retest was performed.
+
 * **PiAir source facts:** `planning::Evidence::authenticated_info` reads
   `supportedFormats.bufferStream` as an unsigned 64-bit mask, converting set
   bit positions to format IDs. It reads

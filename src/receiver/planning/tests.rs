@@ -199,7 +199,7 @@ fn proxy_stereo_conflicts_and_changing_snapshots_are_candidates_only() {
         .contains_key(&format!("gid:{G}")));
 }
 #[test]
-fn info_projection_preserves_formats_conflicts_and_excludes_secrets() {
+fn info_projection_preserves_formats_and_excludes_secrets() {
     let mut d = plist::Dictionary::new();
     d.insert(
         "features".into(),
@@ -231,7 +231,7 @@ fn info_projection_preserves_formats_conflicts_and_excludes_secrets() {
     );
     assert_eq!(
         Evidence::authenticated_info(&Value::Dictionary(d.clone())).buffered_formats,
-        Claim::Conflict
+        Claim::Observed([].into())
     );
     for invalid in [
         Value::String("bad".into()),
@@ -523,7 +523,7 @@ fn buffered_evidence_is_unknown_until_authenticated_and_conflicts_fail_closed() 
     let conflict = Evidence::authenticated_info(&super::super::profile::dict([
         (
             "supportedFormats",
-            super::super::profile::dict([("bufferStream", Value::Integer((1u64 << 22).into()))]),
+            super::super::profile::dict([("bufferStream", Value::Integer((1u64 << 21).into()))]),
         ),
         (
             "supportedAudioFormatsExtended",
@@ -839,10 +839,6 @@ fn bounded_format_diagnostics_and_rejections() {
     for info in [
         dict([("supportedFormats", Value::Boolean(false))]),
         dict([("supportedAudioFormatsExtended", Value::Boolean(false))]),
-        dict([(
-            "supportedFormats",
-            dict([("bufferStream", Value::Integer((-1i64).into()))]),
-        )]),
     ] {
         assert_eq!(
             Evidence::authenticated_info(&info).buffered_formats,
@@ -869,4 +865,141 @@ fn diagnostic_bounds_both_fields_even_when_their_types_are_wrong() {
     assert!(diagnostic.contains("truncated=true"));
     assert!(diagnostic.contains("duplicates=true"));
     assert!(diagnostic.contains("result=malformed"));
+}
+
+#[test]
+fn signed_and_unsigned_legacy_masks_preserve_every_bit() {
+    use super::super::profile::{dict, uint};
+    for mask in [0, 2097152, 1u64 << 63, (1u64 << 63) | 2097152, u64::MAX] {
+        let expected: BTreeSet<_> = (0..64).filter(|bit| mask & (1u64 << bit) != 0).collect();
+        for integer in [
+            uint(mask),
+            Value::Integer(i64::from_ne_bytes(mask.to_ne_bytes()).into()),
+        ] {
+            let value = dict([("supportedFormats", dict([("bufferStream", integer)]))]);
+            // Test the actual plist serializer/parser boundary, not just constructed Values.
+            for binary in [false, true] {
+                let mut bytes = Vec::new();
+                if binary {
+                    value.to_writer_binary(&mut bytes).unwrap();
+                } else {
+                    value.to_writer_xml(&mut bytes).unwrap();
+                }
+                let parsed = Value::from_reader(std::io::Cursor::new(bytes)).unwrap();
+                assert_eq!(
+                    Evidence::authenticated_info(&parsed).buffered_formats,
+                    Claim::Observed(expected.clone())
+                );
+                assert!(
+                    buffered_format_diagnostic(&parsed).contains(&format!("mask=0x{mask:016x}"))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn required21_reconciliation_is_strict_and_ignores_unrelated_differences() {
+    use super::super::profile::{dict, uint};
+    // None = absent field. Present malformed evidence must never be bypassed.
+    let legacy = [
+        None,
+        Some(uint(2097152)),
+        Some(uint(0)),
+        Some(Value::String("PRIVATE".into())),
+    ];
+    let extended = [
+        None,
+        Some(Value::Array(vec![uint(21), uint(23), uint(72)])),
+        Some(Value::Array(vec![uint(23)])),
+        Some(Value::Array(vec![uint(21), uint(21)])),
+    ];
+    for (m, mask) in legacy.iter().enumerate() {
+        for (l, list) in extended.iter().enumerate() {
+            let mut root = plist::Dictionary::new();
+            if let Some(mask) = mask {
+                root.insert(
+                    "supportedFormats".into(),
+                    dict([("bufferStream", mask.clone())]),
+                );
+            }
+            if let Some(list) = list {
+                root.insert(
+                    "supportedAudioFormatsExtended".into(),
+                    dict([("bufferStream", list.clone())]),
+                );
+            }
+            let value = Value::Dictionary(root);
+            let expected = match (m, l) {
+                (3, _) | (_, 3) => Claim::Invalid,
+                (0, 0) => Claim::Unknown,
+                (1, 2) | (2, 1) => Claim::Conflict,
+                (0, 1) => Claim::Observed([21, 23, 72].into()),
+                (1, 0) => Claim::Observed([21].into()),
+                (1, 1) => Claim::Observed([21, 72].into()),
+                (0, 2) => Claim::Observed([23].into()),
+                _ => Claim::Observed([].into()),
+            };
+            assert_eq!(
+                Evidence::authenticated_info(&value).buffered_formats,
+                expected,
+                "{m}/{l}"
+            );
+            let diagnostic = buffered_format_diagnostic(&value);
+            assert!(diagnostic.contains("legacy21="));
+            assert!(diagnostic.contains("extended21="));
+            assert!(!diagnostic.contains("PRIVATE"));
+        }
+    }
+    for bad in [
+        Value::Boolean(true),
+        Value::Real(2097152.0),
+        Value::Data(vec![21]),
+        Value::Array(vec![uint(21)]),
+    ] {
+        let value = dict([
+            ("supportedFormats", dict([("bufferStream", bad)])),
+            (
+                "supportedAudioFormatsExtended",
+                dict([("bufferStream", Value::Array(vec![uint(21)]))]),
+            ),
+        ]);
+        assert_eq!(
+            Evidence::authenticated_info(&value).buffered_formats,
+            Claim::Invalid
+        );
+    }
+}
+
+#[test]
+fn synthetic_stua_shape_does_not_assert_the_unknown_legacy_mask() {
+    use super::super::profile::{dict, uint};
+    // Invented list with the reported shape ONLY: 34 unique IDs, 21 and >63.
+    // Neither this list nor either mask is a capture from Stua.
+    let ids: Vec<_> = (0..33).chain([72]).map(uint).collect();
+    assert_eq!(ids.len(), 34);
+    // The report does not reveal bit21. Exercise BOTH possible outcomes.
+    for (signed_mask, expected) in [
+        (i64::MIN, Claim::Conflict),
+        (i64::MIN + 2097152, Claim::Observed([21, 72].into())),
+    ] {
+        let value = dict([
+            (
+                "supportedFormats",
+                dict([("bufferStream", Value::Integer(signed_mask.into()))]),
+            ),
+            (
+                "supportedAudioFormatsExtended",
+                dict([("bufferStream", Value::Array(ids.clone()))]),
+            ),
+        ]);
+        assert_eq!(
+            Evidence::authenticated_info(&value).buffered_formats,
+            expected
+        );
+        let diagnostic = buffered_format_diagnostic(&value);
+        assert!(diagnostic.contains("representation=signed-negative"));
+        assert!(diagnostic.contains("count=34"));
+        assert!(!diagnostic.contains("invalid-unsigned-mask"));
+    }
 }

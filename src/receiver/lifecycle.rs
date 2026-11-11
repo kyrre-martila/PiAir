@@ -494,10 +494,13 @@ fn validate_info(value: &Value, receiver_id: &str) -> Result<()> {
         features & ((1u64 << 40) | (1u64 << 41)) == ((1u64 << 40) | (1u64 << 41)),
         "buffered audio and PTP required; no fallback"
     );
+    let format_diagnostic = super::planning::buffered_format_diagnostic(value);
+    tracing::debug!(target: "piair::rtsp", formats = %format_diagnostic,
+        "authenticated buffered format reconciliation");
     ensure!(
         matches!(evidence.buffered_formats, Claim::Observed(ref formats) if formats.contains(&21)),
         "authenticated ALAC24/48000/stereo format unavailable or contradictory: {}",
-        super::planning::buffered_format_diagnostic(value)
+        format_diagnostic
     );
     // Conservative diagnostic policy. No password/FairPlay or policy guessing.
     ensure!(
