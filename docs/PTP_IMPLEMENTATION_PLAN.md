@@ -234,3 +234,69 @@ explicit codec/rate conversion and transport/feedback ownership. Test packet
 fixtures, latency, sample wrap and loss before permitting any WAV bytes. An
 accepted SETPEERS, elapsed observation or `PeerObserved` cannot open that gate.
 The existing NTP WAV path and its regression suite remain unchanged.
+
+## Prompt 59: exact authenticated access-policy rejection
+
+Reported physical result on Apple TV Stua (AppleTV6,2, tvOS 26.6.1): stored-HAP
+pair-verify M1/M2 and M3/M4 succeeded, encrypted GET /info returned HTTP 200,
+and buffered format validation passed. `lifecycle::validate_info` then rejected
+`unsupported authenticated access policy` before initial PTP SETUP. This is a
+user-reported result; no hardware was contacted for this change.
+
+On main `5faae58` (merged #58), that exact error has two possible predicates:
+`statusFlags & ((1 << 3) | (1 << 7) | (1 << 9)) != 0`, or any present `acl`,
+`act`, `accessControlLevel`, `accessControlType` is nonzero. The log cannot tell
+which failed. Reported discovery `flags=99908` needs numeric provenance: decimal diagnostic
+output is `0x18644` (including bit 9, consistent with the report), whereas a
+literal TXT string `99908` parses as hexadecimal `0x99908` (including bit 3,
+without bit 9). Neither is a captured authenticated /info value.
+Do not substitute it for `statusFlags` or claim bit 9 caused this rejection.
+
+Actual OwnTone `src/outputs/airplay.c` was inspected at
+[`8ed84f2b3cba25d3de65e05660d59ce034b5adab`](https://github.com/owntone/owntone-server/blob/8ed84f2b3cba25d3de65e05660d59ce034b5adab/src/outputs/airplay.c):
+its flag definitions identify bit 3 as PIN required, bit 7 as password required,
+and bit 9 as one-time pairing required. `response_handler_info_generic` selects
+normal HAP pair-verify when bit 9 is set and a stored auth key exists, otherwise
+PIN enrollment. Its bit-3 branch discards the stored key and requests PIN setup.
+These are pre-authentication sequence decisions, not evidence that every such
+flag or combination is safe after verification, nor an implementation of Home
+membership authorization. No OwnTone implementation code was copied.
+
+PiAir `compatibility.rs` already permits persistent HAP with discovery bits 3/9,
+rejects those bits for transient authentication, and pins them across selection.
+`planning.rs::evaluate_airplay_auth` similarly distinguishes StoredHap from
+Transient for authenticated bits 3/9. StoredHap still means successful pinned
+receiver identity verification on the same encrypted control socket; an
+advertisement or transient SRP success cannot confer that identity. The stricter
+PTP lifecycle gate predates #58 and currently applies to both methods. Without
+Stua's authenticated field values, changing it would guess at the actual failure.
+
+This change therefore preserves every policy predicate. A bounded debug summary
+reports only the fixed policy field names, integer values (decimal and hex),
+booleans, absence and invalid-type markers. Rejection errors identify the exact
+field and expected value; status rejection includes the raw flags and rejected
+mask with bit labels. Missing/negative/malformed values remain errors. Strings,
+data, arrays and dictionaries are never rendered, and no keys, identities,
+credentials, session tokens or complete decrypted plists are logged. Group/proxy
+checks, allowlist/selection binding, stored-HAP verification, cancellation and
+fail-closed cleanup remain in force. Existing NTP WAV policy is untouched.
+
+After rebuilding and reapplying UDP319/320 bind capability as described above,
+retest under the same paired/selected user configuration with exactly:
+
+```sh
+./target/release/piair -v ptp-negotiation-check device:02d899c1833f --observation-seconds 10
+```
+
+Capture `authenticated /info access policy` and the exact rejected field/value.
+A synthetic `statusFlags=0x99908` regression intentionally still rejects mask
+`0x8`; decimal `99908` rejects mask `0x200`. Neither is an
+authenticated hardware fixture. Nonzero ACL/type or group/proxy fields
+must not be waived because pair-verify succeeded. Any later bit-9 exception needs
+captured authenticated evidence and method-specific tests, while preserving PIN,
+password and unresolved authorization restrictions. Rejection before SETUP closes
+the encrypted control socket and allocates no timing/media resources; no remote
+session exists to TEARDOWN. Existing timing-only success/cleanup tests remain.
+This command is negotiation-only with zero audio bytes. No PTP synchronization,
+clock adoption, PTP WAV playback or audible playback is claimed; default protocol
+selection and the HomePod NTP WAV path are unchanged.

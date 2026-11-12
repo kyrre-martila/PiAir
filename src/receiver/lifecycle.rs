@@ -577,6 +577,36 @@ fn command_registration() -> Result<zeroize::Zeroizing<Vec<u8>>> {
     ]))
 }
 
+// Only fixed policy field names and numeric/boolean values may reach logs/errors.
+// Never format arbitrary plist values: strings/data/containers can contain secrets.
+fn info_policy_diagnostic(root: &plist::Dictionary) -> String {
+    [
+        "statusFlags",
+        "acl",
+        "act",
+        "accessControlLevel",
+        "accessControlType",
+        "isGroupLeader",
+        "isGroupMember",
+        "isProxyGroupPlayer",
+    ]
+    .into_iter()
+    .map(|field| {
+        let value = match root.get(field) {
+            None => "absent".into(),
+            Some(Value::Integer(n)) => match n.as_unsigned() {
+                Some(n) => format!("{n} (0x{n:x})"),
+                None => format!("{} (negative)", n.as_signed().expect("plist integer")),
+            },
+            Some(Value::Boolean(b)) => b.to_string(),
+            Some(_) => "invalid-type".into(),
+        };
+        format!("{field}={value}")
+    })
+    .collect::<Vec<_>>()
+    .join("; ")
+}
+
 fn validate_info(value: &Value, receiver_id: &str) -> Result<()> {
     let root = profile::dictionary(value)?;
     let id = root
@@ -601,16 +631,24 @@ fn validate_info(value: &Value, receiver_id: &str) -> Result<()> {
         "authenticated ALAC24/48000/stereo format unavailable or contradictory: {}",
         format_diagnostic
     );
-    // Conservative diagnostic policy. No password/FairPlay or policy guessing.
+    // Separate authenticated observation, never substituted from mDNS flags/sf.
+    // Retain the conservative gate until the receiver's exact rejection is known.
+    let policy = info_policy_diagnostic(root);
+    tracing::debug!(target: "piair::rtsp", policy = %policy,
+        "authenticated /info access policy");
+    let flags = profile::integer(root, "statusFlags")
+        .with_context(|| format!("invalid authenticated access policy: rejected field=statusFlags; expected unsigned integer; {policy}"))?;
+    let rejected = flags & ((1 << 3) | (1 << 7) | (1 << 9));
     ensure!(
-        profile::integer(root, "statusFlags")? & ((1 << 3) | (1 << 7) | (1 << 9)) == 0,
-        "unsupported authenticated access policy"
+        rejected == 0,
+        "unsupported authenticated access policy: rejected field=statusFlags; rejected mask=0x{rejected:x} (bit 3=PIN, bit 7=password, bit 9=one-time pairing); {policy}"
     );
     for field in ["acl", "act", "accessControlLevel", "accessControlType"] {
         if root.contains_key(field) {
             ensure!(
-                profile::integer(root, field)? == 0,
-                "unsupported authenticated access policy"
+                profile::integer(root, field)
+                    .with_context(|| format!("invalid authenticated access policy: rejected field={field}; {policy}"))? == 0,
+                "unsupported authenticated access policy: rejected field={field}; expected zero; {policy}"
             );
         }
     }
@@ -618,7 +656,7 @@ fn validate_info(value: &Value, receiver_id: &str) -> Result<()> {
         if let Some(v) = root.get(field) {
             ensure!(
                 v.as_boolean() == Some(false),
-                "group/proxy receiver unsupported"
+                "group/proxy receiver unsupported: rejected field={field}; expected false; {policy}"
             );
         }
     }

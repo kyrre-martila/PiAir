@@ -174,6 +174,27 @@ mod tests {
         }
     }
     #[test]
+    fn stua_reported_flags_keep_numeric_provenance_and_persistent_policy() {
+        // Decimal diagnostic output and literal TXT hex have different values.
+        // Decimal 99908 has bit 9 set; literal TXT hex 99908 has bit 3 set.
+        for (flags, required_bit) in [(99908, 9), (hex_word("99908").unwrap(), 3)] {
+            assert_ne!(flags & (1 << required_bit), 0);
+            let mut c = caps((1 << 46) | (1 << 48) | (1 << 40) | (1 << 41));
+            c.flags = Some(flags);
+            assert!(c.decide(Method::StoredHap).is_ok());
+            assert!(c.decide(Method::Transient).is_err());
+            let mut changed = c.clone();
+            changed.flags = Some(flags ^ (1 << 9));
+            assert!(!changed.matches_selection(&c));
+            assert!(changed.decide(Method::StoredHap).is_ok());
+            c.access_control = Some(1);
+            assert!(c.decide(Method::StoredHap).is_err());
+        }
+        assert_eq!(99908, 0x18644);
+        assert_eq!(hex_word("99908").unwrap(), 0x99908);
+    }
+
+    #[test]
     fn only_explicit_operational_status_bits_may_change() {
         let mut saved = caps(1 << 46);
         saved.flags = Some(0x18644);

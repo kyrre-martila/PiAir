@@ -1581,3 +1581,132 @@ fn initial_ptp_offer_preserves_one_signed_clock_identity_and_verified_address() 
     }
     assert!(initial_offer("sender", "0.0.0.0".parse().unwrap(), 1, uuid).is_err());
 }
+
+#[test]
+fn authenticated_policy_reports_exact_fields_without_guessing_from_discovery() {
+    // These /info values are synthetic, NOT a capture from Stua.
+    for flags in [0, 4, 99908, 0x98404, 1 << 3, 1 << 7, 1 << 9, 0x99908] {
+        let mut value = info();
+        value
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("statusFlags".into(), profile::uint(flags));
+        let result = validate_info(&value, "device:112233445566");
+        let rejected = flags & ((1 << 3) | (1 << 7) | (1 << 9));
+        if rejected == 0 {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("rejected field=statusFlags"), "{error}");
+            assert!(
+                error.contains(&format!("statusFlags={flags} (0x{flags:x})")),
+                "{error}"
+            );
+            assert!(
+                error.contains(&format!("rejected mask=0x{rejected:x}")),
+                "{error}"
+            );
+        }
+    }
+    for field in ["acl", "act", "accessControlLevel", "accessControlType"] {
+        for v in [
+            profile::uint(0),
+            profile::uint(1),
+            profile::uint(2),
+            Value::Integer((-1).into()),
+            Value::Boolean(false),
+            Value::String("PRIVATE".into()),
+        ] {
+            let mut value = info();
+            value
+                .as_dictionary_mut()
+                .unwrap()
+                .insert(field.into(), v.clone());
+            let result = validate_info(&value, "device:112233445566");
+            if v.as_unsigned_integer() == Some(0) {
+                result.unwrap();
+            } else {
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(
+                    error.contains(&format!("rejected field={field}")),
+                    "{error}"
+                );
+                assert!(!error.contains("PRIVATE"));
+            }
+        }
+    }
+    for field in ["isGroupLeader", "isGroupMember", "isProxyGroupPlayer"] {
+        for v in [
+            Value::Boolean(false),
+            Value::Boolean(true),
+            profile::uint(0),
+        ] {
+            let mut value = info();
+            value
+                .as_dictionary_mut()
+                .unwrap()
+                .insert(field.into(), v.clone());
+            let result = validate_info(&value, "device:112233445566");
+            assert_eq!(result.is_ok(), v.as_boolean() == Some(false));
+            if let Err(error) = result {
+                assert!(error
+                    .to_string()
+                    .contains(&format!("rejected field={field}")));
+            }
+        }
+    }
+    for v in [
+        None,
+        Some(Value::String("PRIVATE".into())),
+        Some(Value::Data(b"PRIVATE".to_vec())),
+        Some(Value::Array(vec![Value::String("PRIVATE".into())])),
+        Some(Value::Integer((-1).into())),
+    ] {
+        let mut value = info();
+        let root = value.as_dictionary_mut().unwrap();
+        root.remove("statusFlags");
+        if let Some(v) = v {
+            root.insert("statusFlags".into(), v);
+        }
+        let error = format!(
+            "{:#}",
+            validate_info(&value, "device:112233445566").unwrap_err()
+        );
+        assert!(error.contains("statusFlags="));
+        assert!(!error.contains("PRIVATE"));
+        assert!(!info_policy_diagnostic(value.as_dictionary().unwrap()).contains("PRIVATE"));
+    }
+}
+
+#[test]
+fn rejected_authenticated_policy_closes_control_before_setup_without_resources() {
+    for (field, value) in [
+        ("statusFlags", profile::uint(0x99908)),
+        ("acl", profile::uint(2)),
+        ("accessControlType", Value::String("PRIVATE".into())),
+        ("isProxyGroupPlayer", Value::Boolean(true)),
+    ] {
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            let mut keys = server_keys();
+            let (head, _) = read_request(&mut socket, &mut keys);
+            assert!(head.starts_with("GET /info "));
+            let mut rejected = info();
+            rejected
+                .as_dictionary_mut()
+                .unwrap()
+                .insert(field.into(), value);
+            reply(&mut socket, &mut keys, 1, Some(rejected));
+            // No SETUP, RECORD, SETPEERS, audio or premature TEARDOWN.
+            assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+        });
+        let error = owner.setup_authenticated().unwrap_err();
+        assert!(format!("{error:#}").contains(&format!("rejected field={field}")));
+        assert_eq!(owner.state(), State::Failed);
+        assert!(!owner.attempted_setup);
+        assert!(owner.control.is_none() && owner.timing.is_none() && owner.events.is_none());
+        assert!(owner.prepared.is_none() && owner.stream.is_none());
+        assert!(owner.diagnostic().contains("audio bytes: 0"));
+        assert!(owner.request_playback().is_err());
+        server.join().unwrap();
+    }
+}
