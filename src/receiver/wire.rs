@@ -762,6 +762,19 @@ impl Wire {
             timing_worker: None,
         })
     }
+    /// Allocate only UDP media/control sockets. PTP is owned independently by
+    /// TimingSession; no NTP responder or media worker is created here.
+    pub(super) fn prepare_ptp_realtime(&self) -> Result<RealtimeTransport> {
+        let lease = self.ptp_lease()?;
+        lease.check()?;
+        let local = self.local_ip()?;
+        Ok(RealtimeTransport {
+            data: UdpSocket::bind(SocketAddr::new(local, 0))?,
+            control: UdpSocket::bind(SocketAddr::new(local, 0))?,
+            lease,
+            connected: false,
+        })
+    }
     pub(super) fn media(
         &self,
         pending: &mut Option<Ports>,
@@ -1311,6 +1324,42 @@ impl Ports {
             .port())
     }
 }
+/// Prepared authenticated realtime transport shared with the existing RTP
+/// encoder. PR 62 intentionally exposes no send method. Closing the session
+/// drops sockets and its encoder/key together; there is no detached grant.
+pub(super) struct RealtimeTransport {
+    data: UdpSocket,
+    control: UdpSocket,
+    lease: PtpLease,
+    connected: bool,
+}
+impl RealtimeTransport {
+    pub fn local_control(&self) -> Result<u16> {
+        self.lease.check()?;
+        Ok(self.control.local_addr()?.port())
+    }
+    pub fn connect(&mut self, stream: &super::profile::Stream) -> Result<()> {
+        self.lease.check()?;
+        ensure!(
+            !self.connected && stream.data != stream.control,
+            "invalid realtime transport transition"
+        );
+        self.data
+            .connect(SocketAddr::new(self.lease.peer(), stream.data))?;
+        self.control
+            .connect(SocketAddr::new(self.lease.peer(), stream.control))?;
+        self.control.set_nonblocking(true)?;
+        self.lease.check()?;
+        self.connected = true;
+        Ok(())
+    }
+    pub fn check(&self) -> Result<()> {
+        self.lease.check()?;
+        ensure!(self.connected, "realtime UDP transport not negotiated");
+        Ok(())
+    }
+}
+
 pub(super) struct MediaIo {
     data: UdpSocket,
     control: UdpSocket,

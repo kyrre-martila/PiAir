@@ -104,13 +104,13 @@ pub enum Command {
         #[arg(long, requires = "setup_check", value_enum)]
         setup_profile: Option<crate::receiver::SetupProfile>,
     },
-    /// Authenticate the selected receiver and negotiate PTP only; zero audio bytes.
+    /// Authenticate and negotiate PTP plus realtime type-96 UDP; zero audio bytes.
     PtpNegotiationCheck {
         receiver_id: String,
         /// Explicit OwnTone transient authentication; default requires stored HAP.
         #[arg(long)]
         experimental_owntone_transient: bool,
-        /// Bounded timing observation after RECORD and SETPEERS.
+        /// Bounded timing observation after realtime type-96 stream SETUP.
         #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(5..=20))]
         observation_seconds: u64,
     },

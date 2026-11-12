@@ -162,6 +162,15 @@ pub fn port(d: &Dictionary, key: &str) -> Result<u16> {
     Ok(p)
 }
 pub fn capabilities(value: &Value) -> Result<()> {
+    capabilities_inner(value, false)
+}
+
+/// A receiver may publish only buffered formats in supportedFormats. Missing
+/// realtime details are unknown; audio/ALAC feature bits remain mandatory.
+pub fn ptp_capabilities(value: &Value) -> Result<()> {
+    capabilities_inner(value, true)
+}
+fn capabilities_inner(value: &Value, allow_missing_audio_stream: bool) -> Result<()> {
     let d = dictionary(value)?;
     let f = integer(d, "features")?;
     ensure!(
@@ -178,10 +187,12 @@ pub fn capabilities(value: &Value) -> Result<()> {
     }
     if let Some(formats) = d.get("supportedFormats") {
         let formats = dictionary(formats)?;
-        ensure!(
-            integer(formats, "audioStream")? & FORMAT != 0,
-            "receiver excludes realtime ALAC/44100/16/2"
-        );
+        if !allow_missing_audio_stream || formats.contains_key("audioStream") {
+            ensure!(
+                integer(formats, "audioStream")? & FORMAT != 0,
+                "receiver excludes realtime ALAC/44100/16/2"
+            );
+        }
     }
     Ok(())
 }
@@ -281,11 +292,20 @@ pub fn stream(value: &Value) -> Result<Stream> {
 
 /// Validate any connection echo without requiring fields OwnTone doesn't require.
 pub fn stream_for_connection(value: &Value, session: u32) -> Result<Stream> {
+    stream_for_timing(value, session, "NTP")
+}
+
+/// Both timing profiles share the same realtime ALAC/RTP contract.
+pub fn stream_for_timing(value: &Value, session: u32, timing: &str) -> Result<Stream> {
+    ensure!(
+        matches!(timing, "NTP" | "PTP"),
+        "unsupported timing profile"
+    );
     let negotiated = stream(value)?;
     let root = dictionary(value)?;
     if let Some(protocol) = root.get("timingProtocol") {
         ensure!(
-            protocol.as_string() == Some("NTP"),
+            protocol.as_string() == Some(timing),
             "unsupported stream timing"
         );
     }
@@ -312,7 +332,7 @@ pub fn stream_for_connection(value: &Value, session: u32) -> Result<Stream> {
     }
     if let Some(protocol) = entry.get("timingProtocol") {
         ensure!(
-            protocol.as_string() == Some("NTP"),
+            protocol.as_string() == Some(timing),
             "unsupported stream timing"
         );
     }

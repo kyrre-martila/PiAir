@@ -1,4 +1,4 @@
-//! OwnTone-profile RTP/ALAC + NTP facts. Original implementation; no networking.
+//! Shared realtime RTP/ALAC and NTP/PTP synchronization formats. No networking.
 use super::{
     crypto,
     profile::{self, RATE, SPF},
@@ -74,6 +74,31 @@ pub fn sync(first: bool, next: u32, ntp: u64) -> [u8; 20] {
     out[16..].copy_from_slice(&next.to_be_bytes());
     out
 }
+/// PTP RTCP time announcement (PT 215), from the same clock as UDP319/320.
+/// The scheduler supplies the RTP position corresponding to `time` and its next
+/// packet position. This serializer does not schedule or send audio.
+pub fn ptp_sync(
+    first: bool,
+    current_rtp: u32,
+    next_rtp: u32,
+    clock_id: u64,
+    time: super::ptp::time::Timestamp,
+) -> Result<[u8; 28]> {
+    ensure!(
+        clock_id != 0 && clock_id != u64::MAX,
+        "invalid PTP sync clock"
+    );
+    super::ptp::time::Timestamp::new(time.seconds, time.nanos)?;
+    let nanos = u64::try_from(time.ns())?;
+    let mut out = [0; 28];
+    out[..4].copy_from_slice(&[if first { 0x90 } else { 0x80 }, 0xd7, 0, 6]);
+    out[4..8].copy_from_slice(&current_rtp.to_be_bytes());
+    out[8..16].copy_from_slice(&nanos.to_be_bytes());
+    out[16..20].copy_from_slice(&next_rtp.wrapping_sub(STREAM_LATENCY_SAMPLES).to_be_bytes());
+    out[20..].copy_from_slice(&clock_id.to_be_bytes());
+    Ok(out)
+}
+
 pub struct Encoder {
     key: Zeroizing<[u8; 32]>,
     nonce: u64,
@@ -449,5 +474,35 @@ mod tests {
             ntp: 0xffffffff00000000,
         };
         assert_eq!(clock.at(Duration::from_secs(1)), 0);
+    }
+}
+
+#[cfg(test)]
+mod ptp_sync_tests {
+    use super::*;
+    #[test]
+    fn ptp_time_announcement_has_exact_layout_wrap_and_monotonic_nanoseconds() {
+        let time = super::super::ptp::time::Timestamp::new(1, 500_000_000).unwrap();
+        let packet = ptp_sync(true, 0x11223344, 11024, 0x0102030405060708, time).unwrap();
+        assert_eq!(
+            packet,
+            [
+                0x90, 0xd7, 0, 6, 0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0, 0x59, 0x68, 0x2f, 0, 0xff,
+                0xff, 0xff, 0xff, 1, 2, 3, 4, 5, 6, 7, 8,
+            ]
+        );
+        assert_eq!(ptp_sync(false, 0, 0, 1, time).unwrap()[0], 0x80);
+        assert!(ptp_sync(true, 0, 0, 0, time).is_err());
+        assert!(ptp_sync(
+            true,
+            0,
+            0,
+            1,
+            super::super::ptp::time::Timestamp {
+                seconds: 1 << 48,
+                nanos: 0,
+            }
+        )
+        .is_err());
     }
 }

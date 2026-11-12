@@ -131,6 +131,7 @@ fn fixture_auth(
     let mut wire = wire
         .secure(ControlKeys::new(b"lifecycle"), ControlKeys::new(b"events"))
         .unwrap();
+    wire.install_audio_key(&[0x62; 32]).unwrap();
     if verified {
         wire.bind_stored_hap_verification(pairing::verified_stored_hap_for_test());
     }
@@ -1840,5 +1841,254 @@ fn stua_policy_reaches_setup_only_on_verified_stored_hap_wire() {
         assert_eq!(owner.state(), State::Failed);
         assert!(owner.control.is_none() && owner.events.is_none() && owner.timing.is_none());
         server.join().unwrap();
+    }
+}
+
+fn realtime_info() -> Value {
+    let mut value = info();
+    let d = value.as_dictionary_mut().unwrap();
+    d.insert(
+        "features".into(),
+        profile::uint((1 << 9) | (1 << 19) | (1u64 << 41)),
+    );
+    d.insert(
+        "supportedFormats".into(),
+        profile::dict([("audioStream", profile::uint(profile::FORMAT))]),
+    );
+    value
+}
+
+#[test]
+fn complete_realtime_ptp_negotiation_owns_udp_key_and_bounded_cleanup() {
+    for tokenless in [false, true] {
+        TOKENLESS.with(|mode| mode.set(tokenless));
+        let data = UdpSocket::bind("127.0.0.2:0").unwrap();
+        let control = UdpSocket::bind("127.0.0.2:0").unwrap();
+        let data_port = data.local_addr().unwrap().port();
+        let control_port = control.local_addr().unwrap().port();
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            let mut keys = server_keys();
+            for (seq, method, response) in [
+                (1, "GET /info ", Some(realtime_info())),
+                (2, "SETUP ", Some(setup(123))),
+                (3, "RECORD ", None),
+                (4, "SETPEERS ", None),
+                (
+                    5,
+                    "SETUP ",
+                    Some(profile::dict([
+                        ("timingProtocol", Value::String("PTP".into())),
+                        (
+                            "streams",
+                            Value::Array(vec![profile::dict([
+                                ("type", profile::uint(96)),
+                                ("dataPort", profile::uint(u64::from(data_port))),
+                                ("controlPort", profile::uint(u64::from(control_port))),
+                            ])]),
+                        ),
+                    ])),
+                ),
+                (6, "TEARDOWN ", None),
+            ] {
+                let (header, body) = read_request(&mut socket, &mut keys);
+                assert!(header.starts_with(method), "{header}");
+                assert!(header.contains(&format!("CSeq: {seq}\r\n")));
+                if seq == 4 {
+                    assert!(header.contains("Content-Type: /peer-list-changed\r\n"));
+                    assert_eq!(profile::parse(&body).unwrap().as_array().unwrap().len(), 2);
+                }
+                if seq == 5 {
+                    let offer = profile::parse(&body).unwrap();
+                    let stream = profile::dictionary(&offer).unwrap()["streams"]
+                        .as_array()
+                        .unwrap();
+                    let stream = profile::dictionary(&stream[0]).unwrap();
+                    for (field, value) in [
+                        ("type", 96),
+                        ("audioFormat", profile::FORMAT),
+                        ("sr", 44100),
+                        ("spf", 352),
+                        ("ct", 2),
+                    ] {
+                        assert_eq!(profile::integer(stream, field).unwrap(), value);
+                    }
+                    assert_eq!(stream["shk"].as_data().unwrap(), &[0x62; 32]);
+                    assert!(profile::port(stream, "controlPort").is_ok());
+                    assert!(!stream.contains_key("dataPort"));
+                }
+                reply(&mut socket, &mut keys, seq, response);
+            }
+        });
+        owner.realtime_profile = true;
+        let (event, peer_event) = udp_pair();
+        let (general, _peer_general) = udp_pair();
+        let addresses = (event.local_addr().unwrap(), general.local_addr().unwrap());
+        owner
+            .negotiate_with(|wire, setup, clock| {
+                Ok((
+                    None,
+                    ptp::Service::attach(
+                        ptp::Grandmaster::new(
+                            clock,
+                            setup.clock_id,
+                            Instant::now(),
+                            Duration::from_secs(30),
+                        )?,
+                        event,
+                        general,
+                        wire.ptp_lease()?,
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert!(owner.realtime_ready().is_err());
+        owner.negotiate_realtime().unwrap();
+        assert!(owner.prepared.is_none() && owner.stream.is_none());
+        let mut delay = ptp::packet::Packet::new(ptp::packet::Kind::DelayReq, 123, 1, vec![0; 10]);
+        delay.source[8..].copy_from_slice(&32969u16.to_be_bytes());
+        peer_event.send(&delay.encode().unwrap()).unwrap();
+        owner.observe(Duration::from_millis(4)).unwrap();
+        owner.realtime_ready().unwrap();
+        assert_eq!(owner.realtime_ports, Some((data_port, control_port)));
+        // No RTP, RTCP, volume or buffered anchor requests are transmitted.
+        for socket in [&data, &control] {
+            socket.set_nonblocking(true).unwrap();
+            assert_eq!(
+                socket.recv(&mut [0; 2048]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        let local_control = owner
+            .realtime_transport
+            .as_ref()
+            .unwrap()
+            .local_control()
+            .unwrap();
+        owner.stop().unwrap();
+        assert!(owner.realtime_encoder.is_none() && owner.realtime_transport.is_none());
+        assert!(owner.realtime_ready().is_err());
+        let _rebound = UdpSocket::bind(("127.0.0.1", local_control)).unwrap();
+        let _event = UdpSocket::bind(addresses.0).unwrap();
+        let _general = UdpSocket::bind(addresses.1).unwrap();
+        assert!(owner
+            .diagnostic()
+            .contains("operational readiness at snapshot: true"));
+        assert!(owner.diagnostic().contains("TEARDOWN: acknowledged"));
+        server.join().unwrap();
+    }
+    TOKENLESS.with(|mode| mode.set(false));
+}
+
+#[test]
+fn realtime_stream_rejection_and_disconnect_destroy_prepared_resources() {
+    for fault in 0..5 {
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            let mut keys = server_keys();
+            for (seq, method, response) in [
+                (1, "GET /info ", Some(realtime_info())),
+                (2, "SETUP ", Some(setup(123))),
+                (3, "RECORD ", None),
+                (4, "SETPEERS ", None),
+            ] {
+                assert!(read_request(&mut socket, &mut keys).0.starts_with(method));
+                reply(&mut socket, &mut keys, seq, response);
+            }
+            let (header, body) = read_request(&mut socket, &mut keys);
+            assert!(header.starts_with("SETUP "));
+            if fault == 4 {
+                return;
+            } // actual TCP disconnect during stream SETUP
+            let offered = profile::parse(&body).unwrap();
+            let connection = offered.as_dictionary().unwrap()["streams"]
+                .as_array()
+                .unwrap()[0]
+                .as_dictionary()
+                .unwrap()["streamConnectionID"]
+                .as_unsigned_integer()
+                .unwrap();
+            let mut stream = profile::dict([
+                ("type", profile::uint(96)),
+                ("dataPort", profile::uint(6000)),
+                ("controlPort", profile::uint(6001)),
+                ("streamConnectionID", profile::uint(connection)),
+            ]);
+            let (field, bad) = match fault {
+                0 => ("type", profile::uint(103)),
+                1 => ("dataPort", profile::uint(0)),
+                2 => ("controlPort", profile::uint(6000)),
+                _ => ("streamConnectionID", profile::uint(connection + 1)),
+            };
+            stream
+                .as_dictionary_mut()
+                .unwrap()
+                .insert(field.into(), bad);
+            reply(
+                &mut socket,
+                &mut keys,
+                5,
+                Some(profile::dict([("streams", Value::Array(vec![stream]))])),
+            );
+            assert!(read_request(&mut socket, &mut keys)
+                .0
+                .starts_with("TEARDOWN "));
+            reply(&mut socket, &mut keys, 6, None);
+        });
+        owner.realtime_profile = true;
+        let (event, _peer_event) = udp_pair();
+        let (general, _peer_general) = udp_pair();
+        let addresses = (event.local_addr().unwrap(), general.local_addr().unwrap());
+        owner
+            .negotiate_with(|wire, setup, clock| {
+                Ok((
+                    None,
+                    ptp::Service::attach(
+                        ptp::Grandmaster::new(
+                            clock,
+                            setup.clock_id,
+                            Instant::now(),
+                            Duration::from_secs(30),
+                        )?,
+                        event,
+                        general,
+                        wire.ptp_lease()?,
+                    )?,
+                ))
+            })
+            .unwrap();
+        let before = Instant::now();
+        assert!(owner.negotiate_realtime().is_err());
+        assert!(before.elapsed() < Duration::from_secs(2));
+        assert_eq!(owner.state(), State::Failed);
+        assert!(owner.realtime_encoder.is_none() && owner.realtime_transport.is_none());
+        assert!(owner.control.is_none() && owner.timing.is_none());
+        let _event = UdpSocket::bind(addresses.0).unwrap();
+        let _general = UdpSocket::bind(addresses.1).unwrap();
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn realtime_info_needs_audio_alac_ptp_but_no_buffered_capability_or_format() {
+    let mut info = realtime_info();
+    validate_info_profile(&info, "device:112233445566", None, true).unwrap();
+    info.as_dictionary_mut().unwrap().insert(
+        "supportedFormats".into(),
+        profile::dict([("bufferStream", profile::uint(1 << 21))]),
+    );
+    validate_info_profile(&info, "device:112233445566", None, true).unwrap();
+    for format in [profile::uint(0), Value::String("ALAC".into())] {
+        info.as_dictionary_mut().unwrap().insert(
+            "supportedFormats".into(),
+            profile::dict([("audioStream", format)]),
+        );
+        assert!(validate_info_profile(&info, "device:112233445566", None, true).is_err());
+    }
+    for missing in [9, 19, 41] {
+        let mut info = realtime_info();
+        info.as_dictionary_mut().unwrap().insert(
+            "features".into(),
+            profile::uint(((1 << 9) | (1 << 19) | (1u64 << 41)) & !(1 << missing)),
+        );
+        assert!(validate_info_profile(&info, "device:112233445566", None, true).is_err());
     }
 }

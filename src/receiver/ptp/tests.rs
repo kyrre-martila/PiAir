@@ -202,10 +202,10 @@ fn grandmaster_liveness_is_not_receiver_lock() {
     assert_eq!(c.state(), State::Initializing);
     assert!(!c.media_permitted());
     let packets = c.due(now).unwrap();
-    assert_eq!(packets.len(), 2);
-    let sync = &packets[1];
+    assert_eq!(packets.len(), 3);
+    let sync = &packets[2];
     assert_eq!(sync.kind, Kind::Sync);
-    assert_eq!(sync.flags, 0x0600);
+    assert_eq!(sync.flags, 0x0608);
     let fup = c.follow_up(sync, now + Duration::from_nanos(123)).unwrap();
     assert_eq!(fup.sequence, sync.sequence);
     assert_eq!(fup.timestamp().unwrap().nanos, 123);
@@ -257,7 +257,7 @@ fn timeout_cancel_clock_reversal_and_pdelay() {
     let response = c
         .receive(&request(Kind::PdelayReq, 12).encode().unwrap(), now)
         .unwrap();
-    assert_eq!(response[0].flags, 0x0600);
+    assert_eq!(response[0].flags, 0x0608);
     assert_eq!(response[0].kind, Kind::PdelayResp);
     assert_eq!(response[0].body[10..], request(Kind::PdelayReq, 12).source);
 }
@@ -370,11 +370,19 @@ fn loopback_service_and_socket_cleanup() {
     let n = peer_event.recv(&mut b).unwrap();
     assert_eq!(Packet::decode(&b[..n]).unwrap().kind, Kind::Sync);
     let mut kinds = vec![];
-    for _ in 0..3 {
+    for _ in 0..4 {
         let n = peer_general.recv(&mut b).unwrap();
         kinds.push(Packet::decode(&b[..n]).unwrap().kind);
     }
-    assert_eq!(kinds, vec![Kind::Announce, Kind::FollowUp, Kind::DelayResp]);
+    assert_eq!(
+        kinds,
+        vec![
+            Kind::Announce,
+            Kind::Signaling,
+            Kind::FollowUp,
+            Kind::DelayResp
+        ]
+    );
     cancel.store(true, Ordering::Relaxed);
     assert!(s.poll(&cancel).is_err());
     assert_eq!(s.state(), State::Shutdown);
@@ -1027,7 +1035,7 @@ fn apple_follow_up_known_answer_and_conflicting_extensions() {
         Timestamp::new(1, 500_000_000).unwrap()
     );
     assert_eq!(p.encode().unwrap(), bytes);
-    for (index, byte) in [(79, 14), (86, 0xff), (95, 1), (32, 4)] {
+    for (index, byte) in [(79, 14), (95, 1), (32, 4)] {
         let mut bad = bytes.clone();
         bad[index] = byte;
         assert!(Packet::decode(&bad).is_err(), "index {index}");
@@ -1070,7 +1078,10 @@ fn apple_signaling_is_bounded_opaque_and_cannot_register_peers() {
     let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
     c.check(now, false).unwrap();
     c.receive_general(&encoded, now).unwrap();
-    assert_eq!(c.peer_ports[Kind::DelayReq as usize], None);
+    assert!(c
+        .ports
+        .values()
+        .all(|p| p.sequences[Kind::DelayReq as usize].is_none()));
     assert_eq!(c.last_peer, Some(now));
     c.check(now + Duration::from_secs(1), false).unwrap();
     let mut bad = p.clone();
@@ -1088,12 +1099,12 @@ fn announce_sequence_is_independent_and_quality_is_truthful() {
     let first = c.due(now).unwrap();
     assert_eq!(first[0].body[14..18], [248, 0xfe, 0xff, 0xff]);
     assert_eq!(first[0].body[29], 0xa0);
-    assert_eq!(first[0].flags & 0x003f, 0); // no UTC/traceability/timescale claims
+    assert_eq!(first[0].flags & 0x003f, 8); // PTP timescale, no UTC/traceability claims
     c.due(now + Duration::from_millis(125)).unwrap();
     let second = c.due(now + Duration::from_secs(1)).unwrap();
     assert_eq!(second[0].kind, Kind::Announce);
     assert_eq!(second[0].sequence, 1);
-    assert_eq!(second[1].sequence, 2);
+    assert_eq!(second[2].sequence, 2);
 }
 
 #[test]
@@ -1216,14 +1227,14 @@ fn stua_delay_exchange_preserves_validation_and_timestamp() {
             (6, 2),
             (15, 1),
             (20, 0x12),
-            (29, 6),
+            (29, 0),
             (32, 2),
             (40, 255),
         ] {
             let mut bad = bytes;
             bad[index] = value;
             // First request has no pinned port yet; a zero port is always invalid.
-            if index == 29 && sequence == 1 {
+            if index == 29 {
                 bad[28] = 0;
                 bad[29] = 0;
             }
@@ -1242,7 +1253,7 @@ fn stua_delay_exchange_preserves_validation_and_timestamp() {
             ts(i128::from(sequence) * 123_456_789)
         );
         assert_eq!(response.correction, 0);
-        assert_eq!(response.flags, 0x0400);
+        assert_eq!(response.flags, 0x0608);
         assert_eq!(
             Packet::decode(&response.encode().unwrap()).unwrap(),
             response
@@ -1273,7 +1284,7 @@ fn stua_delay_req_service_routes_response_to_general_channel() {
     let mut buffer = [0; 513];
     let n = peer_event.recv(&mut buffer).unwrap();
     assert_eq!(Packet::decode(&buffer[..n]).unwrap().kind, Kind::Sync);
-    for expected in [Kind::Announce, Kind::FollowUp] {
+    for expected in [Kind::Announce, Kind::Signaling, Kind::FollowUp] {
         let n = peer_general.recv(&mut buffer).unwrap();
         assert_eq!(Packet::decode(&buffer[..n]).unwrap().kind, expected);
     }
@@ -1374,13 +1385,13 @@ fn inbound_sync_observed_but_conflicting_timeline_never_adopted() {
     // Hypothesis fixture, NOT a Stua capture: TLV names our timeline while
     // sourcePortIdentity names the receiver. This is not authenticated adoption.
     bytes[86..94].copy_from_slice(&42u64.to_be_bytes());
-    for _ in 0..2 {
-        assert!(clock
-            .receive_general(&bytes, now + Duration::from_secs(1))
-            .unwrap_err()
-            .to_string()
-            .contains("conflicting Apple clock TLV"));
-    }
+    clock
+        .receive_general(&bytes, now + Duration::from_secs(1))
+        .unwrap();
+    // Clock identity in a private TLV is informational, never authority or lock.
+    assert!(clock
+        .receive_general(&bytes, now + Duration::from_secs(1))
+        .is_err());
     assert!(clock
         .receive_general(&bytes[..95], now + Duration::from_secs(1))
         .is_err());
@@ -1508,7 +1519,9 @@ fn apple_tv_single_delay_then_ten_seconds_of_validated_observations() {
     for second in 11..=13 {
         let at = now + Duration::from_secs(second);
         let mut bad = request(Kind::Sync, second as u16);
-        assert!(c.receive(&bad.encode().unwrap(), at).is_err()); // role port changed
+        bad.source[8..].fill(0);
+        assert!(bad.encode().is_err());
+        bad = request(Kind::Sync, second as u16);
         bad.source[..8].copy_from_slice(&99u64.to_be_bytes());
         assert!(c.receive(&bad.encode().unwrap(), at).is_err());
         c.check(at, false).unwrap();
@@ -1606,8 +1619,7 @@ fn zero_source_port_is_rejected_before_any_observation() {
         // Defense at the typed observation boundary as well as in the decoder.
         assert!(clock.validate_observation(&packet, now).is_err());
         assert!(clock.last_peer.is_none());
-        assert_eq!(clock.peer_ports, [None; 16]);
-        assert_eq!(clock.last_sequences, [None; 16]);
+        assert!(clock.ports.is_empty());
         // A fresh clock uses this test's deterministic time base.
         let mut clock =
             Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
@@ -1658,9 +1670,10 @@ fn unsupported_and_malformed_sync_cannot_pin_or_refresh_peer() {
     for bytes in rejected {
         assert!(clock.receive(&bytes, now + Duration::from_secs(1)).is_err());
         assert_eq!(clock.last_peer, Some(now));
-        assert_eq!(clock.peer_ports[Kind::Sync as usize], None);
-        assert_eq!(clock.last_sequences[Kind::Sync as usize], None);
-        assert!(clock.incoming_sync.is_none());
+        assert!(clock
+            .ports
+            .values()
+            .all(|p| p.sequences[Kind::Sync as usize].is_none() && p.sync.is_none()));
         assert_eq!(clock.clock_id, 42);
         assert!(!clock.media_permitted());
     }
@@ -1678,4 +1691,119 @@ fn unsupported_and_malformed_sync_cannot_pin_or_refresh_peer() {
     assert!(clock
         .check(now + Duration::from_millis(4001), false)
         .is_err());
+}
+
+#[test]
+fn multiple_ports_in_same_role_keep_independent_sequences_and_sync_pairs() {
+    let now = Instant::now();
+    let mut clock = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+    // Reported Apple TV port number, plus concurrent identities on that ClockID.
+    // This is a regression model, not a byte-for-byte hardware capture.
+    for port in [32969u16, 1, 0x8005] {
+        let mut sync = request(Kind::Sync, 65535);
+        sync.source[8..].copy_from_slice(&port.to_be_bytes());
+        sync.flags |= 0x0200;
+        clock.receive(&sync.encode().unwrap(), now).unwrap();
+    }
+    for port in [1u16, 32969, 0x8005] {
+        let mut follow = request(Kind::FollowUp, 65535);
+        follow.source[8..].copy_from_slice(&port.to_be_bytes());
+        clock
+            .receive_general(&follow.encode().unwrap(), now)
+            .unwrap();
+        assert!(clock
+            .receive_general(&follow.encode().unwrap(), now)
+            .is_err());
+        let mut delay = request(Kind::DelayReq, 65535);
+        delay.source = follow.source;
+        let response = clock
+            .receive(&delay.encode().unwrap(), now)
+            .unwrap()
+            .remove(0);
+        assert_eq!(response.body[10..], delay.source);
+        assert!(clock.receive(&delay.encode().unwrap(), now).is_err());
+        delay.sequence = 0;
+        clock.receive(&delay.encode().unwrap(), now).unwrap();
+        delay.sequence = 65534;
+        assert!(clock.receive(&delay.encode().unwrap(), now).is_err());
+    }
+    assert_eq!(clock.ports.len(), 3);
+    assert_eq!(clock.clock_id, 42);
+}
+
+#[test]
+fn outgoing_signaling_has_reference_wire_layout_and_independent_sequence() {
+    let now = Instant::now();
+    let mut clock = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+    let due = clock.due(now).unwrap();
+    let signal = due.iter().find(|p| p.kind == Kind::Signaling).unwrap();
+    let bytes = signal.encode().unwrap();
+    assert_eq!(bytes.len(), 106);
+    assert_eq!(&bytes[..8], &[0x1c, 2, 0, 106, 0, 0, 4, 8]);
+    assert_eq!(&bytes[28..34], &[0x80, 5, 0, 0, 5, 128]);
+    assert_eq!(&bytes[34..44], &[0; 10]);
+    assert_eq!(
+        &bytes[44..58],
+        &[0, 3, 0, 22, 0, 13, 147, 0, 0, 1, 0, 0, 3, 1]
+    );
+    assert_eq!(
+        &bytes[70..84],
+        &[0, 3, 0, 32, 0, 13, 147, 0, 0, 5, 0, 0, 3, 1]
+    );
+    let next = clock.due(now + Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        next.iter()
+            .find(|p| p.kind == Kind::Signaling)
+            .unwrap()
+            .sequence,
+        1
+    );
+}
+
+#[test]
+fn pdelay_two_step_service_echoes_identity_and_post_send_timestamp() {
+    let fixture = authorized_ptp_fixture();
+    let (event, peer_event) = udp_pair();
+    let (general, peer_general) = udp_pair();
+    let mut service = Service::attach(
+        fixture_clock(),
+        event,
+        general,
+        fixture.wire.ptp_lease().unwrap(),
+    )
+    .unwrap();
+    let mut req = request(Kind::PdelayReq, 42);
+    req.source[8..].copy_from_slice(&32969u16.to_be_bytes());
+    peer_event.send(&req.encode().unwrap()).unwrap();
+    service.poll(&AtomicBool::new(false)).unwrap();
+    let mut bytes = [0; 512];
+    let mut response = None;
+    for _ in 0..2 {
+        let n = peer_event.recv(&mut bytes).unwrap();
+        let packet = Packet::decode(&bytes[..n]).unwrap();
+        if packet.kind == Kind::PdelayResp {
+            response = Some(packet);
+        }
+    }
+    let response = response.unwrap();
+    assert_eq!(response.flags, 0x0608);
+    assert_eq!(response.interval, -3);
+    assert_eq!(response.sequence, 42);
+    assert_eq!(&response.body[10..], &req.source);
+    let mut follow = None;
+    for _ in 0..4 {
+        let n = peer_general.recv(&mut bytes).unwrap();
+        let packet = Packet::decode(&bytes[..n]).unwrap();
+        if packet.kind == Kind::PdelayFollowUp {
+            follow = Some(packet);
+        }
+    }
+    let follow = follow.unwrap();
+    assert_eq!(follow.flags, 0x0408);
+    assert_eq!(follow.interval, -3);
+    assert_eq!(follow.sequence, 42);
+    assert_eq!(&follow.body[10..], &req.source);
+    assert!(follow.timestamp().unwrap().ns() >= response.timestamp().unwrap().ns());
+    assert_eq!(service.evidence().pdelay_requests, 1);
+    assert_eq!(service.evidence().pdelay_follow_up_sent, 1);
 }

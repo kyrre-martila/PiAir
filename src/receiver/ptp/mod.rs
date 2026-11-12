@@ -7,6 +7,7 @@ pub mod time;
 use anyhow::{ensure, Context, Result};
 use packet::{Kind, Packet};
 use std::{
+    collections::BTreeMap,
     io,
     net::UdpSocket,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -131,11 +132,17 @@ pub struct Grandmaster {
     sequence: u16,
     announce_sequence: u16,
     pending_sync: Option<(u16, Instant)>,
-    last_sequences: [Option<u16>; 16],
-    peer_ports: [Option<u16>; 16],
-    incoming_sync: Option<(u16, u16, Instant)>,
+    ports: BTreeMap<u16, PeerPort>,
+    next_signaling: Instant,
+    signaling_sequence: u16,
     last_peer: Option<Instant>,
 }
+#[derive(Default)]
+struct PeerPort {
+    sequences: [Option<u16>; 16],
+    sync: Option<(u16, Instant)>,
+}
+
 impl Grandmaster {
     pub fn new(
         clock_id: u64,
@@ -168,9 +175,9 @@ impl Grandmaster {
             sequence: 0,
             announce_sequence: 0,
             pending_sync: None,
-            last_sequences: [None; 16],
-            peer_ports: [None; 16],
-            incoming_sync: None,
+            ports: BTreeMap::new(),
+            next_signaling: now,
+            signaling_sequence: 0,
             last_peer: None,
         })
     }
@@ -273,6 +280,7 @@ impl Grandmaster {
         if now >= self.next_announce {
             // Honest free-running oscillator: no GPS, UTC or traceability claim.
             let mut b = vec![0; 30];
+            b[..10].copy_from_slice(&self.timestamp(now)?.encode()?);
             b[13] = 128;
             b[14] = 248;
             b[15] = 0xfe;
@@ -291,6 +299,26 @@ impl Grandmaster {
             ));
             self.announce_sequence = self.announce_sequence.wrapping_add(1);
             self.next_announce = now + Duration::from_secs(1);
+        }
+        if now >= self.next_signaling {
+            // Apple organization extensions observed in OwnTone's wire profile.
+            // Their private payload meaning is unknown; they confer no authority.
+            let mut body = vec![0; 10];
+            for (subtype, length) in [(1, 22u8), (5, 32u8)] {
+                body.extend_from_slice(&[0, 3, 0, length, 0, 0x0d, 0x93, 0, 0, subtype]);
+                body.extend_from_slice(&[0, 0, 3, 1]);
+                body.resize(body.len() + usize::from(length) - 10, 0);
+            }
+            let mut p = Packet::new(
+                Kind::Signaling,
+                self.clock_id,
+                self.signaling_sequence,
+                body,
+            );
+            p.interval = -128;
+            out.push(p);
+            self.signaling_sequence = self.signaling_sequence.wrapping_add(1);
+            self.next_signaling = now + Duration::from_secs(1);
         }
         if now >= self.next_sync {
             let mut p = Packet::new(Kind::Sync, self.clock_id, self.sequence, vec![0; 10]);
@@ -324,11 +352,10 @@ impl Grandmaster {
                 "unsupported Sync correction/flags/extensions"
             );
             self.validate_observation(&p, received)?;
-            self.incoming_sync = if p.flags & 0x0200 != 0 {
-                Some((p.port_number(), p.sequence, received))
-            } else {
-                None
-            };
+            self.ports
+                .get_mut(&p.port_number())
+                .expect("validated port")
+                .sync = (p.flags & 0x0200 != 0).then_some((p.sequence, received));
             return Ok(Vec::new());
         }
         ensure!(p.correction == 0, "unsupported corrected delay request");
@@ -350,49 +377,45 @@ impl Grandmaster {
             Kind::PdelayResp
         };
         let mut response = Packet::new(kind, self.clock_id, p.sequence, body);
-        if slot == 1 {
-            response.flags |= 0x0200;
-        }
+        response.flags |= 0x0200;
+        response.interval = -3;
         Ok(vec![response])
     }
-    /// Pin each message role independently: a clock can expose multiple PTP
-    /// ports. Only the Sync/Follow_Up pair requires identical port and sequence.
-    /// This never runs a servo or a best-master election.
+    /// The authenticated ClockID may expose many port identities, including
+    /// multiple ports for one message kind. Replay history belongs to each full
+    /// sourcePortIdentity and message type, not to a guessed receiver role.
+    /// Never evict history during a session: eviction would admit old packets.
     fn validate_observation(&mut self, p: &Packet, received: Instant) -> Result<()> {
         ensure!(
             p.source[..8] == self.peer_clock_id.to_be_bytes(),
             "unexpected peer clock identity"
         );
-        let slot = if p.kind == Kind::FollowUp {
-            Kind::Sync as usize
-        } else {
-            p.kind as usize
-        };
         let port = p.port_number();
-        // IEEE 1588-2008 7.5.2.3 assigns ordinary port numbers starting at 1.
-        // Packet::decode already enforces this; keep the observation boundary
-        // explicit so a future typed caller cannot pin zero or refresh liveness.
         ensure!(port != 0, "invalid zero source port number");
-        if let Some(expected) = self.peer_ports[slot] {
-            ensure!(port == expected, "peer role port identity changed");
-        }
-        if let Some(last) = self.last_sequences[p.kind as usize] {
+        ensure!(
+            self.ports.contains_key(&port) || self.ports.len() < 64,
+            "PTP source identity resource limit"
+        );
+        let existing = self.ports.get(&port);
+        if let Some(last) = existing.and_then(|state| state.sequences[p.kind as usize]) {
             let delta = p.sequence.wrapping_sub(last);
             ensure!(delta > 0 && delta < 0x8000, "stale/replayed PTP sequence");
         }
         if p.kind == Kind::FollowUp {
-            let (sync_port, sequence, at) = self.incoming_sync.context("unmatched Follow_Up")?;
+            let (sequence, at) = existing
+                .and_then(|state| state.sync)
+                .context("unmatched Follow_Up")?;
             ensure!(
-                port == sync_port
-                    && p.sequence == sequence
-                    && received.saturating_duration_since(at) <= Duration::from_secs(3),
+                p.sequence == sequence
+                    && received >= at
+                    && received.duration_since(at) <= Duration::from_secs(3),
                 "unmatched/stale Follow_Up"
             );
         }
-        self.peer_ports[slot] = Some(port);
-        self.last_sequences[p.kind as usize] = Some(p.sequence);
+        let state = self.ports.entry(port).or_default();
+        state.sequences[p.kind as usize] = Some(p.sequence);
         if p.kind == Kind::FollowUp {
-            self.incoming_sync = None;
+            state.sync = None;
         }
         self.last_peer = Some(received);
         self.state = State::PeerObserved;
@@ -421,12 +444,10 @@ impl Grandmaster {
     pub fn shutdown(&mut self) {
         self.state = State::Shutdown;
         self.pending_sync = None;
-        self.last_sequences = [None; 16];
-        self.peer_ports = [None; 16];
-        self.incoming_sync = None;
+        self.ports.clear();
         self.last_peer = None;
     }
-    /// PR #42 must supply a complete session grant; timing alone never grants media.
+    /// Timing alone never grants media; the active session owns operational readiness.
     pub fn media_permitted(&self) -> bool {
         false
     }
@@ -443,6 +464,8 @@ pub struct Evidence {
     pub sync_sent: u64,
     pub follow_up_sent: u64,
     pub announce_sent: u64,
+    pub signaling_sent: u64,
+    pub pdelay_follow_up_sent: u64,
     pub delay_requests: u64,
     pub delay_responses_sent: u64,
     pub pdelay_requests: u64,
@@ -452,6 +475,7 @@ pub struct Evidence {
     pub announce_received: u64,
     pub signaling_received: u64,
     pub rejected: u64,
+    pub source_port_identities: u64,
 }
 /// No socket creation: Wire supplies connected event/general sockets for the
 /// selected authenticated receiver (UDP 319/320). Dropping releases both sockets.
@@ -541,6 +565,8 @@ impl Service {
             Kind::Sync => self.evidence.sync_sent += 1,
             Kind::FollowUp => self.evidence.follow_up_sent += 1,
             Kind::Announce => self.evidence.announce_sent += 1,
+            Kind::Signaling => self.evidence.signaling_sent += 1,
+            Kind::PdelayFollowUp => self.evidence.pdelay_follow_up_sent += 1,
             Kind::DelayResp | Kind::PdelayResp => self.evidence.delay_responses_sent += 1,
             _ => (),
         }
@@ -587,6 +613,7 @@ impl Service {
                             self.diagnostics.reject("event", &b[..n], &reason);
                         }
                         Ok(responses) => {
+                            self.evidence.source_port_identities = self.clock.ports.len() as u64;
                             if responses.is_empty() {
                                 self.evidence.sync_received += 1;
                             } else {
@@ -605,12 +632,14 @@ impl Service {
                                     let mut body =
                                         self.clock.timestamp(Instant::now())?.encode()?.to_vec();
                                     body.extend_from_slice(&p.body[10..20]);
-                                    self.send(&Packet::new(
+                                    let mut follow = Packet::new(
                                         Kind::PdelayFollowUp,
                                         self.clock.clock_id,
                                         p.sequence,
                                         body,
-                                    ))?;
+                                    );
+                                    follow.interval = -3;
+                                    self.send(&follow)?;
                                 }
                             }
                         }
@@ -639,6 +668,7 @@ impl Service {
                         self.evidence.rejected += 1;
                         self.diagnostics.reject("general", &bytes[..n], &reason);
                     } else {
+                        self.evidence.source_port_identities = self.clock.ports.len() as u64;
                         self.evidence.general_received += 1;
                         match bytes[0] & 15 {
                             8 => self.evidence.follow_up_received += 1,
