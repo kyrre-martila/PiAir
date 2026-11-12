@@ -1,9 +1,10 @@
-# PTP integration foundation (Prompt 57)
+# Authenticated PTP negotiation (Prompts 57–58)
 
 ## Status and scope
 
-Reviewed PiAir main `2cb41c9eb956e3ce2694e7c4bcf0f0adbc1fc57a` (#56).
-This change provides reusable session ownership, not Apple TV audio playback.
+Foundation reviewed main `2cb41c9eb956e3ce2694e7c4bcf0f0adbc1fc57a` (#56);
+Prompt 58 builds on merged #57 (`79f71c129eee07b7d06ab8d71af19d91669e6b33`).
+The explicit CLI below provides authenticated PTP negotiation, not Apple TV audio playback.
 No receiver or Raspberry Pi hardware was used. UDP send success, RTSP 200,
 accepted anchors and `PeerObserved` do not prove synchronization or audibility.
 `Grandmaster::media_permitted()` remains unconditionally false.
@@ -102,12 +103,12 @@ servo state. Neither OwnTone UDP sends nor its fixed-GM assumption establish
 an authenticated clock adoption report. See
 [CLOCK_ADOPTION_INVESTIGATION.md](CLOCK_ADOPTION_INVESTIGATION.md).
 
-## Remaining integration points for PRs #58–#61
+## Integration roadmap for PRs #58–#61
 
-These are proposed implementation boundaries for the requested follow-ups,
-not a claim that those PRs already exist or are validated:
+The #58 negotiation boundary is implemented below. Remaining media boundaries
+are proposed follow-ups, not a claim of validated playback:
 
-1. **#58: authenticated timing/RTSP selection.** After the existing same-socket
+1. **#58: authenticated timing/RTSP selection (implemented).** After the existing same-socket
    authentication, reconcile authenticated /info with pinned selection and choose
    an explicit supported timing/media profile before allocating NTP resources.
    Use `into_ptp_foundation` only for that PTP branch and `setup_authenticated`
@@ -171,3 +172,65 @@ Hardware checklist (not performed):
   volume, independently verify sound and its timing, then longer WAV, stop and
   loss. Repeat NTP HomePod and stored-HAP tests. Do not run this future playback
   step using this foundation alone.
+
+## Prompt 58: authenticated negotiation-only CLI
+
+`ptp-negotiation-check` explicitly selects the PTP branch. It requires the exact
+persisted selected/allowlisted receiver, existing stored-HAP credentials and
+terminal confirmation. The operation derives StoredHap using the existing WAV
+authorization helper, authenticates once, and consumes the same Session/Wire via
+`into_ptp_foundation` and `setup_authenticated`. No NTP resources are allocated.
+Explicit `--experimental-owntone-transient` instead requires a persisted transient
+selection and compatible existing policy; no fallback or automatic pairing occurs.
+Cancellation is installed before authentication and retained through the handoff.
+
+The actual OwnTone files were rechecked at
+`8ed84f2b3cba25d3de65e05660d59ce034b5adab` for this change: initial SETUP's PTP,
+signed ClockID, timingPeerInfo/list and local addresses; response peer selection;
+`ptpd.c` clock/peer delegation; libairptp event/general 319/320 binding and
+Sync/Follow_Up/Announce/delay handling. The initial offer now explicitly advertises
+`SupportsClockPortMatchingOverride=false`. MAC/group/MRP extensions remain omitted
+because this diagnostic does not implement those roles. No GPL code was copied.
+The timing-only progression reuses the existing buffered lifecycle's RECORD then
+SETPEERS encoders and validation, stopping before its stream/key/command/audioMode
+or anchor stages. It never opens media sockets, sends audio, or changes volume.
+
+On the Raspberry Pi, after allowlisting, pairing and explicitly selecting the
+Apple TV with the existing commands, run (replace the example with its exact ID):
+
+```sh
+cargo build --release
+sudo setcap cap_net_bind_service=+ep ./target/release/piair
+./target/release/piair ptp-negotiation-check device:02d899c1833f --observation-seconds 10
+```
+
+Use the same user and configuration as pairing/selection. The capability permits
+binding UDP319/320 without running the CLI as root; reapply it after rebuilding.
+Both ports must be free on the RTSP route's local address. A bind conflict fails
+and triggers bounded authorized TEARDOWN, with no alternate port or NTP retry.
+The default observation is ten seconds (explicit range 5–20), servicing timing
+through RECORD, SETPEERS and cleanup. Existing 30-second initial peer deadline
+and three-second peer/poll liveness rules still apply; loss may end the diagnostic
+early. A completed observation with zero delay exchanges is evidence of absence
+of an observed peer, not success at synchronization.
+
+Expected final evidence is `initial SETUP RTSP accepted: true`,
+`last accepted: SETPEERS`, packet evidence containing
+successful Sync, Follow_Up and Announce sends, validated pinned-ClockID delay
+requests and successful delay responses, `PeerObserved` only after valid delay
+traffic, `TEARDOWN: acknowledged`, and `audio bytes: 0`. General-channel receive
+counts are validated observations, not adoption reports. Send counts prove only
+local socket acceptance. Receiver clock adoption stays `unverified` and media
+readiness stays `blocked` even if every request succeeds. Capture UDP319/320 to
+independently correlate sequences and identities; never publish pairing secrets
+or decrypted control payloads. Cancellation, revocation, disconnect or timeout
+may instead report a failed session or unconfirmed remote expiry; sockets are
+released locally. No Apple TV or Raspberry Pi hardware validation was performed.
+
+For PR #59's PTP-synchronized WAV test, first establish the actual Apple TV media
+profile, clock-adoption evidence and a revocable media grant. Implement the
+profile's RTP time correspondence/anchors from this same ClockID and epoch,
+explicit codec/rate conversion and transport/feedback ownership. Test packet
+fixtures, latency, sample wrap and loss before permitting any WAV bytes. An
+accepted SETPEERS, elapsed observation or `PeerObserved` cannot open that gate.
+The existing NTP WAV path and its regression suite remain unchanged.

@@ -34,6 +34,9 @@ impl TimingSession {
             phase: Phase::Observing,
         }
     }
+    pub fn evidence(&self) -> super::Evidence {
+        self.service.evidence()
+    }
     pub fn state(&self) -> State {
         self.service.state()
     }

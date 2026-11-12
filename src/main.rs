@@ -90,6 +90,16 @@ fn run_with_discovery(
             setup_profile,
             experimental_owntone_transient,
         )?,
+        Command::PtpNegotiationCheck {
+            receiver_id,
+            experimental_owntone_transient,
+            observation_seconds,
+        } => receiver::ptp_negotiation_check(
+            &loaded,
+            &receiver_id,
+            experimental_owntone_transient,
+            observation_seconds,
+        )?,
         Command::BufferedTest {
             receiver_id,
             setup_check,

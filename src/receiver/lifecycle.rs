@@ -78,6 +78,7 @@ pub struct Session {
     last_accepted: &'static str,
     attempted: &'static str,
     final_ptp: Option<ptp::State>,
+    final_evidence: ptp::Evidence,
     teardown: &'static str,
     control: Option<Wire>,
     timing: Option<ptp::session::TimingSession>,
@@ -87,6 +88,7 @@ pub struct Session {
     // Initial SETUP fixes token presence for this owner and its exclusive Wire.
     session_bound: bool,
     attempted_setup: bool,
+    setup_rtsp_accepted: bool,
     observed: bool,
     stage: Option<Stage>,
     prepared: Option<Prepared>,
@@ -109,6 +111,7 @@ impl Session {
             last_accepted: "none",
             attempted: "none",
             final_ptp: None,
+            final_evidence: ptp::Evidence::default(),
             teardown: "not attempted",
             control: None,
             timing: None,
@@ -117,6 +120,7 @@ impl Session {
             token: None,
             session_bound: false,
             attempted_setup: false,
+            setup_rtsp_accepted: false,
             observed: false,
             stage: None,
             prepared: None,
@@ -138,8 +142,13 @@ impl Session {
             .as_ref()
             .map(ptp::session::TimingSession::state)
             .or(self.final_ptp);
-        format!("session: {:?}; last accepted: {}; attempted: {}; PTP snapshot: {ptp:?}; receiver clock adoption: unverified; TEARDOWN: {}; audio bytes: 0",
-            self.state(), self.last_accepted, self.attempted, self.teardown)
+        let evidence = self
+            .timing
+            .as_ref()
+            .map(|s| s.evidence())
+            .unwrap_or(self.final_evidence);
+        format!("initial SETUP RTSP accepted: {}; packet evidence: {evidence:?}; media readiness: blocked; session: {:?}; last accepted: {}; attempted: {}; PTP snapshot: {ptp:?}; receiver clock adoption: unverified; TEARDOWN: {}; audio bytes: 0",
+            self.setup_rtsp_accepted, self.state(), self.last_accepted, self.attempted, self.teardown)
     }
     fn check(&self) -> Result<()> {
         ensure!(
@@ -219,7 +228,6 @@ impl Session {
     }
     /// Initial PTP SETUP only. The transferred owner is deliberately inert until
     /// this explicit call; normal WAV negotiation never enters it automatically.
-    #[allow(dead_code)] // PR #58 explicit PTP negotiation entry; never selected by NTP.
     pub fn setup_authenticated(&mut self) -> Result<()> {
         ensure!(
             self.state == State::Negotiation && !self.attempted_setup,
@@ -281,6 +289,9 @@ impl Session {
             && self.attempted_setup
             && !self.session_bound
             && self.stage.is_none();
+        if initial_setup {
+            self.setup_rtsp_accepted = true;
+        }
         if let Some(token) = reply.headers.get("session") {
             // Strict diagnostic subset: parameterized sessions are unsupported.
             ensure!(
@@ -344,7 +355,8 @@ impl Session {
         let offer = initial_offer(&wire.sender_device_id(), local, self.clock_id, self.uuid)?;
         // Set before sending: semantic errors after RTSP 200 still need TEARDOWN.
         self.attempted_setup = true;
-        let response = Self::plist(&self.call("SETUP", None, &offer)?)?;
+        let reply = self.call("SETUP", None, &offer)?;
+        let response = Self::plist(&reply)?;
         let setup = InitialSetup::parse(&response, peer, self.clock_id)?;
         self.last_accepted = "initial SETUP";
         self.check()?;
@@ -380,13 +392,7 @@ impl Session {
         if target == Stage::Record {
             return Ok(());
         }
-        let wire = self.control.as_ref().context("control absent")?;
-        let peers = ptp::control::Peers::new(
-            self.timing.as_ref().context("timing absent")?.peer(),
-            wire.local_ip()?,
-        )?
-        .encode()?;
-        self.ack("SETPEERS", None, &peers)?;
+        self.set_timing_peers()?;
         // This CLI implements no MediaRemote remote-control commands. Register
         // an honest empty table rather than advertising unsupported operations.
         let commands = command_registration()?;
@@ -426,6 +432,24 @@ impl Session {
         self.stage = Some(Stage::Anchor);
         Ok(())
     }
+    /// OwnTone orders initial SETUP, RECORD, then SETPEERS. Stop here for the
+    /// timing-only diagnostic: no stream key, stream SETUP or media connection.
+    pub fn negotiate_timing_peers(&mut self) -> Result<()> {
+        let result = (|| {
+            self.progress_inner(Stage::Record)?;
+            self.set_timing_peers()
+        })();
+        self.finish(result)
+    }
+    fn set_timing_peers(&mut self) -> Result<()> {
+        let wire = self.control.as_ref().context("control absent")?;
+        let peers = ptp::control::Peers::new(
+            self.timing.as_ref().context("timing absent")?.peer(),
+            wire.local_ip()?,
+        )?
+        .encode()?;
+        self.ack("SETPEERS", None, &peers)
+    }
     /// Observe timing on the owning thread between control requests.
     /// Peer traffic is reported only as activity, never synchronization.
     pub fn observe(&mut self, duration: Duration) -> Result<ptp::State> {
@@ -436,8 +460,8 @@ impl Session {
         self.observed = true;
         let result = (|| {
             ensure!(
-                !duration.is_zero() && duration <= Duration::from_secs(1),
-                "timing observation must be at most one second"
+                !duration.is_zero() && duration <= Duration::from_secs(20),
+                "timing observation must be at most twenty seconds"
             );
             let end = Instant::now() + duration;
             loop {
@@ -484,6 +508,7 @@ impl Session {
         }
         if let Some(timing) = &self.timing {
             self.final_ptp = Some(timing.state());
+            self.final_evidence = timing.evidence();
         }
         // Healthy timing continues during bounded teardown. A cancelled/lost
         // service must not prevent an otherwise authorized cleanup request.
@@ -605,10 +630,19 @@ fn initial_offer(
     clock_id: u64,
     uuid: uuid::Uuid,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    ensure!(
+        clock_id != 0 && clock_id != u64::MAX,
+        "invalid local ClockID"
+    );
+    ensure!(
+        !local.is_unspecified() && !local.is_multicast(),
+        "invalid local timing address"
+    );
     let peer = profile::dict([
         ("ID", Value::String(uuid.to_string().to_uppercase())),
         ("DeviceType", profile::uint(0)),
         ("ClockID", Value::Integer((clock_id as i64).into())),
+        ("SupportsClockPortMatchingOverride", Value::Boolean(false)),
         (
             "Addresses",
             Value::Array(vec![Value::String(local.to_string())]),

@@ -799,3 +799,62 @@ pub fn buffered_test(
     result?;
     Ok(())
 }
+
+/// Explicit selected-receiver diagnostic, sharing WAV authorization and authentication.
+pub fn ptp_negotiation_check(
+    loaded: &Loaded,
+    id: &str,
+    transient: bool,
+    seconds: u64,
+) -> Result<()> {
+    exact_id(id)?;
+    ensure!(
+        (5..=20).contains(&seconds),
+        "PTP observation must be 5..=20 seconds"
+    );
+    ensure!(loaded.config.allows(id), "receiver is not approved");
+    let store = store::Store::new(&loaded.path)?;
+    let selected = store
+        .selection()?
+        .context("select this approved receiver first")?;
+    ensure!(selected.id == id, "receiver is not selected");
+    let (operation, credential) = wav_authentication(&store, &selected, transient)?;
+    ensure!(
+        selected.capabilities.features & ((1u64 << 40) | (1u64 << 41))
+            == ((1u64 << 40) | (1u64 << 41)),
+        "selected receiver must advertise buffered audio and PTP; no fallback"
+    );
+    ensure!(
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+        "PTP diagnostic requires interactive confirmation"
+    );
+    let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    println!("PTP negotiation only: authenticated /info, initial SETUP, RECORD, SETPEERS, {seconds}s bounded observation and TEARDOWN. Zero audio bytes; no volume changes. Receiver clock adoption and media readiness remain unverified.");
+    interactive::confirm_operation(
+        loaded,
+        None,
+        &snapshot,
+        "Authorize selected receiver PTP negotiation only? [y/N]: ",
+    )?;
+    let mut authenticated = session::Session::new();
+    let cancel = authenticated.cancel.clone();
+    ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
+    authenticated.authenticate_ptp_selected(
+        || match &credential {
+            Some(credential) => {
+                wire::Wire::connect_hap_operation(&loaded.path, &operation, &snapshot, credential)
+            }
+            None => wire::Wire::connect(&loaded.path, id, &operation, &snapshot),
+        },
+        credential.as_ref(),
+    )?;
+    let mut session = authenticated.into_ptp_foundation()?;
+    let result = (|| {
+        session.setup_authenticated()?;
+        session.negotiate_timing_peers()?;
+        session.observe(std::time::Duration::from_secs(seconds))?;
+        session.stop()
+    })();
+    println!("PTP negotiation diagnostic: {}", session.diagnostic());
+    result
+}
