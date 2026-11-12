@@ -358,9 +358,24 @@ impl Capture {
             a.generation,
         ))
     }
+    /// A failed AirPlay attempt requires a fresh sustained interval, so a click
+    /// in the following quiet passage cannot redial using an old qualification.
+    pub fn rearm(&self) -> Result<()> {
+        let mut b = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("capture buffer poisoned"))?;
+        b.check()?;
+        b.automatic
+            .as_mut()
+            .context("automatic detection absent")?
+            .reset();
+        Ok(())
+    }
     pub fn reader(&self) -> Self {
-        if let Ok(b) = self.buffer.lock() {
-            println!("AirPlay pre-roll: {} retained frames; {} frames lost to bounded-buffer overflow since detection (startup preservation is limited to ten seconds)", b.frames.len(), b.dropped);
+        let counters = self.buffer.lock().ok().map(|b| (b.frames.len(), b.dropped));
+        if let Some((retained, dropped)) = counters {
+            println!("AirPlay pre-roll: {retained} retained frames; {dropped} frames lost to bounded-buffer overflow since detection (startup preservation is limited to ten seconds)");
         }
         Self {
             buffer: self.buffer.clone(),

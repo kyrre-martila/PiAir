@@ -997,6 +997,7 @@ fn ptp_operation(
             return Ok(());
         }
         if let Err(error) = result {
+            capture.as_ref().unwrap().rearm()?;
             let delay = retry.failed(Instant::now());
             println!("AirPlay connection/playback failure: {error:#}; retry delay {delay}s (requires meaningful input)");
         } else {

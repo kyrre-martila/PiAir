@@ -137,6 +137,7 @@ mod tests {
         }
         assert!(a.active);
         a.reset();
+        feed(&mut a, 20, 20000); // A click cannot reuse a failed session qualification.
         feed(&mut a, 1000, 0);
         assert!(!a.active);
     }

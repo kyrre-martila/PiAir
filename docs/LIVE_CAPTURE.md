@@ -205,7 +205,7 @@ Ctrl+C. Explicit device/open errors are unrecoverable and release ALSA. Recovera
 AirPlay failures release the session and return to monitoring, with exponential
 retry delays of 2, 4, 8, 16, 32 then at most 60 seconds. Retry also requires a
 currently above-threshold RMS window (samples received within 100 ms) and an
-already qualified activity interval;
+newly qualified sustained activity interval after each failure;
 silent input never causes a connection loop. Discovery and network operations
 retain their existing bounded deadlines; Ctrl+C during them may wait for those
 operations to observe cancellation or time out.
