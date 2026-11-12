@@ -155,7 +155,7 @@ fn udp_pair() -> (UdpSocket, UdpSocket) {
 }
 
 #[test]
-fn state_machine_has_no_path_to_playing_and_rejects_duplicate_or_stale_operations() {
+fn state_machine_requires_timing_before_playing_and_rejects_stale_operations() {
     let states = [
         State::Authorization,
         State::Authentication,
@@ -171,8 +171,13 @@ fn state_machine_has_no_path_to_playing_and_rejects_duplicate_or_stale_operation
     for from in states {
         for to in [State::Prebuffering, State::Playing, State::Paused] {
             let mut state = from;
-            assert!(state.advance(to).is_err());
-            assert_eq!(state, from);
+            if from == State::Timing && to == State::Playing {
+                state.advance(to).unwrap();
+                assert_eq!(state, State::Playing);
+            } else {
+                assert!(state.advance(to).is_err());
+                assert_eq!(state, from);
+            }
         }
     }
     let mut owner = Session::new();
@@ -2091,4 +2096,405 @@ fn realtime_info_needs_audio_alac_ptp_but_no_buffered_capability_or_format() {
         );
         assert!(validate_info_profile(&info, "device:112233445566", None, true).is_err());
     }
+}
+#[test]
+fn complete_ptp_wav_lifecycle_encrypts_paces_syncs_retransmits_and_releases() {
+    for tokenless in [false, true] {
+        TOKENLESS.with(|mode| mode.set(tokenless));
+        let data = UdpSocket::bind("127.0.0.2:0").unwrap();
+        let control = UdpSocket::bind("127.0.0.2:0").unwrap();
+        let data_port = data.local_addr().unwrap().port();
+        let control_port = control.local_addr().unwrap().port();
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut keys = server_keys();
+            for (seq, method, response) in [
+                (1, "GET /info ", Some(realtime_info())),
+                (2, "SETUP ", Some(setup(123))),
+                (3, "RECORD ", None),
+                (4, "SETPEERS ", None),
+                (
+                    5,
+                    "SETUP ",
+                    Some(profile::dict([
+                        ("timingProtocol", Value::String("PTP".into())),
+                        (
+                            "streams",
+                            Value::Array(vec![profile::dict([
+                                ("type", profile::uint(96)),
+                                ("dataPort", profile::uint(u64::from(data_port))),
+                                ("controlPort", profile::uint(u64::from(control_port))),
+                            ])]),
+                        ),
+                    ])),
+                ),
+                (6, "SET_PARAMETER ", None),
+                (if tokenless { 6 } else { 7 }, "POST /feedback ", None),
+                (if tokenless { 7 } else { 8 }, "TEARDOWN ", None),
+            ] {
+                if method == "SET_PARAMETER " && tokenless {
+                    continue;
+                }
+                let (header, body) = read_request(&mut socket, &mut keys);
+                if method == "SET_PARAMETER " {
+                    assert_eq!(body, b"volume: -20.000000\r\n");
+                    assert!(header.contains("Content-Type: text/parameters\r\n"));
+                }
+                assert!(header.starts_with(method), "{header}");
+                assert!(header.contains(&format!("CSeq: {seq}\r\n")));
+                if seq == 4 {
+                    assert!(header.contains("Content-Type: /peer-list-changed\r\n"));
+                    assert_eq!(profile::parse(&body).unwrap().as_array().unwrap().len(), 2);
+                }
+                if seq == 5 {
+                    let offer = profile::parse(&body).unwrap();
+                    let stream = profile::dictionary(&offer).unwrap()["streams"]
+                        .as_array()
+                        .unwrap();
+                    let stream = profile::dictionary(&stream[0]).unwrap();
+                    for (field, value) in [
+                        ("type", 96),
+                        ("audioFormat", profile::FORMAT),
+                        ("sr", 44100),
+                        ("spf", 352),
+                        ("ct", 2),
+                    ] {
+                        assert_eq!(profile::integer(stream, field).unwrap(), value);
+                    }
+                    assert_eq!(stream["shk"].as_data().unwrap(), &[0x62; 32]);
+                    assert!(profile::port(stream, "controlPort").is_ok());
+                    assert!(!stream.contains_key("dataPort"));
+                }
+                reply(&mut socket, &mut keys, seq, response);
+            }
+        });
+        owner.realtime_profile = true;
+        let (event, peer_event) = udp_pair();
+        let (general, _peer_general) = udp_pair();
+        let addresses = (event.local_addr().unwrap(), general.local_addr().unwrap());
+        owner
+            .negotiate_with(|wire, setup, clock| {
+                Ok((
+                    None,
+                    ptp::Service::attach(
+                        ptp::Grandmaster::new(
+                            clock,
+                            setup.clock_id,
+                            Instant::now(),
+                            Duration::from_secs(30),
+                        )?,
+                        event,
+                        general,
+                        wire.ptp_lease()?,
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert!(owner.realtime_ready().is_err());
+        owner.negotiate_realtime().unwrap();
+        assert!(owner.prepared.is_none() && owner.stream.is_none());
+        let mut delay = ptp::packet::Packet::new(ptp::packet::Kind::DelayReq, 123, 1, vec![0; 10]);
+        delay.source[8..].copy_from_slice(&32969u16.to_be_bytes());
+        peer_event.send(&delay.encode().unwrap()).unwrap();
+        owner.observe(Duration::from_millis(4)).unwrap();
+        owner.realtime_ready().unwrap();
+        assert_eq!(owner.realtime_ports, Some((data_port, control_port)));
+        // No RTP, RTCP, volume or buffered anchor requests are transmitted.
+        for socket in [&data, &control] {
+            socket.set_nonblocking(true).unwrap();
+            assert_eq!(
+                socket.recv(&mut [0; 2048]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        let local_control = owner
+            .realtime_transport
+            .as_ref()
+            .unwrap()
+            .local_control()
+            .unwrap();
+        let frames = vec![[1200, -2400]; 353];
+        let expected_frames = frames.clone();
+        let clock_id = owner.clock_id;
+        owner.realtime_encoder.as_mut().unwrap().sequence = u16::MAX;
+        owner.realtime_encoder.as_mut().unwrap().timestamp = u32::MAX - 100;
+        let origin = owner.realtime_encoder.as_ref().unwrap().timestamp;
+        let receiver = thread::spawn(move || {
+            data.set_nonblocking(false).unwrap();
+            control.set_nonblocking(false).unwrap();
+            data.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            control
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let started = Instant::now();
+            let mut packets = Vec::new();
+            let mut nonces = std::collections::HashSet::new();
+            let total = (353 + realtime::PLAYBACK_LEAD_SAMPLES as usize).div_ceil(profile::SPF);
+            let mut duplicate = false;
+            while packets.len() < total || !duplicate {
+                let mut b = [0; 2048];
+                let n = data.recv(&mut b).unwrap();
+                let packet = b[..n].to_vec();
+                if packets.first() == Some(&packet) {
+                    duplicate = true;
+                    continue;
+                }
+                let index = packets.len();
+                assert_eq!(&packet[..2], &[0x80, if index == 0 { 0xe0 } else { 0x60 }]);
+                assert_eq!(
+                    u16::from_be_bytes(packet[2..4].try_into().unwrap()),
+                    u16::MAX.wrapping_add(index as u16)
+                );
+                assert_eq!(
+                    u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+                    origin.wrapping_add((index * profile::SPF) as u32)
+                );
+                let nonce: [u8; 8] = packet[n - 8..].try_into().unwrap();
+                assert!(nonces.insert(nonce));
+                let plain = crate::receiver::crypto::open(
+                    &[0x62; 32],
+                    &crate::receiver::crypto::nonce(&nonce),
+                    &packet[12..n - 8],
+                    &packet[4..12],
+                )
+                .unwrap();
+                let pcm = crate::audio::alac::tests::decode_at_rate(&plain, 44100);
+                for (offset, sample) in pcm.iter().enumerate() {
+                    assert_eq!(
+                        *sample,
+                        expected_frames
+                            .get(index * profile::SPF + offset)
+                            .copied()
+                            .unwrap_or([0; 2])
+                    );
+                }
+                packets.push(packet);
+                if index == 0 {
+                    control
+                        .send_to(
+                            &[0x80, 0xd5, 0, 1, 0xff, 0xff, 0, 1],
+                            ("127.0.0.1", local_control),
+                        )
+                        .unwrap();
+                }
+            }
+            assert!(started.elapsed() >= Duration::from_millis(1900));
+            let mut previous = None;
+            for index in 0..2 {
+                let mut sync = [0; 64];
+                assert_eq!(control.recv(&mut sync).unwrap(), 28);
+                assert_eq!(
+                    &sync[..4],
+                    &[if index == 0 { 0x90 } else { 0x80 }, 0xd7, 0, 6]
+                );
+                let current = u32::from_be_bytes(sync[4..8].try_into().unwrap());
+                let nanos = u64::from_be_bytes(sync[8..16].try_into().unwrap());
+                let next = u32::from_be_bytes(sync[16..20].try_into().unwrap()).wrapping_add(11025);
+                assert_eq!(current, next.wrapping_sub(77175));
+                assert_eq!(
+                    u64::from_be_bytes(sync[20..28].try_into().unwrap()),
+                    clock_id
+                );
+                if let Some((pos, ns)) = previous {
+                    let delta = next.wrapping_sub(pos);
+                    assert_eq!(
+                        nanos - ns,
+                        realtime::sample_time(u64::from(delta)).as_nanos() as u64
+                    );
+                } else {
+                    assert_eq!(next, origin);
+                }
+                previous = Some((next, nanos));
+            }
+            packets.len() as u64
+        });
+        owner
+            .play_wav(&frames, if tokenless { None } else { Some(-20) })
+            .unwrap();
+        assert_eq!(owner.playback_stats.packets, receiver.join().unwrap());
+        assert_eq!(owner.playback_stats.requests, 1);
+        assert_eq!(owner.playback_stats.resends, 1);
+        assert_eq!(owner.playback_stats.syncs, 2);
+        owner.stop().unwrap();
+        assert!(owner.realtime_encoder.is_none() && owner.realtime_transport.is_none());
+        assert!(owner.realtime_ready().is_err());
+        let _rebound = UdpSocket::bind(("127.0.0.1", local_control)).unwrap();
+        let _event = UdpSocket::bind(addresses.0).unwrap();
+        let _general = UdpSocket::bind(addresses.1).unwrap();
+        assert!(owner
+            .diagnostic()
+            .contains("operational readiness at snapshot: true"));
+        assert!(owner.diagnostic().contains("TEARDOWN: acknowledged"));
+        server.join().unwrap();
+    }
+    TOKENLESS.with(|mode| mode.set(false));
+}
+
+#[test]
+fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() {
+    for mode in ["cancel", "timing-loss", "disconnect", "malformed"] {
+        let data = UdpSocket::bind("127.0.0.2:0").unwrap();
+        let control = UdpSocket::bind("127.0.0.2:0").unwrap();
+        let data_port = data.local_addr().unwrap().port();
+        let control_port = control.local_addr().unwrap().port();
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut keys = server_keys();
+            for (seq, method, response) in [
+                (1, "GET /info ", Some(realtime_info())),
+                (2, "SETUP ", Some(setup(123))),
+                (3, "RECORD ", None),
+                (4, "SETPEERS ", None),
+                (
+                    5,
+                    "SETUP ",
+                    Some(profile::dict([
+                        ("timingProtocol", Value::String("PTP".into())),
+                        (
+                            "streams",
+                            Value::Array(vec![profile::dict([
+                                ("type", profile::uint(96)),
+                                ("dataPort", profile::uint(u64::from(data_port))),
+                                ("controlPort", profile::uint(u64::from(control_port))),
+                            ])]),
+                        ),
+                    ])),
+                ),
+            ] {
+                let (header, body) = read_request(&mut socket, &mut keys);
+                assert!(header.starts_with(method), "{header}");
+                assert!(header.contains(&format!("CSeq: {seq}\r\n")));
+                if seq == 4 {
+                    assert!(header.contains("Content-Type: /peer-list-changed\r\n"));
+                    assert_eq!(profile::parse(&body).unwrap().as_array().unwrap().len(), 2);
+                }
+                if seq == 5 {
+                    let offer = profile::parse(&body).unwrap();
+                    let stream = profile::dictionary(&offer).unwrap()["streams"]
+                        .as_array()
+                        .unwrap();
+                    let stream = profile::dictionary(&stream[0]).unwrap();
+                    for (field, value) in [
+                        ("type", 96),
+                        ("audioFormat", profile::FORMAT),
+                        ("sr", 44100),
+                        ("spf", 352),
+                        ("ct", 2),
+                    ] {
+                        assert_eq!(profile::integer(stream, field).unwrap(), value);
+                    }
+                    assert_eq!(stream["shk"].as_data().unwrap(), &[0x62; 32]);
+                    assert!(profile::port(stream, "controlPort").is_ok());
+                    assert!(!stream.contains_key("dataPort"));
+                }
+                reply(&mut socket, &mut keys, seq, response);
+            }
+            let mut seq = 6;
+            loop {
+                let (header, _) = read_request(&mut socket, &mut keys);
+                if header.starts_with("TEARDOWN ") {
+                    reply(&mut socket, &mut keys, seq, None);
+                    break;
+                }
+                assert!(header.starts_with("POST /feedback "));
+                if mode == "disconnect" {
+                    return;
+                }
+                reply(&mut socket, &mut keys, seq, None);
+                seq += 1;
+            }
+        });
+        owner.realtime_profile = true;
+        let (event, peer_event) = udp_pair();
+        let (general, _peer_general) = udp_pair();
+        let addresses = (event.local_addr().unwrap(), general.local_addr().unwrap());
+        owner
+            .negotiate_with(|wire, setup, clock| {
+                Ok((
+                    None,
+                    ptp::Service::attach(
+                        ptp::Grandmaster::new(
+                            clock,
+                            setup.clock_id,
+                            Instant::now(),
+                            Duration::from_secs(30),
+                        )?,
+                        event,
+                        general,
+                        wire.ptp_lease()?,
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert!(owner.realtime_ready().is_err());
+        owner.negotiate_realtime().unwrap();
+        assert!(owner.prepared.is_none() && owner.stream.is_none());
+        let mut delay = ptp::packet::Packet::new(ptp::packet::Kind::DelayReq, 123, 1, vec![0; 10]);
+        delay.source[8..].copy_from_slice(&32969u16.to_be_bytes());
+        peer_event.send(&delay.encode().unwrap()).unwrap();
+        owner.observe(Duration::from_millis(4)).unwrap();
+        owner.realtime_ready().unwrap();
+        assert_eq!(owner.realtime_ports, Some((data_port, control_port)));
+        // No RTP, RTCP, volume or buffered anchor requests are transmitted.
+        for socket in [&data, &control] {
+            socket.set_nonblocking(true).unwrap();
+            assert_eq!(
+                socket.recv(&mut [0; 2048]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        let local_control = owner
+            .realtime_transport
+            .as_ref()
+            .unwrap()
+            .local_control()
+            .unwrap();
+
+        let cancel = owner.cancel.clone();
+        let receiver = thread::spawn(move || {
+            data.set_nonblocking(false).unwrap();
+            data.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
+            let mut packet = [0; 2048];
+            assert!(data.recv(&mut packet).unwrap() > 12);
+            if mode == "cancel" {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            if mode == "malformed" {
+                control
+                    .send_to(
+                        &[0x80, 0xd5, 0, 1, 0, 0, 0, 33],
+                        ("127.0.0.1", local_control),
+                    )
+                    .unwrap();
+            }
+            // Keep the negotiated endpoints alive through the failure.
+            while data.recv(&mut packet).is_ok() {}
+        });
+        let result = owner.play_wav(&vec![[123, -456]; 4 * profile::RATE as usize], None);
+        assert!(result.is_err(), "{mode}");
+        assert_eq!(owner.state(), State::Failed);
+        assert!(owner.playback_stats.packets > 0);
+        assert!(owner.playback_stats.packets < 4 * u64::from(profile::RATE) / profile::SPF as u64);
+        assert!(owner.control.is_none() && owner.timing.is_none());
+        assert!(owner.realtime_encoder.is_none() && owner.realtime_transport.is_none());
+        let _rebound = UdpSocket::bind(("127.0.0.1", local_control)).unwrap();
+        let _event = UdpSocket::bind(addresses.0).unwrap();
+        let _general = UdpSocket::bind(addresses.1).unwrap();
+        receiver.join().unwrap();
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn wav_cannot_send_without_authenticated_negotiated_owner() {
+    let mut owner = Session::new();
+    assert!(owner.play_wav(&[[1, -1]; 352], None).is_err());
+    assert_eq!(owner.state(), State::Failed);
+    assert_eq!(owner.playback_stats.packets, 0);
+    assert_eq!(owner.playback_stats.syncs, 0);
+    assert!(owner.control.is_none() && owner.realtime_transport.is_none());
 }

@@ -813,23 +813,53 @@ impl Session {
     /// Test input only. The transport, codec, crypto, sockets and timing are real.
     /// Signal amplitude <= -18 dBFS and receiver volume uses the explicitly authorized test setting.
     pub fn transmit_test(&mut self, seconds: u32) -> Result<()> {
-        self.transmit_input(seconds, None)
+        self.transmit_input(seconds)
     }
     pub fn transmit_wav(&mut self, frames: &[[i16; 2]]) -> Result<()> {
-        self.transmit_input(1, Some(frames))
+        self.transmit_shared_wav(frames)
     }
-    fn transmit_input(&mut self, seconds: u32, wav: Option<&[[i16; 2]]>) -> Result<()> {
+    fn transmit_shared_wav(&mut self, frames: &[[i16; 2]]) -> Result<()> {
+        let mut stats = super::playback::Statistics::default();
+        let result = (|| {
+            ensure!(
+                self.stream_check && self.playback_check && self.state == State::Ready,
+                "WAV requires authenticated realtime playback authorization"
+            );
+            let mut feedback = FeedbackWorker::start(
+                self.control.take().context("control absent")?,
+                self.session_header.clone(),
+                self.stream_id,
+                self.cancel.clone(),
+            )?;
+            let mut encoder = self.encoder.take().context("encoder absent")?;
+            let result = super::playback::run(
+                &mut NtpWavOutput {
+                    session: self,
+                    feedback: &mut feedback,
+                },
+                &mut encoder,
+                frames,
+                &mut stats,
+            );
+            self.encoder = Some(encoder);
+            let (wire, token, outcome) = feedback.reclaim();
+            self.control = wire;
+            self.session_header = token;
+            result.and(outcome)
+        })();
+        if result.is_ok() {
+            self.state = State::Streaming;
+        }
+        self.packets_sent += stats.packets;
+        self.resends += stats.resends;
+        self.timing_exchanges = self.media.as_ref().map_or(0, |m| m.timing.count());
+        tracing::info!(target: "piair::rtsp", ?stats, success = result.is_ok(), "WAV transmission; audible playback unverified");
+        self.finish(result)
+    }
+    fn transmit_input(&mut self, seconds: u32) -> Result<()> {
         let attempted = Instant::now();
         let mut feedback_worker = None;
         let mut result = (|| {
-            ensure!(
-                wav.is_none() || (self.stream_check && self.playback_check),
-                "WAV requires an authenticated realtime playback diagnostic"
-            );
-            ensure!(
-                wav.is_none_or(|f| !f.is_empty() && f.len() <= 30 * profile::RATE as usize),
-                "WAV input must contain at most 30 seconds"
-            );
             ensure!(
                 self.state == State::Ready,
                 "successful session negotiation required"
@@ -839,7 +869,7 @@ impl Session {
                 "test duration must be 1..3 seconds"
             );
             let clock = self.clock.as_ref().context("session clock absent")?.clone();
-            if !self.playback_check || wav.is_some() {
+            if !self.playback_check {
                 feedback_worker = Some(FeedbackWorker::start(
                     self.control.take().context("control absent")?,
                     self.session_header.clone(),
@@ -853,9 +883,7 @@ impl Session {
                 !self.playback_check || seconds == 1,
                 "playback check is fixed at one second"
             );
-            let signal = wav.map_or(u64::from(seconds) * u64::from(profile::RATE), |f| {
-                f.len() as u64
-            });
+            let signal = u64::from(seconds) * u64::from(profile::RATE);
             // No unsent PCM at sync time: OwnTone's pos + input - output
             // reduces to next RTP timestamp minus our sender buffer.
             let total = signal + u64::from(realtime::PLAYBACK_LEAD_SAMPLES);
@@ -865,7 +893,7 @@ impl Session {
             let mut sync_packets = 0_u64;
             let mut max_lateness_us = 0_u64;
             tracing::debug!(target: "piair::rtsp", phase = "playback policy",
-                feedback_polling = !self.playback_check || wav.is_some(),
+                feedback_polling = !self.playback_check,
                 retransmissions_allowed = !self.playback_check,
                 signal_frames = signal, total_frames = total,
                 expected_packets = total.div_ceil(profile::SPF as u64),
@@ -949,8 +977,6 @@ impl Session {
                     .map(|n| {
                         if n >= signal {
                             [0, 0]
-                        } else if let Some(frames) = wav {
-                            frames[n as usize]
                         } else {
                             let phase = (n % 100) as i16;
                             let x = if phase < 50 {
@@ -1148,20 +1174,72 @@ impl Drop for Session {
     }
 }
 
+struct NtpWavOutput<'a> {
+    session: &'a mut Session,
+    feedback: &'a mut FeedbackWorker,
+}
+impl super::playback::Output for NtpWavOutput<'_> {
+    fn retransmissions_allowed(&self) -> bool {
+        false
+    }
+    fn check(&mut self) -> Result<()> {
+        self.session.workers()?;
+        self.feedback.check()
+    }
+    fn feedback(&mut self) -> Result<()> {
+        self.feedback.request()
+    }
+    fn retransmit(&mut self) -> Result<Option<(u16, u16)>> {
+        self.session
+            .media
+            .as_ref()
+            .context("media absent")?
+            .retransmit()
+    }
+    fn send(&mut self, packet: &[u8]) -> Result<()> {
+        self.session
+            .media
+            .as_ref()
+            .context("media absent")?
+            .send(packet)
+    }
+    fn sync(&mut self, first: bool, _current: u32, next: u32, at: Instant) -> Result<()> {
+        let ntp = self
+            .session
+            .clock
+            .as_ref()
+            .context("clock absent")?
+            .instant(at);
+        let media = self.session.media.as_ref().context("media absent")?;
+        tracing::debug!(target: "piair::rtsp", ntp_age_ms = media.timing.age().as_millis() as u64,
+            ntp_replies = media.timing.count(), "NTP WAV synchronization health");
+        media.sync(&realtime::sync(first, next, ntp))
+    }
+}
+
 // While RTP runs with feedback enabled, this worker is the sole owner of Wire, its CSeq and
 // directional cipher counters. The scheduler only uses bounded channels.
-struct FeedbackWorker {
+pub(super) struct FeedbackWorker {
     commands: Option<SyncSender<()>>,
     outcomes: Receiver<Result<()>>,
     thread: Option<JoinHandle<(Wire, Option<String>)>>,
     pending: bool,
 }
 impl FeedbackWorker {
-    fn start(
+    pub(super) fn start(
+        wire: Wire,
+        session_header: Option<String>,
+        stream_id: Option<u32>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        Self::start_bound(wire, session_header, stream_id, cancel, false)
+    }
+    pub(super) fn start_bound(
         mut wire: Wire,
         mut session_header: Option<String>,
         stream_id: Option<u32>,
         cancel: Arc<AtomicBool>,
+        strict: bool,
     ) -> Result<Self> {
         let (commands, requests) = mpsc::sync_channel(1);
         let (outcomes, responses) = mpsc::sync_channel(1);
@@ -1183,6 +1261,14 @@ impl FeedbackWorker {
                             let reply = wire
                                 .request("POST", "/feedback", &headers, &[])
                                 .context("RTSP method=POST")?;
+                            if strict {
+                                if let Some(token) = reply.headers.get("session") {
+                                    ensure!(
+                                        session_header.as_ref() == Some(token),
+                                        "receiver session binding changed"
+                                    );
+                                }
+                            }
                             Session::validate_session_header(&mut session_header, reply)
                         })();
                         let result = Session::feedback_result(result, stream_id, started);
@@ -1204,7 +1290,7 @@ impl FeedbackWorker {
             pending: false,
         })
     }
-    fn check(&mut self) -> Result<()> {
+    pub(super) fn check(&mut self) -> Result<()> {
         if !self.pending {
             ensure!(
                 !self
@@ -1228,7 +1314,7 @@ impl FeedbackWorker {
         }
         Ok(())
     }
-    fn request(&mut self) -> Result<()> {
+    pub(super) fn request(&mut self) -> Result<()> {
         self.check()?;
         ensure!(!self.pending, "previous feedback request still pending");
         self.commands
@@ -1239,7 +1325,7 @@ impl FeedbackWorker {
         self.pending = true;
         Ok(())
     }
-    fn reclaim(mut self) -> (Option<Wire>, Option<String>, Result<()>) {
+    pub(super) fn reclaim(mut self) -> (Option<Wire>, Option<String>, Result<()>) {
         self.join()
     }
     fn join(&mut self) -> (Option<Wire>, Option<String>, Result<()>) {

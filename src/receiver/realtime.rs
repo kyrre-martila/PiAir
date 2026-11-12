@@ -184,8 +184,17 @@ impl Encoder {
         Ok(None)
     }
     pub fn flush(&mut self) {
+        for (_, packet, _) in &mut self.cache {
+            packet.zeroize();
+        }
         self.cache.clear();
         self.first = true;
+    }
+}
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        self.flush();
+        self.key.zeroize();
     }
 }
 /// RECORD Audio-Latency is diagnostic only, as in OwnTone's response handler.
