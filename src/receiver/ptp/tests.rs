@@ -1040,13 +1040,18 @@ fn apple_follow_up_known_answer_and_conflicting_extensions() {
     let now = Instant::now();
     let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
     c.check(now, false).unwrap();
-    c.receive_general(&bytes).unwrap();
-    assert_eq!(c.state(), State::Synchronizing);
+    let mut sync = request(Kind::Sync, 0x1234);
+    sync.flags |= 0x0200;
+    c.receive(&sync.encode().unwrap(), now).unwrap();
+    c.receive_general(&bytes, now).unwrap();
+    assert_eq!(c.state(), State::PeerObserved);
     assert!(!c.media_permitted());
     peer(&mut c, now, 1);
     let mut wrong_port = p;
     wrong_port.source[9] ^= 1;
-    assert!(c.receive_general(&wrong_port.encode().unwrap()).is_err());
+    assert!(c
+        .receive_general(&wrong_port.encode().unwrap(), now)
+        .is_err());
 }
 
 #[test]
@@ -1064,16 +1069,16 @@ fn apple_signaling_is_bounded_opaque_and_cannot_register_peers() {
     let now = Instant::now();
     let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
     c.check(now, false).unwrap();
-    c.receive_general(&encoded).unwrap();
-    assert!(c.peer_identity.is_none());
-    assert!(c.last_peer.is_none());
-    assert!(c.check(now + Duration::from_secs(1), false).is_err());
+    c.receive_general(&encoded, now).unwrap();
+    assert_eq!(c.peer_ports[Kind::DelayReq as usize], None);
+    assert_eq!(c.last_peer, Some(now));
+    c.check(now + Duration::from_secs(1), false).unwrap();
     let mut bad = p.clone();
     bad.body[13] = 20;
     assert!(bad.encode().is_err());
     bad = p;
     bad.body[..10].copy_from_slice(&[0x22; 10]);
-    assert!(c.receive_general(&bad.encode().unwrap()).is_err());
+    assert!(c.receive_general(&bad.encode().unwrap(), now).is_err());
 }
 
 #[test]
@@ -1338,7 +1343,7 @@ fn ptp_debug_diagnostics_are_bounded_and_payload_free() {
 }
 
 #[test]
-fn inbound_sync_and_different_timeline_follow_up_never_refresh_liveness() {
+fn inbound_sync_observed_but_conflicting_timeline_never_adopted() {
     let now = Instant::now();
     let mut clock = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(5)).unwrap();
     peer(&mut clock, now, 1);
@@ -1350,9 +1355,8 @@ fn inbound_sync_and_different_timeline_follow_up_never_refresh_liveness() {
     // A receiver can emit its own two-step Sync while we remain fixed GM.
     assert!(clock
         .receive(&sync, now + Duration::from_secs(1))
-        .unwrap_err()
-        .to_string()
-        .contains("unsupported message for fixed grandmaster"));
+        .unwrap()
+        .is_empty());
     let mut follow = request(Kind::FollowUp, 0x1234);
     follow.flags = 0x0408;
     follow
@@ -1372,12 +1376,14 @@ fn inbound_sync_and_different_timeline_follow_up_never_refresh_liveness() {
     bytes[86..94].copy_from_slice(&42u64.to_be_bytes());
     for _ in 0..2 {
         assert!(clock
-            .receive_general(&bytes)
+            .receive_general(&bytes, now + Duration::from_secs(1))
             .unwrap_err()
             .to_string()
             .contains("conflicting Apple clock TLV"));
     }
-    assert!(clock.receive_general(&bytes[..95]).is_err());
+    assert!(clock
+        .receive_general(&bytes[..95], now + Duration::from_secs(1))
+        .is_err());
     assert!(clock
         .receive(
             &request(Kind::DelayReq, 1).encode().unwrap(),
@@ -1393,7 +1399,7 @@ fn inbound_sync_and_different_timeline_follow_up_never_refresh_liveness() {
     assert_eq!(clock.state(), State::PeerObserved);
     assert!(!clock.media_permitted());
     assert!(clock
-        .check(now + Duration::from_millis(3001), false)
+        .check(now + Duration::from_millis(4001), false)
         .is_err());
     assert_eq!(clock.state(), State::Lost);
 }
@@ -1464,4 +1470,212 @@ fn session_timing_drop_and_repeated_shutdown_close_both_sockets() {
         let _event = UdpSocket::bind(addresses.0).unwrap();
         let _general = UdpSocket::bind(addresses.1).unwrap();
     }
+}
+
+#[test]
+fn apple_tv_single_delay_then_ten_seconds_of_validated_observations() {
+    let now = Instant::now();
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+    peer(&mut c, now, 1);
+    let generation = c.generation();
+    for second in 1..=10 {
+        let at = now + Duration::from_secs(second);
+        let mut sync = request(Kind::Sync, second as u16);
+        sync.source[8..].copy_from_slice(&1u16.to_be_bytes());
+        sync.flags |= 0x0200;
+        assert!(c.receive(&sync.encode().unwrap(), at).unwrap().is_empty());
+        let mut follow = request(Kind::FollowUp, second as u16);
+        follow.source = sync.source;
+        c.receive_general(&follow.encode().unwrap(), at).unwrap();
+        assert!(c.receive_general(&follow.encode().unwrap(), at).is_err());
+        let mut announce = Packet::new(Kind::Announce, c.peer_clock_id, second as u16, vec![0; 30]);
+        announce.source[8..].copy_from_slice(&2u16.to_be_bytes());
+        // An announcement naming another GM is observed, never elected.
+        announce.body[19..27].copy_from_slice(&99u64.to_be_bytes());
+        c.receive_general(&announce.encode().unwrap(), at).unwrap();
+        let mut signaling = request(Kind::Signaling, second as u16);
+        signaling.source[8..].copy_from_slice(&3u16.to_be_bytes());
+        c.receive_general(&signaling.encode().unwrap(), at).unwrap();
+        assert_eq!(c.last_peer, Some(at));
+        c.check(at, false).unwrap();
+        assert_eq!(c.state(), State::PeerObserved);
+        assert_eq!(c.clock_id, 42);
+        assert_eq!(c.generation(), generation);
+        assert!(!c.media_permitted());
+    }
+    // Rejected identities, changed role ports, wrong targets and replay cannot
+    // keep a silent receiver alive. Poll continuously to isolate peer expiry.
+    for second in 11..=13 {
+        let at = now + Duration::from_secs(second);
+        let mut bad = request(Kind::Sync, second as u16);
+        assert!(c.receive(&bad.encode().unwrap(), at).is_err()); // role port changed
+        bad.source[..8].copy_from_slice(&99u64.to_be_bytes());
+        assert!(c.receive(&bad.encode().unwrap(), at).is_err());
+        c.check(at, false).unwrap();
+        assert_eq!(c.last_peer, Some(now + Duration::from_secs(10)));
+    }
+    assert!(c.check(now + Duration::from_millis(13001), false).is_err());
+    assert_eq!(c.state(), State::Lost);
+}
+
+#[test]
+fn unmatched_follow_up_and_wrong_channel_cannot_establish_liveness() {
+    let now = Instant::now();
+    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+    let f = request(Kind::FollowUp, 1).encode().unwrap();
+    assert!(c.receive_general(&f, now).is_err());
+    assert!(c.receive(&f, now).is_err());
+    let sync = request(Kind::Sync, 1).encode().unwrap();
+    assert!(c.receive_general(&sync, now).is_err());
+    assert!(c.last_peer.is_none());
+    assert!(c.check(now + Duration::from_secs(2), false).is_err());
+}
+
+#[test]
+fn service_reports_each_validated_message_and_rejection_separately() {
+    let fixture = authorized_ptp_fixture();
+    let (event, peer_event) = udp_pair();
+    let (general, peer_general) = udp_pair();
+    let mut service = Service::attach(
+        fixture_clock(),
+        event,
+        general,
+        fixture.wire.ptp_lease().unwrap(),
+    )
+    .unwrap();
+    let mut sync = request(Kind::Sync, 7);
+    sync.flags |= 0x0200;
+    sync.source[8..].copy_from_slice(&1u16.to_be_bytes());
+    peer_event.send(&sync.encode().unwrap()).unwrap();
+    peer_event
+        .send(&request(Kind::DelayReq, 1).encode().unwrap())
+        .unwrap();
+    let mut follow = request(Kind::FollowUp, 7);
+    follow.source = sync.source;
+    peer_general.send(&follow.encode().unwrap()).unwrap();
+    peer_general
+        .send(
+            &Packet::new(Kind::Announce, 0x1122334455667788, 1, vec![0; 30])
+                .encode()
+                .unwrap(),
+        )
+        .unwrap();
+    let mut signaling = request(Kind::Signaling, 1);
+    signaling.body = vec![0xff; 10];
+    peer_general.send(&signaling.encode().unwrap()).unwrap();
+    peer_general.send(&signaling.encode().unwrap()).unwrap(); // replay
+    peer_general.send(&[0; 12]).unwrap(); // malformed
+    service.poll(&AtomicBool::new(false)).unwrap();
+    let evidence = service.evidence();
+    assert_eq!(evidence.sync_received, 1);
+    assert_eq!(evidence.follow_up_received, 1);
+    assert_eq!(evidence.announce_received, 1);
+    assert_eq!(evidence.signaling_received, 1);
+    assert_eq!(evidence.delay_requests, 1);
+    assert_eq!(evidence.delay_responses_sent, 1);
+    assert_eq!(evidence.general_received, 3);
+    assert_eq!(evidence.rejected, 2);
+    assert_eq!(service.clock.clock_id, 42);
+    assert!(!service.clock.media_permitted());
+}
+
+#[test]
+fn zero_source_port_is_rejected_before_any_observation() {
+    let now = Instant::now();
+    for kind in [
+        Kind::DelayReq,
+        Kind::PdelayReq,
+        Kind::Sync,
+        Kind::FollowUp,
+        Kind::Announce,
+        Kind::Signaling,
+    ] {
+        let length = match kind {
+            Kind::PdelayReq => 20,
+            Kind::Announce => 30,
+            _ => 10,
+        };
+        let mut packet = Packet::new(kind, 0x1122334455667788, 7, vec![0; length]);
+        let mut bytes = packet.encode().unwrap();
+        bytes[28..30].fill(0); // independent wire mutation bypasses encoder validation
+        packet.source[8..].fill(0);
+        assert_eq!(packet.port_number(), 0);
+        assert!(packet.encode().is_err());
+        assert!(Packet::decode(&bytes).is_err());
+        let mut clock = fixture_clock();
+        // Defense at the typed observation boundary as well as in the decoder.
+        assert!(clock.validate_observation(&packet, now).is_err());
+        assert!(clock.last_peer.is_none());
+        assert_eq!(clock.peer_ports, [None; 16]);
+        assert_eq!(clock.last_sequences, [None; 16]);
+        // A fresh clock uses this test's deterministic time base.
+        let mut clock =
+            Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+        let result = if kind.event() {
+            clock.receive(&bytes, now).map(|_| ())
+        } else {
+            clock.receive_general(&bytes, now)
+        };
+        assert!(result.is_err());
+        assert!(clock.last_peer.is_none());
+        assert!(!clock.media_permitted());
+    }
+}
+
+#[test]
+fn unsupported_and_malformed_sync_cannot_pin_or_refresh_peer() {
+    let now = Instant::now();
+    let mut clock = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+    peer(&mut clock, now, 1);
+    let sync = request(Kind::Sync, 9);
+    let valid = sync.encode().unwrap();
+    let mut rejected = Vec::new();
+    for correction in [-1i64, 1, i64::MAX] {
+        let mut bytes = valid.clone();
+        bytes[8..16].copy_from_slice(&correction.to_be_bytes());
+        assert!(Packet::decode(&bytes).is_ok()); // valid wire form, unsupported policy
+        rejected.push(bytes);
+    }
+    for bit in 0..16 {
+        if (1u16 << bit) & 0x0608 != 0 {
+            continue;
+        }
+        let mut bytes = valid.clone();
+        bytes[6..8].copy_from_slice(&(sync.flags | (1u16 << bit)).to_be_bytes());
+        rejected.push(bytes);
+    }
+    let mut extended = valid.clone();
+    extended.extend_from_slice(&[0, 0x7f, 0, 0]); // bounded unknown TLV
+    extended[2..4].copy_from_slice(&48u16.to_be_bytes());
+    assert!(Packet::decode(&extended).is_ok());
+    rejected.push(extended);
+    for (index, value) in [(1, 1), (4, 1), (16, 1), (32, 1), (40, 255)] {
+        let mut bytes = valid.clone();
+        bytes[index] = value;
+        rejected.push(bytes);
+    }
+    rejected.push(valid[..43].to_vec());
+    for bytes in rejected {
+        assert!(clock.receive(&bytes, now + Duration::from_secs(1)).is_err());
+        assert_eq!(clock.last_peer, Some(now));
+        assert_eq!(clock.peer_ports[Kind::Sync as usize], None);
+        assert_eq!(clock.last_sequences[Kind::Sync as usize], None);
+        assert!(clock.incoming_sync.is_none());
+        assert_eq!(clock.clock_id, 42);
+        assert!(!clock.media_permitted());
+    }
+    // Invalid Sync did not consume this sequence or prevent a supported one.
+    assert!(clock
+        .receive(&valid, now + Duration::from_secs(1))
+        .unwrap()
+        .is_empty());
+    assert_eq!(clock.last_peer, Some(now + Duration::from_secs(1)));
+    for second in 2..=4 {
+        clock
+            .check(now + Duration::from_secs(second), false)
+            .unwrap();
+    }
+    assert!(clock
+        .check(now + Duration::from_millis(4001), false)
+        .is_err());
 }

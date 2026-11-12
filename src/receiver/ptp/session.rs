@@ -40,6 +40,10 @@ impl TimingSession {
     pub fn state(&self) -> State {
         self.service.state()
     }
+    /// A current liveness check, not proof of synchronization or adoption.
+    pub fn peer_is_live(&self, now: Instant) -> bool {
+        self.state() == State::PeerObserved && self.service.clock().network_time(now).is_ok()
+    }
     pub fn peer(&self) -> IpAddr {
         self.service.peer()
     }

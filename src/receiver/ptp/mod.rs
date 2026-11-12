@@ -117,7 +117,7 @@ fn next_generation() -> Result<u64> {
 
 /// A fixed single-peer grandmaster, using an explicitly chosen local epoch.
 /// All incoming datagrams must come from an already authorized connected socket.
-/// Delay traffic is liveness evidence, never evidence of remote offset or lock.
+/// Fresh validated peer traffic is liveness, never remote offset or lock evidence.
 pub struct Grandmaster {
     clock_id: u64,
     peer_clock_id: u64,
@@ -131,8 +131,9 @@ pub struct Grandmaster {
     sequence: u16,
     announce_sequence: u16,
     pending_sync: Option<(u16, Instant)>,
-    peer_identity: Option<[u8; 10]>,
-    last_sequences: [Option<u16>; 2],
+    last_sequences: [Option<u16>; 16],
+    peer_ports: [Option<u16>; 16],
+    incoming_sync: Option<(u16, u16, Instant)>,
     last_peer: Option<Instant>,
 }
 impl Grandmaster {
@@ -167,8 +168,9 @@ impl Grandmaster {
             sequence: 0,
             announce_sequence: 0,
             pending_sync: None,
-            peer_identity: None,
-            last_sequences: [None; 2],
+            last_sequences: [None; 16],
+            peer_ports: [None; 16],
+            incoming_sync: None,
             last_peer: None,
         })
     }
@@ -312,6 +314,23 @@ impl Grandmaster {
             p.source[..8] == self.peer_clock_id.to_be_bytes(),
             "unexpected peer clock identity"
         );
+        ensure!(p.kind.event(), "general packet on event channel");
+        if p.kind == Kind::Sync {
+            // Observation-only subset: one/two-step, unicast and PTP timescale.
+            // Correction fields can be valid PTP, but corrected/extended Sync
+            // semantics are not implemented here. Reject before pinning or liveness.
+            ensure!(
+                p.correction == 0 && p.flags & !0x0608 == 0 && p.body.len() == 10,
+                "unsupported Sync correction/flags/extensions"
+            );
+            self.validate_observation(&p, received)?;
+            self.incoming_sync = if p.flags & 0x0200 != 0 {
+                Some((p.port_number(), p.sequence, received))
+            } else {
+                None
+            };
+            return Ok(Vec::new());
+        }
         ensure!(p.correction == 0, "unsupported corrected delay request");
         let slot = match p.kind {
             Kind::DelayReq => 0,
@@ -322,16 +341,7 @@ impl Grandmaster {
             p.body.len() == p.kind_body_len() && p.flags & !0x0408 == 0,
             "unsupported request extensions/flags"
         );
-        if let Some(id) = self.peer_identity {
-            ensure!(
-                id == p.source,
-                "peer identity changed; new session required"
-            );
-        }
-        if let Some(last) = self.last_sequences[slot] {
-            let delta = p.sequence.wrapping_sub(last);
-            ensure!(delta > 0 && delta < 0x8000, "stale/replayed PTP sequence");
-        }
+        self.validate_observation(&p, received)?;
         let mut body = self.timestamp(received)?.encode()?.to_vec();
         body.extend_from_slice(&p.source);
         let kind = if slot == 0 {
@@ -343,24 +353,60 @@ impl Grandmaster {
         if slot == 1 {
             response.flags |= 0x0200;
         }
-        self.peer_identity = Some(p.source);
-        self.last_sequences[slot] = Some(p.sequence);
-        self.last_peer = Some(received);
-        self.state = State::PeerObserved;
         Ok(vec![response])
     }
-    /// General-channel observations cannot pin identities, elect a clock or
-    /// refresh delay-request liveness. Apple signaling contents remain opaque.
-    fn receive_general(&self, bytes: &[u8]) -> Result<()> {
-        let p = Packet::decode(bytes)?;
-        ensure!(!p.kind.event(), "event packet on general channel");
+    /// Pin each message role independently: a clock can expose multiple PTP
+    /// ports. Only the Sync/Follow_Up pair requires identical port and sequence.
+    /// This never runs a servo or a best-master election.
+    fn validate_observation(&mut self, p: &Packet, received: Instant) -> Result<()> {
         ensure!(
             p.source[..8] == self.peer_clock_id.to_be_bytes(),
-            "unexpected general peer identity"
+            "unexpected peer clock identity"
         );
-        if let Some(identity) = self.peer_identity {
-            ensure!(p.source == identity, "general peer port identity changed");
+        let slot = if p.kind == Kind::FollowUp {
+            Kind::Sync as usize
+        } else {
+            p.kind as usize
+        };
+        let port = p.port_number();
+        // IEEE 1588-2008 7.5.2.3 assigns ordinary port numbers starting at 1.
+        // Packet::decode already enforces this; keep the observation boundary
+        // explicit so a future typed caller cannot pin zero or refresh liveness.
+        ensure!(port != 0, "invalid zero source port number");
+        if let Some(expected) = self.peer_ports[slot] {
+            ensure!(port == expected, "peer role port identity changed");
         }
+        if let Some(last) = self.last_sequences[p.kind as usize] {
+            let delta = p.sequence.wrapping_sub(last);
+            ensure!(delta > 0 && delta < 0x8000, "stale/replayed PTP sequence");
+        }
+        if p.kind == Kind::FollowUp {
+            let (sync_port, sequence, at) = self.incoming_sync.context("unmatched Follow_Up")?;
+            ensure!(
+                port == sync_port
+                    && p.sequence == sequence
+                    && received.saturating_duration_since(at) <= Duration::from_secs(3),
+                "unmatched/stale Follow_Up"
+            );
+        }
+        self.peer_ports[slot] = Some(port);
+        self.last_sequences[p.kind as usize] = Some(p.sequence);
+        if p.kind == Kind::FollowUp {
+            self.incoming_sync = None;
+        }
+        self.last_peer = Some(received);
+        self.state = State::PeerObserved;
+        Ok(())
+    }
+    /// Signaling TLVs are bounded by Packet::decode and remain inert: no peer
+    /// registration, destination, authorization or timing policy changes.
+    fn receive_general(&mut self, bytes: &[u8], received: Instant) -> Result<()> {
+        self.check(received, false)?;
+        let p = Packet::decode(bytes)?;
+        ensure!(
+            matches!(p.kind, Kind::FollowUp | Kind::Announce | Kind::Signaling),
+            "unsupported general observation"
+        );
         if p.kind == Kind::Signaling {
             let mut local = [0; 10];
             local[..8].copy_from_slice(&self.clock_id.to_be_bytes());
@@ -370,13 +416,14 @@ impl Grandmaster {
                 "unexpected signaling target"
             );
         }
-        Ok(())
+        self.validate_observation(&p, received)
     }
     pub fn shutdown(&mut self) {
         self.state = State::Shutdown;
         self.pending_sync = None;
-        self.peer_identity = None;
-        self.last_sequences = [None; 2];
+        self.last_sequences = [None; 16];
+        self.peer_ports = [None; 16];
+        self.incoming_sync = None;
         self.last_peer = None;
     }
     /// PR #42 must supply a complete session grant; timing alone never grants media.
@@ -398,7 +445,13 @@ pub struct Evidence {
     pub announce_sent: u64,
     pub delay_requests: u64,
     pub delay_responses_sent: u64,
+    pub pdelay_requests: u64,
     pub general_received: u64,
+    pub sync_received: u64,
+    pub follow_up_received: u64,
+    pub announce_received: u64,
+    pub signaling_received: u64,
+    pub rejected: u64,
 }
 /// No socket creation: Wire supplies connected event/general sockets for the
 /// selected authenticated receiver (UDP 319/320). Dropping releases both sockets.
@@ -412,7 +465,7 @@ pub struct Service {
     evidence: Evidence,
 }
 // Separate lifetime budgets: rejected floods cannot hide successful exchanges.
-// No packet contents, clock identities, addresses or control-session data.
+// Only bounded header identities; never payloads, addresses or control-session data.
 #[derive(Default)]
 struct Diagnostics {
     rejected: u8,
@@ -427,6 +480,8 @@ impl Diagnostics {
         self.rejected += 1;
         tracing::debug!(target: "piair::ptp", channel, length = bytes.len(),
             message_type = ?bytes.first().map(|b| b & 15),
+            clock_identity = ?bytes.get(20..28).map(|b| format!("{:016x}", u64::from_be_bytes(b.try_into().expect("bounded identity")))),
+            port_number = ?bytes.get(28..30).map(|b| u16::from_be_bytes(b.try_into().expect("bounded port"))),
             control = ?bytes.get(32), reason = %reason,
             diagnostic = self.rejected, "rejected PTP datagram");
     }
@@ -527,9 +582,20 @@ impl Service {
                     self.check_authorization()?;
                     // Invalid unauthenticated UDP is ignored, never a lock signal.
                     match self.clock.receive(&b[..n], Instant::now()) {
-                        Err(reason) => self.diagnostics.reject("event", &b[..n], &reason),
+                        Err(reason) => {
+                            self.evidence.rejected += 1;
+                            self.diagnostics.reject("event", &b[..n], &reason);
+                        }
                         Ok(responses) => {
-                            self.evidence.delay_requests += 1;
+                            if responses.is_empty() {
+                                self.evidence.sync_received += 1;
+                            } else {
+                                if responses[0].kind == Kind::PdelayResp {
+                                    self.evidence.pdelay_requests += 1;
+                                } else {
+                                    self.evidence.delay_requests += 1;
+                                }
+                            }
                             for p in responses {
                                 self.send(&p)?;
                                 if p.kind == Kind::DelayResp {
@@ -569,10 +635,17 @@ impl Service {
             {
                 Ok(n) => {
                     self.check_authorization()?;
-                    if let Err(reason) = self.clock.receive_general(&bytes[..n]) {
+                    if let Err(reason) = self.clock.receive_general(&bytes[..n], Instant::now()) {
+                        self.evidence.rejected += 1;
                         self.diagnostics.reject("general", &bytes[..n], &reason);
                     } else {
                         self.evidence.general_received += 1;
+                        match bytes[0] & 15 {
+                            8 => self.evidence.follow_up_received += 1,
+                            11 => self.evidence.announce_received += 1,
+                            12 => self.evidence.signaling_received += 1,
+                            _ => (),
+                        }
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,

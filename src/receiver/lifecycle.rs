@@ -90,6 +90,10 @@ pub struct Session {
     attempted_setup: bool,
     setup_rtsp_accepted: bool,
     observed: bool,
+    observation_complete: bool,
+    // Historical result at observation completion (or before cleanup on failure).
+    // Never recomputed from Shutdown and never used to authorize media.
+    observed_peer_liveness: Option<bool>,
     stage: Option<Stage>,
     prepared: Option<Prepared>,
     stream: Option<NegotiatedStream>,
@@ -122,6 +126,8 @@ impl Session {
             attempted_setup: false,
             setup_rtsp_accepted: false,
             observed: false,
+            observation_complete: false,
+            observed_peer_liveness: None,
             stage: None,
             prepared: None,
             stream: None,
@@ -147,7 +153,25 @@ impl Session {
             .as_ref()
             .map(|s| s.evidence())
             .unwrap_or(self.final_evidence);
-        format!("initial SETUP RTSP accepted: {}; packet evidence: {evidence:?}; media readiness: blocked; session: {:?}; last accepted: {}; attempted: {}; PTP snapshot: {ptp:?}; receiver clock adoption: unverified; TEARDOWN: {}; audio bytes: 0",
+        let peer_live = self.observed_peer_liveness.unwrap_or_else(|| {
+            self.timing
+                .as_ref()
+                .is_some_and(|timing| timing.peer_is_live(Instant::now()))
+        });
+        let observation = if self.observation_complete {
+            "completed"
+        } else {
+            "incomplete"
+        };
+        let local_cleanup = if matches!(self.state, State::Closed | State::Failed)
+            && self.timing.is_none()
+            && self.control.is_none()
+        {
+            "released"
+        } else {
+            "pending"
+        };
+        format!("local cleanup: {local_cleanup}; negotiation observation: {observation}; peer liveness at snapshot: {peer_live}; synchronization: unverified; initial SETUP RTSP accepted: {}; packet evidence: {evidence:?}; media readiness: blocked; session: {:?}; last accepted: {}; attempted: {}; PTP snapshot: {ptp:?}; receiver clock adoption: unverified; TEARDOWN: {}; audio bytes: 0",
             self.setup_rtsp_accepted, self.state(), self.last_accepted, self.attempted, self.teardown)
     }
     fn check(&self) -> Result<()> {
@@ -475,6 +499,13 @@ impl Session {
                 }
                 std::thread::park_timeout(Duration::from_millis(2));
             }
+            self.observed_peer_liveness = Some(
+                self.timing
+                    .as_ref()
+                    .context("timing absent")?
+                    .peer_is_live(Instant::now()),
+            );
+            self.observation_complete = true;
             Ok(self.timing.as_ref().context("timing absent")?.state())
         })();
         match result {
@@ -509,6 +540,9 @@ impl Session {
         if let Some(timing) = &self.timing {
             self.final_ptp = Some(timing.state());
             self.final_evidence = timing.evidence();
+            if self.observed_peer_liveness.is_none() {
+                self.observed_peer_liveness = Some(timing.peer_is_live(Instant::now()));
+            }
         }
         // Healthy timing continues during bounded teardown. A cancelled/lost
         // service must not prevent an otherwise authorized cleanup request.
@@ -518,7 +552,10 @@ impl Session {
                 .as_ref()
                 .is_some_and(|s| matches!(s.state(), ptp::State::Lost | ptp::State::Shutdown))
         {
-            self.timing.take();
+            if let Some(mut timing) = self.timing.take() {
+                timing.shutdown();
+                self.final_ptp = Some(timing.state());
+            }
         }
         self.prepared.take();
         self.stream.take();
@@ -540,7 +577,11 @@ impl Session {
             }
             Ok(())
         })();
-        self.timing.take();
+        if let Some(mut timing) = self.timing.take() {
+            self.final_evidence = timing.evidence();
+            timing.shutdown();
+            self.final_ptp = Some(timing.state());
+        }
         self.events.take();
         if let Some(mut wire) = self.control.take() {
             wire.close();
