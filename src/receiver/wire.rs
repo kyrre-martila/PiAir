@@ -12,6 +12,48 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+pub(super) fn ptp_bind_error(port: u16, error: std::io::Error) -> anyhow::Error {
+    let context = if error.kind() == std::io::ErrorKind::PermissionDenied {
+        format!("local PTP UDP {port} bind permission denied; on Linux grant only CAP_NET_BIND_SERVICE to the PiAir executable (see docs/PTP_PORT_PERMISSIONS.md), then run PiAir as your normal user; reapply after rebuilding")
+    } else {
+        format!("local PTP UDP {port} bind failed")
+    };
+    anyhow::Error::new(error).context(context)
+}
+
+fn bind_ptp_socket(local: IpAddr, port: u16) -> Result<UdpSocket> {
+    UdpSocket::bind(SocketAddr::new(local, port)).map_err(|error| ptp_bind_error(port, error))
+}
+
+#[cfg(test)]
+mod ptp_bind_tests {
+    use super::*;
+
+    #[test]
+    fn local_permission_diagnostic_preserves_io_cause_and_is_not_rtsp_rejection() {
+        for port in [319, 320] {
+            let error = ptp_bind_error(port, std::io::Error::from_raw_os_error(libc::EACCES));
+            assert!(error.to_string().contains(&format!("local PTP UDP {port}")));
+            assert!(error.to_string().contains("CAP_NET_BIND_SERVICE"));
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+            assert!(error.downcast_ref::<ResponseFailure>().is_none());
+        }
+    }
+
+    #[test]
+    fn other_bind_errors_do_not_recommend_privileges() {
+        let error = ptp_bind_error(320, std::io::Error::from(std::io::ErrorKind::AddrInUse));
+        assert_eq!(error.to_string(), "local PTP UDP 320 bind failed");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+    }
+}
+
 const OWNTONE_USER_AGENT: &str = "AirPlay/999.0.0";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -933,9 +975,9 @@ impl Wire {
         lease.peer = peer;
         let local = self.socket.local_addr()?.ip();
         validate_timing_interface(local, peer).context("timing interface validation failed")?;
-        let event = UdpSocket::bind(SocketAddr::new(local, 319))?;
+        let event = bind_ptp_socket(local, 319)?;
         event.connect(SocketAddr::new(peer, 319))?;
-        let general = UdpSocket::bind(SocketAddr::new(local, 320))?;
+        let general = bind_ptp_socket(local, 320)?;
         general.connect(SocketAddr::new(peer, 320))?;
         self.reauthorize()?;
         super::ptp::Service::attach(

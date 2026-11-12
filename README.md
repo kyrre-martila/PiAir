@@ -483,3 +483,8 @@ For explicitly selected HomePod transient PTP WAV playback, use
 `select device:0a05559f132f --method transient`. The default still requires stored
 HAP credentials; no fallback occurs. See the [15-second Raspberry Pi test and
 authentication limitations](docs/PTP_IMPLEMENTATION_PLAN.md#explicit-homepod-transient-test-pr-64).
+
+Linux/Raspberry Pi PTP playback binds privileged UDP 319/320. After each release
+build or deployment, follow [PTP port permissions](docs/PTP_PORT_PERMISSIONS.md)
+to grant only `CAP_NET_BIND_SERVICE` to the executable and keep running as your
+normal user.

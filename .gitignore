@@ -25,3 +25,6 @@ rustc-ice-*.txt
 
 # Local receiver identity credentials and endpoint selection
 **/receiver-state/
+
+# Python deployment-helper tests
+__pycache__/
