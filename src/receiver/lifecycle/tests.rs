@@ -1437,3 +1437,32 @@ fn teardown_cannot_introduce_or_change_the_session_binding() {
         server.join().unwrap();
     }
 }
+
+#[test]
+fn authenticated_handoff_retains_cipher_cseq_cancel_and_receiver_without_setup() {
+    let (mut original, _approval, server) = fixture(|mut socket| {
+        let mut keys = server_keys();
+        for seq in 1..=2 {
+            let (header, body) = read_request(&mut socket, &mut keys);
+            assert!(header.starts_with("GET "));
+            assert!(header.contains(&format!("CSeq: {seq}\r\n")));
+            assert!(body.is_empty());
+            socket
+                .write_all(&raw_reply(&mut keys, seq, "", &[]))
+                .unwrap();
+        }
+        let mut byte = [0];
+        assert_eq!(socket.read(&mut byte).unwrap(), 0);
+    });
+    original.call("GET", Some("/info"), &[]).unwrap();
+    let wire = original.control.take().unwrap();
+    let cancel = original.cancel.clone();
+    let mut transferred = Session::from_authenticated(wire, cancel.clone()).unwrap();
+    assert!(Arc::ptr_eq(&cancel, &transferred.cancel));
+    assert_eq!(transferred.state(), State::Negotiation);
+    assert!(!transferred.attempted_setup);
+    assert!(transferred.timing.is_none());
+    transferred.call("GET", Some("/info"), &[]).unwrap();
+    transferred.stop().unwrap();
+    server.join().unwrap();
+}

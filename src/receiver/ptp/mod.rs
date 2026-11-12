@@ -2,6 +2,7 @@
 //! The fixed grandmaster role does not claim receiver servo lock.
 pub mod control;
 pub mod packet;
+pub mod session;
 pub mod time;
 use anyhow::{ensure, Context, Result};
 use packet::{Kind, Packet};

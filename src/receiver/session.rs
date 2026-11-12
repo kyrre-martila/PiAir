@@ -343,6 +343,41 @@ impl Session {
         })();
         self.finish(result)
     }
+    /// Explicit ownership handoff for future PTP WAV negotiation. It sends no
+    /// SETUP or audio. The existing NTP WAV entry points never call this method.
+    /// Consuming self prevents concurrent NTP/PTP owners of cipher/CSeq state.
+    #[allow(dead_code)] // PR #58 selects this only after authenticated capability validation.
+    pub(super) fn into_ptp_foundation(mut self) -> Result<super::lifecycle::Session> {
+        self.check_ptp_handoff()?;
+        let wire = self
+            .control
+            .take()
+            .context("authenticated control absent")?;
+        self.state = State::Disconnected;
+        super::lifecycle::Session::from_authenticated(wire, self.cancel.clone())
+    }
+    fn check_ptp_handoff(&self) -> Result<()> {
+        ensure!(
+            self.state == State::Negotiating
+                && !self.remote_attempted
+                && self.ports.is_none()
+                && self.media.is_none()
+                && self.events.is_none()
+                && self.encoder.is_none()
+                && self.clock.is_none()
+                && self.session_header.is_none()
+                && self.stream_id.is_none()
+                && !self.record_only
+                && !self.owntone_setup_only
+                && !self.stream_check,
+            "PTP handoff requires pristine authenticated session; no timing switch or fallback"
+        );
+        ensure!(
+            !self.cancel.load(Ordering::Relaxed),
+            "PTP handoff cancelled"
+        );
+        Ok(())
+    }
     fn call(
         &mut self,
         method: &str,
@@ -1299,5 +1334,69 @@ mod feedback_tests {
                 accepted
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ptp_handoff_tests {
+    use super::*;
+    #[test]
+    fn handoff_moves_authenticated_wire_without_io_and_cancellation_closes_it() {
+        use crate::receiver::crypto::ControlKeys;
+        use std::io::Read;
+        use std::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut receiver, _) = listener.accept().unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut wire = Wire::mock(socket, Duration::from_secs(1), "device:112233445566")
+            .secure(
+                ControlKeys::new(b"handoff"),
+                ControlKeys::events(b"handoff"),
+            )
+            .unwrap();
+        let _approval = wire.ptp_test_authorization().unwrap();
+        let mut session = Session::new();
+        session.control = Some(wire);
+        session.state = State::Negotiating;
+        let cancel = session.cancel.clone();
+        let mut ptp = session.into_ptp_foundation().unwrap();
+        assert_eq!(ptp.state(), super::super::lifecycle::State::Negotiation);
+        assert!(Arc::ptr_eq(&cancel, &ptp.cancel));
+        cancel.store(true, Ordering::Relaxed);
+        assert!(ptp.setup_authenticated().is_err());
+        assert_eq!(ptp.state(), super::super::lifecycle::State::Failed);
+        assert_eq!(receiver.read(&mut [0; 1]).unwrap(), 0);
+    }
+    #[test]
+    fn handoff_rejects_started_ntp_diagnostics_terminal_and_cancelled_owners() {
+        let mut session = Session::new();
+        for state in [
+            State::Disconnected,
+            State::Connecting,
+            State::Authenticating,
+            State::Ready,
+            State::Streaming,
+            State::Stopping,
+            State::Failed,
+        ] {
+            session.state = state;
+            assert!(session.check_ptp_handoff().is_err());
+        }
+        session.state = State::Negotiating;
+        assert!(session.check_ptp_handoff().is_ok());
+        session.remote_attempted = true;
+        assert!(session.check_ptp_handoff().is_err());
+        session.remote_attempted = false;
+        session.stream_check = true;
+        assert!(session.check_ptp_handoff().is_err());
+        session.stream_check = false;
+        session.cancel.store(true, Ordering::Relaxed);
+        assert!(session.check_ptp_handoff().is_err());
+        // A fabricated state cannot replace real authenticated Wire authorization.
+        session.cancel.store(false, Ordering::Relaxed);
+        assert!(session.into_ptp_foundation().is_err());
     }
 }
