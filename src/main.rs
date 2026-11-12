@@ -100,6 +100,26 @@ fn run_with_discovery(
             experimental_owntone_transient,
             observation_seconds,
         )?,
+        Command::AutomaticPtpCapture {
+            receiver_id,
+            capture_device,
+            threshold_dbfs,
+            start_duration_ms,
+            stop_duration_ms,
+            volume_db,
+            experimental_owntone_transient,
+        } => receiver::automatic_capture(
+            &loaded,
+            &receiver_id,
+            &capture_device,
+            volume_db,
+            experimental_owntone_transient,
+            audio::activity::Settings {
+                threshold_dbfs,
+                start_ms: start_duration_ms,
+                stop_ms: stop_duration_ms,
+            },
+        )?,
         Command::ExperimentalPtpCapture {
             receiver_id,
             capture_device,

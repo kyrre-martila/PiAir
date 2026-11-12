@@ -133,6 +133,33 @@ pub(super) fn run_source(
     policy: Policy,
     mut source: impl FnMut(u64) -> Result<[[i16; 2]; SPF]>,
 ) -> Result<()> {
+    run_optional_source(
+        output,
+        encoder,
+        stats,
+        start,
+        &mut now,
+        &mut wait,
+        total,
+        policy,
+        |sent| source(sent).map(Some),
+    )
+}
+
+/// EOF drains silence on the same sample clock; no RTP/PTP reset at auto-stop.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_optional_source(
+    output: &mut impl Output,
+    encoder: &mut Encoder,
+    stats: &mut Statistics,
+    start: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut wait: impl FnMut(Duration),
+    mut total: Option<u64>,
+    policy: Policy,
+    mut source: impl FnMut(u64) -> Result<Option<[[i16; 2]; SPF]>>,
+) -> Result<()> {
+    let mut ended = false;
     let mut sent = 0;
     let mut sync_at = 0;
     let mut feedback_at = start + Duration::from_secs(2);
@@ -198,7 +225,18 @@ pub(super) fn run_source(
                 "sync datagram sent; receiver scheduling unverified");
             sync_at = sent + u64::from(RATE);
         }
-        let pcm = source(sent)?;
+        let pcm = if ended {
+            [[0; 2]; SPF]
+        } else {
+            match source(sent)? {
+                Some(pcm) => pcm,
+                None => {
+                    ended = true;
+                    total = Some(sent + u64::from(realtime::PLAYBACK_LEAD_SAMPLES));
+                    [[0; 2]; SPF]
+                }
+            }
+        };
         let packet = encoder.packet(&pcm)?;
         output.check()?;
         output.send(&packet)?;
@@ -338,6 +376,41 @@ mod tests {
             assert!(stats.packets <= 2);
             assert_eq!(output.packets.len() as u64, stats.packets);
         }
+    }
+    #[test]
+    fn automatic_eof_drains_on_existing_timeline_and_keeps_feedback_alive() {
+        let mut output = capture();
+        let now = output.now.clone();
+        let wait = now.clone();
+        let mut encoder = Encoder::new().unwrap();
+        let origin = encoder.timestamp;
+        let mut stats = Statistics::default();
+        let mut calls = 0;
+        run_optional_source(
+            &mut output,
+            &mut encoder,
+            &mut stats,
+            now.get(),
+            || now.get(),
+            |d| wait.set(wait.get() + d),
+            None,
+            Policy::Live,
+            |_| {
+                calls += 1;
+                Ok((calls <= 3).then_some([[100; 2]; SPF]))
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 4); // EOF is latched, never reads new record into old session.
+        assert!(stats.packets >= 253);
+        assert!(output.feedback > 0);
+        for (i, (_, packet)) in output.packets.iter().enumerate() {
+            assert_eq!(
+                u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+                origin.wrapping_add((i * SPF) as u32)
+            );
+        }
+        assert!(now.get() - output.start >= Duration::from_secs(2));
     }
     #[test]
     fn live_underrun_keeps_timestamps_and_source_failure_stops_sends() {

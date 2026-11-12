@@ -668,3 +668,53 @@ fn stored_hap_wav_accepts_full_command_but_requires_interactive_confirmation() {
     assert_eq!(invalid.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("open WAV"));
 }
+
+#[test]
+fn automatic_capture_requires_explicit_receiver_device_and_valid_durations() {
+    let help = run(&["automatic-ptp-capture", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    for flag in [
+        "--threshold-dbfs",
+        "--start-duration-ms",
+        "--stop-duration-ms",
+        "--experimental-owntone-transient",
+    ] {
+        assert!(help.contains(flag));
+    }
+    assert_eq!(run(&["automatic-ptp-capture"]).status.code(), Some(2));
+    assert_eq!(
+        run(&["automatic-ptp-capture", "device:112233445566"])
+            .status
+            .code(),
+        Some(2)
+    );
+    for (flag, value) in [
+        ("--start-duration-ms", "0"),
+        ("--start-duration-ms", "9001"),
+        ("--stop-duration-ms", "120001"),
+    ] {
+        assert_eq!(
+            run(&[
+                "automatic-ptp-capture",
+                "device:112233445566",
+                "--capture-device",
+                "never-open",
+                flag,
+                value
+            ])
+            .status
+            .code(),
+            Some(2)
+        );
+    }
+    let output = run(&[
+        "automatic-ptp-capture",
+        "device:112233445566",
+        "--capture-device",
+        "never-open",
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("receiver is not approved"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("ALSA"));
+}

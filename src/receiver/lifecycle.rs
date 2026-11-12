@@ -392,6 +392,13 @@ impl Session {
             volume,
         )
     }
+    pub fn play_automatic(
+        &mut self,
+        capture: crate::audio::live::Capture,
+        volume: Option<i32>,
+    ) -> Result<()> {
+        self.play_pcm(None, Some((Box::new(move || Ok(capture)), None)), volume)
+    }
     fn play_pcm(
         &mut self,
         frames: Option<&[[i16; 2]]>,
@@ -543,7 +550,7 @@ impl Session {
                         });
                 let start = Instant::now();
                 let result = ready.and_then(|()| {
-                    super::playback::run_source(
+                    super::playback::run_optional_source(
                         &mut output,
                         &mut encoder,
                         &mut self.playback_stats,
@@ -555,7 +562,14 @@ impl Session {
                         |sent| {
                             if limit.is_some_and(|n| sent >= n) {
                                 capture.take();
-                                return Ok([[0; 2]; profile::SPF]);
+                                return Ok(Some([[0; 2]; profile::SPF]));
+                            }
+                            if capture.as_ref().context("capture absent")?.ended()? {
+                                println!("Silence threshold reached or capture epoch reset; draining AirPlay timeline");
+                                return Ok(None);
+                            }
+                            if sent == 0 {
+                                println!("AirPlay streaming started");
                             }
                             let mut block = capture.as_mut().context("capture absent")?.block()?;
                             if let Some(n) = limit {
@@ -565,7 +579,7 @@ impl Session {
                                     }
                                 }
                             }
-                            Ok(block)
+                            Ok(Some(block))
                         },
                     )
                 });
@@ -580,8 +594,9 @@ impl Session {
                 .and_then(|r| r);
             result.and(worker)
         });
-        // Stop/join capture before reclaiming control and bounded TEARDOWN,
-        // including startup, network, source and cancellation failures.
+        // Drop the session input before reclaiming control and bounded TEARDOWN.
+        // Manual input stops/joins ALSA; automatic readers leave the outer
+        // monitoring owner alive, including network and cancellation failures.
         drop(capture);
         self.timing = Some(match timing.into_inner() {
             Ok(timing) => timing,

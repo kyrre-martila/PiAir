@@ -565,3 +565,21 @@ rising `dropped_frames` indicates scheduling delays or capture/playback clock dr
 Check CPU load, USB power and network quality on the Pi before changing buffers.
 Physical UCA202/Pi 3B capture, unplug recovery, sustained clock drift, Ctrl+C and
 HomePod audibility require hardware validation and cannot be established in CI.
+
+### Automatic turntable playback
+
+After approving and selecting your receiver, monitor a Behringer UCA202 and
+start/stop AirPlay sessions automatically (confirm the ALSA card ID first):
+
+```sh
+piair automatic-ptp-capture '<receiver-id>' --capture-device 'plughw:CARD=CODEC,DEV=0'
+```
+
+Defaults: −45 dBFS RMS threshold, one second of sustained audio to start, thirty
+seconds of continuous silence to stop. Tune with `--threshold-dbfs`,
+`--start-duration-ms` and `--stop-duration-ms`. ALSA stays open between sessions;
+Ctrl+C exits. Existing receiver approval, explicit selection, stored credentials
+and terminal confirmation remain required. Explicit transient authentication
+still requires `--experimental-owntone-transient`. The ten-second pre-roll is
+bounded and cannot guarantee preserved openings after slow setup or overflow.
+See [automatic mode tuning, buffering and hardware validation](docs/LIVE_CAPTURE.md#automatic-turntable-mode).

@@ -2,6 +2,7 @@ use super::*;
 
 pub(crate) struct Mock {
     pub closed: Arc<AtomicBool>,
+    pub silence: Option<Arc<AtomicBool>>,
     pub reads: usize,
     pub fail_after: Option<usize>,
     pub pending: bool,
@@ -30,7 +31,17 @@ impl Source for Mock {
         {
             return Ok(Read::Pending);
         }
-        samples.fill(123);
+        samples.fill(
+            if self
+                .silence
+                .as_ref()
+                .is_some_and(|s| s.load(Ordering::Acquire))
+            {
+                0
+            } else {
+                123
+            },
+        );
         Ok(Read::Frames(SPF))
     }
 }
@@ -42,6 +53,7 @@ impl Drop for Mock {
 pub(crate) fn mock(closed: Arc<AtomicBool>, pending: bool, fail_after: Option<usize>) -> Capture {
     Capture::spawn(move || {
         Ok(Mock {
+            silence: None,
             closed,
             reads: 0,
             fail_after,
@@ -300,5 +312,65 @@ fn mock_xrun_discards_old_epoch_inserts_silence_and_recovers() {
     capture.wait_ready(&cancel, || Ok(())).unwrap();
     assert!(capture.block().unwrap().iter().all(|f| *f == [42; 2]));
     drop(capture);
+    assert!(closed.load(Ordering::Acquire));
+}
+
+fn auto_settings() -> super::super::activity::Settings {
+    super::super::activity::Settings {
+        threshold_dbfs: -60.0,
+        start_ms: 20,
+        stop_ms: 30000,
+    }
+}
+#[test]
+fn automatic_preroll_is_bounded_ordered_and_transitions_without_replay() {
+    let mut b = Buffer {
+        automatic: Some(super::super::activity::Activity::new(auto_settings())),
+        ..Buffer::default()
+    };
+    let mut generated = 0;
+    for _ in 0..1500 {
+        push_ids(&mut b, &mut generated, SPF);
+    }
+    assert!(b.frames.len() <= RATE as usize * 10);
+    assert!(b.dropped > 0);
+    let decode = |f: [i16; 2]| u32::from(f[0] as u16) | (u32::from(f[1] as u16) << 16);
+    let mut last = decode(*b.frames.front().unwrap()) - 1;
+    // Producer continues appending as the reader switches from backlog to live.
+    for _ in 0..1500 {
+        let block = b.block().unwrap();
+        for frame in block {
+            assert_eq!(decode(frame), last + 1);
+            last += 1;
+        }
+        push_ids(&mut b, &mut generated, SPF);
+    }
+    b.recovered();
+    assert!(!b.automatic.as_ref().unwrap().active);
+    assert!(b.frames.is_empty());
+}
+#[test]
+fn automatic_capture_continues_during_connection_and_reader_cleanup() {
+    let closed = Arc::new(AtomicBool::new(false));
+    let capture = mock(closed.clone(), false, None);
+    capture.enable_automatic(auto_settings()).unwrap();
+    capture
+        .wait_ready(&AtomicBool::new(false), || Ok(()))
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(1);
+    while !capture.activity().unwrap().0 {
+        assert!(Instant::now() < until);
+        thread::park_timeout(Duration::from_millis(1));
+    }
+    let before = capture.buffer.lock().unwrap().frames.len();
+    // Represents authentication taking time without a consumer.
+    thread::park_timeout(Duration::from_millis(30));
+    assert!(capture.buffer.lock().unwrap().frames.len() > before);
+    drop(capture.reader()); // Failed connection/session must not release ALSA.
+    assert!(!closed.load(Ordering::Acquire));
+    let mut next_session = capture.reader();
+    assert_eq!(next_session.block().unwrap()[0], [123; 2]);
+    drop(next_session);
+    drop(capture); // Ctrl+C outer owner joins the worker and releases the source.
     assert!(closed.load(Ordering::Acquire));
 }

@@ -2356,9 +2356,14 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
         ("slow-start", true),
         ("teardown-timeout", true),
         ("duration", true),
+        ("auto-stop", true),
+        ("auto-cancel", true),
+        ("auto-disconnect", true),
     ] {
         let closed = Arc::new(AtomicBool::new(false));
         let server_closed = closed.clone();
+        let silence = Arc::new(AtomicBool::new(false));
+        let quiet = silence.clone();
         let failure = Arc::new(AtomicBool::new(false));
         let failed = failure.clone();
         let opened = Arc::new(AtomicBool::new(false));
@@ -2427,7 +2432,12 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
             loop {
                 let (header, _) = read_request(&mut socket, &mut keys);
                 if header.starts_with("TEARDOWN ") {
-                    if live && mode != "startup" {
+                    if mode.starts_with("auto-") {
+                        assert!(
+                            !server_closed.load(Ordering::Acquire),
+                            "automatic ALSA owner must survive TEARDOWN"
+                        );
+                    } else if live && mode != "startup" {
                         assert!(
                             server_closed.load(Ordering::Acquire),
                             "capture must join before TEARDOWN"
@@ -2441,7 +2451,10 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
                     break;
                 }
                 assert!(header.starts_with("POST /feedback "));
-                if matches!(mode, "disconnect" | "startup-disconnect") {
+                if matches!(
+                    mode,
+                    "disconnect" | "startup-disconnect" | "auto-disconnect"
+                ) {
                     return;
                 }
                 reply(&mut socket, &mut keys, seq, None);
@@ -2527,8 +2540,14 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
                 ready.store(true, Ordering::Release);
             }
             assert!(data.recv(&mut packet).unwrap() > 12);
-            if matches!(mode, "cancel" | "teardown-timeout" | "slow-start") {
+            if matches!(
+                mode,
+                "cancel" | "teardown-timeout" | "slow-start" | "auto-cancel"
+            ) {
                 cancel.store(true, Ordering::Relaxed);
+            }
+            if mode == "auto-stop" {
+                quiet.store(true, Ordering::Release);
             }
             if mode == "device" {
                 failed.store(true, Ordering::Release);
@@ -2543,14 +2562,42 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
             }
             // Keep the negotiated endpoints alive through the failure.
             while data.recv(&mut packet).is_ok() {
-                if mode == "duration" {
+                if matches!(mode, "duration" | "auto-stop") {
                     delay.sequence = delay.sequence.wrapping_add(1);
                     peer_event.send(&delay.encode().unwrap()).unwrap();
                 }
             }
         });
         let started = Instant::now();
-        let result = if live {
+        let automatic_owner = mode.starts_with("auto-").then(|| {
+            let closed = closed.clone();
+            let capture = crate::audio::live::Capture::spawn(move || {
+                Ok(crate::audio::live::tests::Mock {
+                    closed,
+                    reads: 0,
+                    fail_after: None,
+                    pending: false,
+                    failure: None,
+                    gate: None,
+                    silence: Some(silence),
+                })
+            })
+            .unwrap();
+            capture
+                .enable_automatic(crate::audio::activity::Settings {
+                    threshold_dbfs: -60.0,
+                    start_ms: 20,
+                    stop_ms: 20,
+                })
+                .unwrap();
+            capture
+                .wait_ready(&AtomicBool::new(false), || Ok(()))
+                .unwrap();
+            capture
+        });
+        let result = if let Some(capture) = &automatic_owner {
+            owner.play_automatic(capture.reader(), None)
+        } else if live {
             let capture_closed = closed.clone();
             owner.play_pcm(
                 None,
@@ -2562,6 +2609,7 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
                                 anyhow::bail!("mock capture open failed");
                             }
                             Ok(crate::audio::live::tests::Mock {
+                                silence: None,
                                 closed: capture_closed,
                                 reads: 0,
                                 fail_after: None,
@@ -2589,10 +2637,10 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
             started.elapsed() < Duration::from_secs(if mode == "slow-start" { 7 } else { 5 }),
             "unbounded playback/cleanup: {mode}"
         );
-        if live && mode != "startup" {
-            assert!(closed.load(Ordering::Acquire));
+        if automatic_owner.is_some() {
+            assert!(!closed.load(Ordering::Acquire));
         }
-        if mode == "duration" {
+        if matches!(mode, "duration" | "auto-stop") {
             result.unwrap();
             owner.stop().unwrap();
             assert_eq!(owner.state(), State::Closed);
@@ -2608,6 +2656,10 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
         assert!(owner.playback_stats.packets < 4 * u64::from(profile::RATE) / profile::SPF as u64);
         assert!(owner.control.is_none() && owner.timing.is_none());
         assert!(owner.realtime_encoder.is_none() && owner.realtime_transport.is_none());
+        drop(automatic_owner);
+        if live && mode != "startup" {
+            assert!(closed.load(Ordering::Acquire));
+        }
         let _rebound = UdpSocket::bind(("127.0.0.1", local_control)).unwrap();
         let _event = UdpSocket::bind(addresses.0).unwrap();
         let _general = UdpSocket::bind(addresses.1).unwrap();
