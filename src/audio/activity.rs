@@ -49,7 +49,7 @@ impl Activity {
         }
     }
     pub fn meaningful(&self) -> bool {
-        self.active && self.quiet == 0
+        self.active && self.loud >= self.settings.start_ms
     }
     pub fn retained_start_frames(&self) -> usize {
         ((self.settings.start_ms + 120) * 44100 / 1000) as usize
@@ -136,6 +136,13 @@ mod tests {
             a.push([0, 3000]);
         }
         assert!(a.active);
+        assert!(a.meaningful());
+        feed(&mut a, 20, 0);
+        feed(&mut a, 20, 20000);
+        assert!(a.active); // The playing session survives the short gap.
+        assert!(!a.meaningful()); // A new connection still needs sustained audio.
+        feed(&mut a, 980, 3000);
+        assert!(a.meaningful());
         a.reset();
         feed(&mut a, 20, 20000); // A click cannot reuse a failed session qualification.
         feed(&mut a, 1000, 0);
