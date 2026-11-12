@@ -63,7 +63,7 @@ impl Packet {
         Self {
             kind,
             domain: 0,
-            flags: 0x0400,
+            flags: 0x0408,
             correction: 0,
             source,
             sequence,
@@ -170,8 +170,8 @@ impl Packet {
                                 "invalid Apple clock TLV"
                             );
                             ensure!(
-                                value[6..14] == self.source[..8] && value[14..] == [0; 2],
-                                "conflicting Apple clock TLV"
+                                value[14..] == [0; 2],
+                                "invalid Apple clock TLV reserved bytes"
                             );
                         }
                         [0, 0, 1] => ensure!(

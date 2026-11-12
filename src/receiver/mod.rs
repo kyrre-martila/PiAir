@@ -820,16 +820,16 @@ pub fn ptp_negotiation_check(
     ensure!(selected.id == id, "receiver is not selected");
     let (operation, credential) = wav_authentication(&store, &selected, transient)?;
     ensure!(
-        selected.capabilities.features & ((1u64 << 40) | (1u64 << 41))
-            == ((1u64 << 40) | (1u64 << 41)),
-        "selected receiver must advertise buffered audio and PTP; no fallback"
+        selected.capabilities.features & ((1u64 << 9) | (1u64 << 19) | (1u64 << 41))
+            == ((1u64 << 9) | (1u64 << 19) | (1u64 << 41)),
+        "selected receiver must advertise audio, ALAC and PTP; no fallback"
     );
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "PTP diagnostic requires interactive confirmation"
     );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
-    println!("PTP negotiation only: authenticated /info, initial SETUP, RECORD, SETPEERS, {seconds}s bounded observation and TEARDOWN. Zero audio bytes; no volume changes. Receiver clock adoption and media readiness remain unverified.");
+    println!("PTP negotiation only: authenticated /info, initial SETUP, RECORD, SETPEERS, realtime type-96 UDP stream SETUP, {seconds}s bounded observation and TEARDOWN. Zero audio bytes; no volume changes. Reports operational readiness separately from unverified receiver synchronization.");
     interactive::confirm_operation(
         loaded,
         None,
@@ -850,8 +850,8 @@ pub fn ptp_negotiation_check(
     )?;
     let mut session = authenticated.into_ptp_foundation()?;
     let result = (|| {
-        session.setup_authenticated()?;
-        session.negotiate_timing_peers()?;
+        session.setup_realtime_authenticated()?;
+        session.negotiate_realtime()?;
         session.observe(std::time::Duration::from_secs(seconds))?;
         session.stop()
     })();

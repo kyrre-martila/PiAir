@@ -44,6 +44,16 @@ impl TimingSession {
     pub fn peer_is_live(&self, now: Instant) -> bool {
         self.state() == State::PeerObserved && self.service.clock().network_time(now).is_ok()
     }
+    /// Local worker continuity and sends, separately from remote synchronization.
+    pub fn healthy(&self, now: Instant) -> bool {
+        let sent = self.evidence();
+        matches!(self.phase, Phase::Observing | Phase::PeerObserved)
+            && self.service.clock().network_time(now).is_ok()
+            && sent.sync_sent > 0
+            && sent.follow_up_sent > 0
+            && sent.announce_sent > 0
+            && sent.signaling_sent > 0
+    }
     pub fn peer(&self) -> IpAddr {
         self.service.peer()
     }
@@ -119,6 +129,26 @@ impl TimingSession {
             return request();
         }
         self.run_control(cancel, request)
+    }
+    /// PR 63 scheduler integration: serialize RTP/PTP correspondence using only
+    /// this owner's ClockID and epoch. Caller positions come from the existing
+    /// 44.1 kHz RTP scheduler, never the legacy buffered 48 kHz anchor mapping.
+    #[allow(dead_code)] // Prepared protocol integration point; no media sends in PR 62.
+    pub fn realtime_sync(
+        &self,
+        first: bool,
+        current_rtp: u32,
+        next_rtp: u32,
+        now: Instant,
+    ) -> Result<[u8; 28]> {
+        ensure!(self.healthy(now), "PTP timing service unavailable");
+        super::super::realtime::ptp_sync(
+            first,
+            current_rtp,
+            next_rtp,
+            self.service.clock().clock_id,
+            self.service.clock().timestamp(now)?,
+        )
     }
     /// Capture mapping from this service's identity and epoch, never caller IDs.
     /// This only constructs a paused diagnostic anchor; it cannot activate media.
