@@ -808,7 +808,7 @@ pub fn ptp_negotiation_check(
     transient: bool,
     seconds: u64,
 ) -> Result<()> {
-    ptp_operation(loaded, id, transient, seconds, None)
+    ptp_operation(loaded, id, transient, seconds, None, None)
 }
 
 pub fn ptp_wav_playback(
@@ -820,7 +820,25 @@ pub fn ptp_wav_playback(
     transient: bool,
 ) -> Result<()> {
     let wav = wav::Playback::open(path, seconds)?;
-    ptp_operation(loaded, id, transient, 10, Some((wav, volume)))
+    ptp_operation(loaded, id, transient, 10, Some((wav, volume)), None)
+}
+
+pub fn ptp_capture(
+    loaded: &Loaded,
+    id: &str,
+    device: &str,
+    seconds: Option<u32>,
+    volume: Option<i32>,
+    transient: bool,
+) -> Result<()> {
+    ptp_operation(
+        loaded,
+        id,
+        transient,
+        10,
+        None,
+        Some((device, seconds, volume)),
+    )
 }
 
 fn ptp_operation(
@@ -829,6 +847,7 @@ fn ptp_operation(
     transient: bool,
     seconds: u64,
     playback: Option<(wav::Playback, Option<i32>)>,
+    live: Option<(&str, Option<u32>, Option<i32>)>,
 ) -> Result<()> {
     exact_id(id)?;
     ensure!(
@@ -855,7 +874,9 @@ fn ptp_operation(
     if transient {
         println!("Explicit OwnTone-reference transient SRP on the selected receiver: no persistent HAP credentials or verified persistent receiver identity; no credentials saved and no authentication fallback. Authenticated capabilities and PTP/type-96 negotiation must succeed before media transmission.");
     }
-    if let Some((wav, volume)) = &playback {
+    if let Some((device, duration, volume)) = live {
+        println!("Experimental live PTP capture: device={device:?}; seconds={duration:?} (None = Ctrl+C); volume={volume:?} dB (None preserves current volume). Explicit volume changes may persist. Stereo 44100 Hz S16; no activity detection.");
+    } else if let Some((wav, volume)) = &playback {
         println!("Selected receiver: {id}; PTP type96, UDP, ALAC16 stereo, 44100 Hz, 352 samples/packet. WAV frames: {}; EOF: {}; volume: {volume:?} dB (None preserves current volume). Explicit volume changes may persist. Local transmission does not prove audible playback.", wav.frames.len(), wav.eof);
     } else {
         println!("PTP negotiation only: authenticated /info, initial SETUP, RECORD, SETPEERS, realtime type-96 UDP stream SETUP, {seconds}s bounded observation and TEARDOWN. Zero audio bytes; no volume changes. Reports operational readiness separately from unverified receiver synchronization.");
@@ -864,7 +885,9 @@ fn ptp_operation(
         loaded,
         None,
         &snapshot,
-        if playback.is_some() {
+        if live.is_some() {
+            "Start experimental selected receiver live PTP capture? [y/N]: "
+        } else if playback.is_some() {
             "Start selected receiver PTP WAV playback? [y/N]: "
         } else {
             "Authorize selected receiver PTP negotiation only? [y/N]: "
@@ -895,7 +918,9 @@ fn ptp_operation(
         session.negotiate_realtime().context(
             "receiver rejected PTP realtime type-96 UDP negotiation; playback cannot proceed; no fallback",
         )?;
-        if let Some((wav, volume)) = &playback {
+        if let Some((device, duration, volume)) = live {
+            session.play_live(device, duration, volume)?;
+        } else if let Some((wav, volume)) = &playback {
             session.play_wav(&wav.frames, *volume)?;
         } else {
             session.observe(std::time::Duration::from_secs(seconds))?;

@@ -369,13 +369,31 @@ impl Session {
     /// Explicit playback authorization on this negotiated owner. No redial, key
     /// replacement, NTP fallback or buffered anchor is possible here.
     pub fn play_wav(&mut self, frames: &[[i16; 2]], volume_db: Option<i32>) -> Result<()> {
+        self.play_pcm(Some(frames), None, volume_db)
+    }
+    pub fn play_live(
+        &mut self,
+        device: &str,
+        seconds: Option<u32>,
+        volume: Option<i32>,
+    ) -> Result<()> {
+        self.play_pcm(None, Some((device, seconds)), volume)
+    }
+    fn play_pcm(
+        &mut self,
+        frames: Option<&[[i16; 2]]>,
+        live: Option<(&str, Option<u32>)>,
+        volume_db: Option<i32>,
+    ) -> Result<()> {
         let result = (|| {
             ensure!(
                 self.playback_outcome == "not authorized",
                 "playback already used"
             );
             ensure!(
-                !frames.is_empty() && frames.len() <= 30 * profile::RATE as usize,
+                frames.is_none_or(
+                    |frames| !frames.is_empty() && frames.len() <= 30 * profile::RATE as usize
+                ),
                 "WAV duration outside bound"
             );
             if let Some(volume) = volume_db {
@@ -404,7 +422,7 @@ impl Session {
             self.realtime_ready()?;
             self.state.advance(State::Playing)?;
             self.playback_outcome = "transmitting";
-            self.transmit_wav_owned(frames)
+            self.transmit_pcm_owned(frames, live)
         })();
         self.playback_outcome = if result.is_ok() {
             "local transmission completed"
@@ -437,7 +455,14 @@ impl Session {
             .push("SET_PARAMETER volume: RTSP accepted".into());
         Ok(())
     }
-    fn transmit_wav_owned(&mut self, frames: &[[i16; 2]]) -> Result<()> {
+    fn transmit_pcm_owned(
+        &mut self,
+        frames: Option<&[[i16; 2]]>,
+        live: Option<(&str, Option<u32>)>,
+    ) -> Result<()> {
+        let mut capture = live
+            .map(|(device, _)| crate::audio::live::Capture::start(device))
+            .transpose()?;
         let lease = self
             .control
             .as_ref()
@@ -472,22 +497,52 @@ impl Session {
                 Ok(())
             });
             let stop = Stop(&done);
-            let result = super::playback::run(
-                &mut PtpWavOutput {
-                    timing: &timing,
-                    transport: self
-                        .realtime_transport
-                        .as_ref()
-                        .context("transport absent")?,
-                    events: self.events.as_ref(),
-                    lease: &lease,
-                    cancel: &self.cancel,
-                    feedback: &mut feedback,
-                },
-                &mut encoder,
-                frames,
-                &mut self.playback_stats,
-            );
+            let mut output = PtpWavOutput {
+                timing: &timing,
+                transport: self
+                    .realtime_transport
+                    .as_ref()
+                    .context("transport absent")?,
+                events: self.events.as_ref(),
+                lease: &lease,
+                cancel: &self.cancel,
+                feedback: &mut feedback,
+            };
+            let result = if let Some(frames) = frames {
+                super::playback::run(&mut output, &mut encoder, frames, &mut self.playback_stats)
+            } else {
+                let start = Instant::now();
+                let limit = live
+                    .and_then(|(_, seconds)| seconds)
+                    .map(|s| u64::from(s) * u64::from(profile::RATE));
+                let result = super::playback::run_source(
+                    &mut output,
+                    &mut encoder,
+                    &mut self.playback_stats,
+                    start,
+                    Instant::now,
+                    std::thread::park_timeout,
+                    limit.map(|n| n + u64::from(super::realtime::PLAYBACK_LEAD_SAMPLES)),
+                    |sent| {
+                        if limit.is_some_and(|n| sent >= n) {
+                            capture.take();
+                            return Ok([[0; 2]; profile::SPF]);
+                        }
+                        let mut block = capture.as_mut().context("capture absent")?.block()?;
+                        if let Some(n) = limit {
+                            for (offset, frame) in block.iter_mut().enumerate() {
+                                if sent + offset as u64 >= n {
+                                    *frame = [0; 2];
+                                }
+                            }
+                        }
+                        Ok(block)
+                    },
+                );
+                self.playback_stats.elapsed = start.elapsed();
+                encoder.flush();
+                result
+            };
             drop(stop);
             let worker = worker
                 .join()

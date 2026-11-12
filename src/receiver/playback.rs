@@ -63,16 +63,42 @@ fn run_at(
     mut now: impl FnMut() -> Instant,
     mut wait: impl FnMut(Duration),
 ) -> Result<()> {
-    let total = frames.len() as u64 + u64::from(realtime::PLAYBACK_LEAD_SAMPLES);
+    run_source(
+        output,
+        encoder,
+        stats,
+        start,
+        &mut now,
+        &mut wait,
+        Some(frames.len() as u64 + u64::from(realtime::PLAYBACK_LEAD_SAMPLES)),
+        |sent| {
+            Ok(std::array::from_fn(|n| {
+                frames.get(sent as usize + n).copied().unwrap_or([0; 2])
+            }))
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_source(
+    output: &mut impl Output,
+    encoder: &mut Encoder,
+    stats: &mut Statistics,
+    start: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut wait: impl FnMut(Duration),
+    total: Option<u64>,
+    mut source: impl FnMut(u64) -> Result<[[i16; 2]; SPF]>,
+) -> Result<()> {
     let mut sent = 0;
     let mut sync_at = 0;
     let mut feedback_at = start + Duration::from_secs(2);
     let mut retry_budget = 1024usize;
     let mut max_lateness_us = 0u64;
     tracing::debug!(target: "piair::rtsp", phase = "playback policy", feedback_polling = true,
-        retransmissions_allowed = output.retransmissions_allowed(), signal_frames = frames.len(), total_frames = total,
+        retransmissions_allowed = output.retransmissions_allowed(), total_frames = total,
         "diagnostic policy; UDP sends do not establish receiver acceptance");
-    while sent < total {
+    while total.is_none_or(|total| sent < total) {
         output.check()?;
         let deadline = start + realtime::sample_time(sent);
         ensure!(
@@ -133,12 +159,11 @@ fn run_at(
                 "sync datagram sent; receiver scheduling unverified");
             sync_at = sent + u64::from(RATE);
         }
-        let pcm: [_; SPF] =
-            std::array::from_fn(|n| frames.get(sent as usize + n).copied().unwrap_or([0; 2]));
+        let pcm = source(sent)?;
         let packet = encoder.packet(&pcm)?;
         output.check()?;
         output.send(&packet)?;
-        if sent == 0 || sent + SPF as u64 >= total {
+        if sent == 0 || total.is_some_and(|total| sent + SPF as u64 >= total) {
             tracing::debug!(target: "piair::rtsp", phase = "RTP boundary", datagram_bytes = packet.len(),
                 "media datagram sent; receiver acceptance unverified");
         }
@@ -146,7 +171,7 @@ fn run_at(
         stats.bytes += packet.len() as u64;
         sent += SPF as u64;
     }
-    let drained = start + realtime::sample_time(total);
+    let drained = start + realtime::sample_time(total.unwrap_or(sent));
     while let Some(remaining) = drained
         .checked_duration_since(now())
         .filter(|d| !d.is_zero())
@@ -274,6 +299,68 @@ mod tests {
             assert!(stats.packets <= 2);
             assert_eq!(output.packets.len() as u64, stats.packets);
         }
+    }
+    #[test]
+    fn live_underrun_keeps_timestamps_and_source_failure_stops_sends() {
+        for fail in [false, true] {
+            let mut output = capture();
+            let now = output.now.clone();
+            let wait = now.clone();
+            let mut encoder = Encoder::new().unwrap();
+            encoder.timestamp = u32::MAX - 100;
+            let origin = encoder.timestamp;
+            let mut stats = Statistics::default();
+            let mut reads = 0;
+            let result = run_source(
+                &mut output,
+                &mut encoder,
+                &mut stats,
+                now.get(),
+                || now.get(),
+                |d| wait.set(wait.get() + d),
+                Some(4 * SPF as u64),
+                |sent| {
+                    reads += 1;
+                    if fail && reads == 3 {
+                        anyhow::bail!("capture disconnected");
+                    }
+                    Ok(if sent == SPF as u64 {
+                        [[0; 2]; SPF]
+                    } else {
+                        [[123, -456]; SPF]
+                    })
+                },
+            );
+            assert_eq!(result.is_err(), fail);
+            assert_eq!(stats.packets, if fail { 2 } else { 4 });
+            for (i, (_, packet)) in output.packets.iter().enumerate() {
+                assert_eq!(
+                    u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+                    origin.wrapping_add((i * SPF) as u32)
+                );
+            }
+        }
+    }
+    #[test]
+    fn indefinite_source_obeys_network_termination() {
+        let mut output = capture();
+        output.fail_after = Some(3);
+        let now = output.now.clone();
+        let wait = now.clone();
+        let mut encoder = Encoder::new().unwrap();
+        let mut stats = Statistics::default();
+        assert!(run_source(
+            &mut output,
+            &mut encoder,
+            &mut stats,
+            now.get(),
+            || now.get(),
+            |d| wait.set(wait.get() + d),
+            None,
+            |_| Ok([[0; 2]; SPF])
+        )
+        .is_err());
+        assert_eq!(stats.packets, 3);
     }
     #[test]
     fn missing_packet_requests_are_bounded_without_reencryption() {
