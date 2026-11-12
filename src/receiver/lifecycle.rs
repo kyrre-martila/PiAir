@@ -27,10 +27,9 @@ pub enum State {
     Authentication,
     Negotiation,
     Timing,
-    // Deliberately unreachable until an independently validated adoption protocol exists.
+    // Buffered playback retains its separate adoption gate.
     #[allow(dead_code)]
     Prebuffering,
-    #[allow(dead_code)]
     Playing,
     #[allow(dead_code)]
     Paused,
@@ -46,11 +45,13 @@ impl State {
                 (Self::Authorization, Self::Authentication)
                     | (Self::Authentication, Self::Negotiation)
                     | (Self::Negotiation, Self::Timing)
+                    | (Self::Timing, Self::Playing)
                     | (
                         Self::Authorization
                             | Self::Authentication
                             | Self::Negotiation
-                            | Self::Timing,
+                            | Self::Timing
+                            | Self::Playing,
                         Self::Stopping
                     )
                     | (Self::Stopping, Self::Closed | Self::Failed)
@@ -72,7 +73,7 @@ pub enum Stage {
 
 /// Owns authenticated control, timing and event resources, plus a fresh stream
 /// key after negotiation. Scoped timing workers cannot outlive control calls.
-/// No media socket, queued PCM or reusable playback grant exists.
+/// Realtime media stays owned here; no reusable playback grant escapes.
 pub struct Session {
     state: State,
     last_accepted: &'static str,
@@ -103,6 +104,9 @@ pub struct Session {
     realtime_transport: Option<super::wire::RealtimeTransport>,
     realtime_encoder: Option<realtime::Encoder>,
     realtime_ports: Option<(u16, u16)>,
+    realtime_stream_id: Option<u32>,
+    playback_stats: super::playback::Statistics,
+    playback_outcome: &'static str,
     realtime_ready_snapshot: bool,
     timing_health_snapshot: bool,
     clock_id: u64,
@@ -145,6 +149,9 @@ impl Session {
             realtime_transport: None,
             realtime_encoder: None,
             realtime_ports: None,
+            realtime_stream_id: None,
+            playback_stats: super::playback::Statistics::default(),
+            playback_outcome: "not authorized",
             realtime_ready_snapshot: false,
             timing_health_snapshot: false,
             clock_id,
@@ -188,14 +195,15 @@ impl Session {
             "pending"
         };
         let realtime = if self.realtime_profile {
-            format!("stream type: 96; negotiated ports: {:?}; realtime media transport negotiated: {}; operational readiness at snapshot: {}; timing healthy at snapshot: {}; clock identity: {:016x}; authenticated peer clock identity: {:?}; peer-role validation: pinned authenticated ClockID, per-source identity sequences, no clock election; audio transmission: disabled; ",
+            format!("stream type: 96; negotiated ports: {:?}; realtime media transport negotiated: {}; operational readiness at snapshot: {}; timing healthy at snapshot: {}; clock identity: {:016x}; authenticated peer clock identity: {:?}; peer-role validation: pinned authenticated ClockID, per-source identity sequences, no clock election; playback outcome: {}; audio packets: {}; audio bytes: {}; retransmission requests: {}; retransmission responses: {}; RTP/PTP sync packets: {}; playback elapsed: {:?}; audible playback: unverified; ",
                 self.realtime_ports, self.realtime_ports.is_some(), self.realtime_ready_snapshot,
-                self.timing_health_snapshot, self.clock_id, self.peer_clock_id.map(|id| format!("{id:016x}")))
+                self.timing_health_snapshot, self.clock_id, self.peer_clock_id.map(|id| format!("{id:016x}")),
+                self.playback_outcome, self.playback_stats.packets, self.playback_stats.bytes, self.playback_stats.requests, self.playback_stats.resends, self.playback_stats.syncs, self.playback_stats.elapsed)
         } else {
             String::new()
         };
-        format!("{realtime}local cleanup: {local_cleanup}; negotiation observation: {observation}; peer liveness at snapshot: {peer_live}; synchronization: unverified; initial SETUP RTSP accepted: {}; RTSP stages: {:?}; packet evidence: {evidence:?}; media readiness: requires active session authorization; session: {:?}; last accepted: {}; attempted: {}; PTP snapshot: {ptp:?}; receiver clock adoption: unverified; TEARDOWN: {}; audio bytes: 0",
-            self.setup_rtsp_accepted, self.rtsp_stages, self.state(), self.last_accepted, self.attempted, self.teardown)
+        format!("{realtime}local cleanup: {local_cleanup}; negotiation observation: {observation}; peer liveness at snapshot: {peer_live}; synchronization: unverified; initial SETUP RTSP accepted: {}; RTSP stages: {:?}; packet evidence: {evidence:?}; media readiness: requires active session authorization; session: {:?}; last accepted: {}; attempted: {}; PTP snapshot: {ptp:?}; receiver clock adoption: unverified; TEARDOWN: {}; audio bytes: {}",
+            self.setup_rtsp_accepted, self.rtsp_stages, self.state(), self.last_accepted, self.attempted, self.teardown, self.playback_stats.bytes)
     }
     fn check(&self) -> Result<()> {
         ensure!(
@@ -329,6 +337,7 @@ impl Session {
                 .context("realtime transport absent")?
                 .connect(&stream)?;
             self.realtime_ports = Some((stream.data, stream.control));
+            self.realtime_stream_id = stream.id;
             self.last_accepted = "realtime stream SETUP";
             self.stage = Some(Stage::Stream);
             self.check()?;
@@ -342,7 +351,7 @@ impl Session {
         self.check()?;
         ensure!(
             self.realtime_profile
-                && self.state == State::Timing
+                && matches!(self.state, State::Timing | State::Playing)
                 && self.stage == Some(Stage::Stream)
                 && self.session_bound
                 && self.realtime_encoder.is_some(),
@@ -356,6 +365,150 @@ impl Session {
         ensure!(timing.peer_is_live(Instant::now()), "PTP peer not live");
         ensure!(timing.healthy(Instant::now()), "timing service not healthy");
         Ok(())
+    }
+    /// Explicit playback authorization on this negotiated owner. No redial, key
+    /// replacement, NTP fallback or buffered anchor is possible here.
+    pub fn play_wav(&mut self, frames: &[[i16; 2]], volume_db: Option<i32>) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.playback_outcome == "not authorized",
+                "playback already used"
+            );
+            ensure!(
+                !frames.is_empty() && frames.len() <= 30 * profile::RATE as usize,
+                "WAV duration outside bound"
+            );
+            if let Some(volume) = volume_db {
+                ensure!((-60..=-10).contains(&volume), "volume must be -60..=-10 dB");
+            }
+            // Wait for the established timing service's operational readiness.
+            // This is peer liveness, never a cryptographic clock-adoption proof.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                self.check()?;
+                self.timing
+                    .as_mut()
+                    .context("timing absent")?
+                    .poll(&self.cancel)?;
+                if self.realtime_ready().is_ok() {
+                    break;
+                }
+                ensure!(Instant::now() < deadline, "PTP media readiness timed out");
+                std::thread::park_timeout(Duration::from_millis(2));
+            }
+            self.realtime_ready_snapshot = true;
+            if let Some(volume) = volume_db {
+                let body = format!("volume: {volume}.000000\r\n");
+                self.set_volume(body.as_bytes())?;
+            }
+            self.realtime_ready()?;
+            self.state.advance(State::Playing)?;
+            self.playback_outcome = "transmitting";
+            self.transmit_wav_owned(frames)
+        })();
+        self.playback_outcome = if result.is_ok() {
+            "local transmission completed"
+        } else {
+            "failed"
+        };
+        self.finish(result)
+    }
+    fn set_volume(&mut self, body: &[u8]) -> Result<()> {
+        self.check()?;
+        let wire = self.control.as_mut().context("control absent")?;
+        let headers: Vec<_> = std::iter::once(("Content-Type", "text/parameters".into()))
+            .chain(self.token.iter().map(|token| ("Session", token.clone())))
+            .collect();
+        let reply = self
+            .timing
+            .as_mut()
+            .context("timing absent")?
+            .during_control(&self.cancel, || {
+                wire.request("SET_PARAMETER", &self.uri, &headers, body)
+            })?;
+        if let Some(token) = reply.headers.get("session") {
+            ensure!(
+                self.token.as_ref() == Some(token),
+                "volume response changed session binding"
+            );
+        }
+        ensure!(reply.body.is_empty(), "unexpected volume response body");
+        self.rtsp_stages
+            .push("SET_PARAMETER volume: RTSP accepted".into());
+        Ok(())
+    }
+    fn transmit_wav_owned(&mut self, frames: &[[i16; 2]]) -> Result<()> {
+        let lease = self
+            .control
+            .as_ref()
+            .context("control absent")?
+            .ptp_lease()?;
+        let mut feedback = super::session::FeedbackWorker::start_bound(
+            self.control.take().context("control absent")?,
+            self.token.clone(),
+            self.realtime_stream_id,
+            self.cancel.clone(),
+            true,
+        )?;
+        let mut encoder = self.realtime_encoder.take().context("encoder absent")?;
+        let timing = std::sync::Mutex::new(self.timing.take().context("timing absent")?);
+        let done = AtomicBool::new(false);
+        let mut result = std::thread::scope(|scope| {
+            // A drop guard also stops the worker if the media thread unwinds.
+            struct Stop<'a>(&'a AtomicBool);
+            impl Drop for Stop<'_> {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                }
+            }
+            let worker = scope.spawn(|| -> Result<()> {
+                while !done.load(Ordering::Acquire) {
+                    timing
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("PTP worker poisoned"))?
+                        .poll(&self.cancel)?;
+                    std::thread::park_timeout(Duration::from_millis(2));
+                }
+                Ok(())
+            });
+            let stop = Stop(&done);
+            let result = super::playback::run(
+                &mut PtpWavOutput {
+                    timing: &timing,
+                    transport: self
+                        .realtime_transport
+                        .as_ref()
+                        .context("transport absent")?,
+                    events: self.events.as_ref(),
+                    lease: &lease,
+                    cancel: &self.cancel,
+                    feedback: &mut feedback,
+                },
+                &mut encoder,
+                frames,
+                &mut self.playback_stats,
+            );
+            drop(stop);
+            let worker = worker
+                .join()
+                .map_err(|_| anyhow::anyhow!("PTP playback worker panicked"))
+                .and_then(|r| r);
+            result.and(worker)
+        });
+        self.timing = Some(match timing.into_inner() {
+            Ok(timing) => timing,
+            Err(poisoned) => {
+                result = Err(anyhow::anyhow!("PTP timing poisoned"));
+                poisoned.into_inner()
+            }
+        });
+        self.realtime_encoder = Some(encoder);
+        let (wire, token, outcome) = feedback.reclaim();
+        self.control = wire;
+        if token != self.token {
+            result = Err(anyhow::anyhow!("feedback changed session binding"));
+        }
+        result.and(outcome)
     }
     fn call(
         &mut self,
@@ -735,6 +888,53 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.cleanup();
+    }
+}
+
+struct PtpWavOutput<'a> {
+    timing: &'a std::sync::Mutex<ptp::session::TimingSession>,
+    transport: &'a super::wire::RealtimeTransport,
+    events: Option<&'a Worker>,
+    lease: &'a super::wire::PtpLease,
+    cancel: &'a AtomicBool,
+    feedback: &'a mut super::session::FeedbackWorker,
+}
+impl super::playback::Output for PtpWavOutput<'_> {
+    fn check(&mut self) -> Result<()> {
+        ensure!(!self.cancel.load(Ordering::Relaxed), "playback cancelled");
+        self.lease.check()?;
+        if let Some(events) = self.events {
+            events.check()?;
+        }
+        self.feedback.check()?;
+        self.transport.check()?;
+        let timing = self
+            .timing
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PTP timing poisoned"))?;
+        let now = Instant::now();
+        ensure!(
+            timing.healthy(now) && timing.peer_is_live(now),
+            "PTP timing lost during playback"
+        );
+        Ok(())
+    }
+    fn feedback(&mut self) -> Result<()> {
+        self.feedback.request()
+    }
+    fn retransmit(&mut self) -> Result<Option<(u16, u16)>> {
+        self.transport.retransmit()
+    }
+    fn send(&mut self, packet: &[u8]) -> Result<()> {
+        self.transport.send(packet)
+    }
+    fn sync(&mut self, first: bool, current: u32, next: u32, at: Instant) -> Result<()> {
+        let packet = self
+            .timing
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PTP timing poisoned"))?
+            .realtime_sync(first, current, next, at)?;
+        self.transport.sync(&packet)
     }
 }
 

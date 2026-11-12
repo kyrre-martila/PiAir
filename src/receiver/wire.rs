@@ -1325,7 +1325,7 @@ impl Ports {
     }
 }
 /// Prepared authenticated realtime transport shared with the existing RTP
-/// encoder. PR 62 intentionally exposes no send method. Closing the session
+/// encoder. Every operation checks its selected-receiver lease. Closing the session
 /// drops sockets and its encoder/key together; there is no detached grant.
 pub(super) struct RealtimeTransport {
     data: UdpSocket,
@@ -1348,10 +1348,33 @@ impl RealtimeTransport {
             .connect(SocketAddr::new(self.lease.peer(), stream.data))?;
         self.control
             .connect(SocketAddr::new(self.lease.peer(), stream.control))?;
+        self.data
+            .set_write_timeout(Some(Duration::from_millis(20)))?;
         self.control.set_nonblocking(true)?;
         self.lease.check()?;
         self.connected = true;
         Ok(())
+    }
+    pub fn send(&self, packet: &[u8]) -> Result<()> {
+        self.check()?;
+        ensure!(packet.len() <= 2048, "media datagram too large");
+        ensure!(
+            self.data.send(packet)? == packet.len(),
+            "partial media datagram"
+        );
+        Ok(())
+    }
+    pub fn sync(&self, packet: &[u8; 28]) -> Result<()> {
+        self.check()?;
+        ensure!(
+            self.control.send(packet)? == packet.len(),
+            "sync send failed"
+        );
+        Ok(())
+    }
+    pub fn retransmit(&self) -> Result<Option<(u16, u16)>> {
+        self.check()?;
+        receive_retransmit(&self.control)
     }
     pub fn check(&self) -> Result<()> {
         self.lease.check()?;
@@ -1382,25 +1405,28 @@ impl MediaIo {
         Ok(())
     }
     pub fn retransmit(&self) -> Result<Option<(u16, u16)>> {
-        let mut b = [0; 9];
-        match self.control.recv_from(&mut b) {
-            Ok((n, peer)) => {
-                if peer != self.control.peer_addr()? {
-                    return Ok(None);
-                }
-                self.lease.check()?;
-                control_diagnostic(&b[..n]);
-                ensure!(
-                    n == 8 && b[..2] == [0x80, 0xd5],
-                    "invalid retransmission feedback"
-                );
-                let count = u16::from_be_bytes([b[6], b[7]]);
-                ensure!((1..=32).contains(&count), "retransmission request limit");
-                Ok(Some((u16::from_be_bytes([b[4], b[5]]), count)))
+        self.lease.check()?;
+        receive_retransmit(&self.control)
+    }
+}
+fn receive_retransmit(control: &UdpSocket) -> Result<Option<(u16, u16)>> {
+    let mut b = [0; 9];
+    match control.recv_from(&mut b) {
+        Ok((n, peer)) => {
+            if peer != control.peer_addr()? {
+                return Ok(None);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(e) => Err(e.into()),
+            control_diagnostic(&b[..n]);
+            ensure!(
+                n == 8 && b[..2] == [0x80, 0xd5],
+                "invalid retransmission feedback"
+            );
+            let count = u16::from_be_bytes([b[6], b[7]]);
+            ensure!((1..=32).contains(&count), "retransmission request limit");
+            Ok(Some((u16::from_be_bytes([b[4], b[5]]), count)))
         }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(e) => Err(e.into()),
     }
 }
 // Only classify the bounded datagram header. Never emit receiver payload bytes.

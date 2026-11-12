@@ -114,6 +114,20 @@ pub enum Command {
         #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(5..=20))]
         observation_seconds: u64,
     },
+    /// Play a bounded WAV on the explicitly selected PTP receiver; requires terminal confirmation.
+    PtpWavPlayback {
+        receiver_id: String,
+        #[arg(long)]
+        audio_file: PathBuf,
+        /// Maximum signal duration; stops earlier at EOF, followed by silent drain.
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=30))]
+        seconds: u32,
+        /// Explicit receiver volume change; omitted preserves the receiver's volume.
+        #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i32).range(-60..=-10))]
+        volume_db: Option<i32>,
+        #[arg(long)]
+        experimental_owntone_transient: bool,
+    },
     /// Buffered PTP foundation diagnostic; live audio remains blocked pending clock-adoption evidence.
     BufferedTest {
         receiver_id: String,
@@ -659,5 +673,45 @@ mod ptp_arguments {
         ] {
             assert!(Cli::try_parse_from(base.into_iter().chain([flag])).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod ptp_wav_arguments {
+    use super::*;
+    #[test]
+    fn ptp_playback_requires_receiver_and_file_and_preserves_volume_by_default() {
+        let args = [
+            "piair",
+            "ptp-wav-playback",
+            "device:112233445566",
+            "--audio-file",
+            "input.wav",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(args).unwrap().command,
+            Command::PtpWavPlayback {
+                seconds: 30,
+                volume_db: None,
+                ..
+            }
+        ));
+        for extra in [
+            ["--seconds", "0"],
+            ["--seconds", "31"],
+            ["--volume-db", "-9"],
+            ["--volume-db", "-61"],
+        ] {
+            assert!(Cli::try_parse_from(args.into_iter().chain(extra)).is_err());
+        }
+        assert!(Cli::try_parse_from(args.into_iter().chain([
+            "--seconds",
+            "10",
+            "--volume-db",
+            "-20"
+        ]))
+        .is_ok());
+        assert!(Cli::try_parse_from(["piair", "ptp-wav-playback"]).is_err());
+        assert!(Cli::try_parse_from(["piair", "ptp-wav-playback", "device:112233445566"]).is_err());
     }
 }

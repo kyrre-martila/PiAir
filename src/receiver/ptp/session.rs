@@ -1,4 +1,4 @@
-//! Session timing owner shared by diagnostics and future authenticated WAV setup.
+//! Session timing owner shared by diagnostics and authenticated WAV playback.
 //! It owns no media grant. The control owner remains responsible for TEARDOWN.
 use super::{
     control::{AnchorRequest, Rate},
@@ -130,10 +130,9 @@ impl TimingSession {
         }
         self.run_control(cancel, request)
     }
-    /// PR 63 scheduler integration: serialize RTP/PTP correspondence using only
+    /// Scheduler integration: serialize RTP/PTP correspondence using only
     /// this owner's ClockID and epoch. Caller positions come from the existing
     /// 44.1 kHz RTP scheduler, never the legacy buffered 48 kHz anchor mapping.
-    #[allow(dead_code)] // Prepared protocol integration point; no media sends in PR 62.
     pub fn realtime_sync(
         &self,
         first: bool,
@@ -141,7 +140,10 @@ impl TimingSession {
         next_rtp: u32,
         now: Instant,
     ) -> Result<[u8; 28]> {
-        ensure!(self.healthy(now), "PTP timing service unavailable");
+        ensure!(
+            self.healthy(Instant::now()),
+            "PTP timing service unavailable"
+        );
         super::super::realtime::ptp_sync(
             first,
             current_rtp,

@@ -12,6 +12,7 @@ pub(crate) mod planning;
 #[allow(dead_code)]
 mod media;
 mod pairing;
+mod playback;
 mod profile;
 #[allow(dead_code)] // Playback timing primitives remain gated beyond the initial diagnostic.
 mod ptp;
@@ -807,6 +808,28 @@ pub fn ptp_negotiation_check(
     transient: bool,
     seconds: u64,
 ) -> Result<()> {
+    ptp_operation(loaded, id, transient, seconds, None)
+}
+
+pub fn ptp_wav_playback(
+    loaded: &Loaded,
+    id: &str,
+    path: &std::path::Path,
+    seconds: u32,
+    volume: Option<i32>,
+    transient: bool,
+) -> Result<()> {
+    let wav = wav::Playback::open(path, seconds)?;
+    ptp_operation(loaded, id, transient, 10, Some((wav, volume)))
+}
+
+fn ptp_operation(
+    loaded: &Loaded,
+    id: &str,
+    transient: bool,
+    seconds: u64,
+    playback: Option<(wav::Playback, Option<i32>)>,
+) -> Result<()> {
     exact_id(id)?;
     ensure!(
         (5..=20).contains(&seconds),
@@ -826,15 +849,23 @@ pub fn ptp_negotiation_check(
     );
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "PTP diagnostic requires interactive confirmation"
+        "PTP operation requires interactive confirmation"
     );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
-    println!("PTP negotiation only: authenticated /info, initial SETUP, RECORD, SETPEERS, realtime type-96 UDP stream SETUP, {seconds}s bounded observation and TEARDOWN. Zero audio bytes; no volume changes. Reports operational readiness separately from unverified receiver synchronization.");
+    if let Some((wav, volume)) = &playback {
+        println!("Selected receiver: {id}; PTP type96, UDP, ALAC16 stereo, 44100 Hz, 352 samples/packet. WAV frames: {}; EOF: {}; volume: {volume:?} dB (None preserves current volume). Explicit volume changes may persist. Local transmission does not prove audible playback.", wav.frames.len(), wav.eof);
+    } else {
+        println!("PTP negotiation only: authenticated /info, initial SETUP, RECORD, SETPEERS, realtime type-96 UDP stream SETUP, {seconds}s bounded observation and TEARDOWN. Zero audio bytes; no volume changes. Reports operational readiness separately from unverified receiver synchronization.");
+    }
     interactive::confirm_operation(
         loaded,
         None,
         &snapshot,
-        "Authorize selected receiver PTP negotiation only? [y/N]: ",
+        if playback.is_some() {
+            "Start selected receiver PTP WAV playback? [y/N]: "
+        } else {
+            "Authorize selected receiver PTP negotiation only? [y/N]: "
+        },
     )?;
     let mut authenticated = session::Session::new();
     let cancel = authenticated.cancel.clone();
@@ -852,9 +883,13 @@ pub fn ptp_negotiation_check(
     let result = (|| {
         session.setup_realtime_authenticated()?;
         session.negotiate_realtime()?;
-        session.observe(std::time::Duration::from_secs(seconds))?;
+        if let Some((wav, volume)) = &playback {
+            session.play_wav(&wav.frames, *volume)?;
+        } else {
+            session.observe(std::time::Duration::from_secs(seconds))?;
+        }
         session.stop()
     })();
-    println!("PTP negotiation diagnostic: {}", session.diagnostic());
+    println!("PTP operation: {}", session.diagnostic());
     result
 }

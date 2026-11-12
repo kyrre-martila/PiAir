@@ -100,6 +100,20 @@ fn run_with_discovery(
             experimental_owntone_transient,
             observation_seconds,
         )?,
+        Command::PtpWavPlayback {
+            receiver_id,
+            audio_file,
+            seconds,
+            volume_db,
+            experimental_owntone_transient,
+        } => receiver::ptp_wav_playback(
+            &loaded,
+            &receiver_id,
+            &audio_file,
+            seconds,
+            volume_db,
+            experimental_owntone_transient,
+        )?,
         Command::BufferedTest {
             receiver_id,
             setup_check,
