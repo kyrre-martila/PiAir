@@ -91,6 +91,9 @@ pub struct Session {
     setup_rtsp_accepted: bool,
     observed: bool,
     observation_complete: bool,
+    // Historical result at observation completion (or before cleanup on failure).
+    // Never recomputed from Shutdown and never used to authorize media.
+    observed_peer_liveness: Option<bool>,
     stage: Option<Stage>,
     prepared: Option<Prepared>,
     stream: Option<NegotiatedStream>,
@@ -124,6 +127,7 @@ impl Session {
             setup_rtsp_accepted: false,
             observed: false,
             observation_complete: false,
+            observed_peer_liveness: None,
             stage: None,
             prepared: None,
             stream: None,
@@ -149,7 +153,11 @@ impl Session {
             .as_ref()
             .map(|s| s.evidence())
             .unwrap_or(self.final_evidence);
-        let peer_live = ptp == Some(ptp::State::PeerObserved);
+        let peer_live = self.observed_peer_liveness.unwrap_or_else(|| {
+            self.timing
+                .as_ref()
+                .is_some_and(|timing| timing.peer_is_live(Instant::now()))
+        });
         let observation = if self.observation_complete {
             "completed"
         } else {
@@ -491,6 +499,12 @@ impl Session {
                 }
                 std::thread::park_timeout(Duration::from_millis(2));
             }
+            self.observed_peer_liveness = Some(
+                self.timing
+                    .as_ref()
+                    .context("timing absent")?
+                    .peer_is_live(Instant::now()),
+            );
             self.observation_complete = true;
             Ok(self.timing.as_ref().context("timing absent")?.state())
         })();
@@ -526,6 +540,9 @@ impl Session {
         if let Some(timing) = &self.timing {
             self.final_ptp = Some(timing.state());
             self.final_evidence = timing.evidence();
+            if self.observed_peer_liveness.is_none() {
+                self.observed_peer_liveness = Some(timing.peer_is_live(Instant::now()));
+            }
         }
         // Healthy timing continues during bounded teardown. A cancelled/lost
         // service must not prevent an otherwise authorized cleanup request.
@@ -535,7 +552,10 @@ impl Session {
                 .as_ref()
                 .is_some_and(|s| matches!(s.state(), ptp::State::Lost | ptp::State::Shutdown))
         {
-            self.timing.take();
+            if let Some(mut timing) = self.timing.take() {
+                timing.shutdown();
+                self.final_ptp = Some(timing.state());
+            }
         }
         self.prepared.take();
         self.stream.take();
@@ -557,7 +577,11 @@ impl Session {
             }
             Ok(())
         })();
-        self.timing.take();
+        if let Some(mut timing) = self.timing.take() {
+            self.final_evidence = timing.evidence();
+            timing.shutdown();
+            self.final_ptp = Some(timing.state());
+        }
         self.events.take();
         if let Some(mut wire) = self.control.take() {
             wire.close();

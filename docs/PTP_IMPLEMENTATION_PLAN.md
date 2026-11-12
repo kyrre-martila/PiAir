@@ -417,3 +417,38 @@ Exact hardware retest command (after rebuilding and restoring bind capability):
 Verify completed observation, fresh per-type traffic, rejected counts/reasons,
 unchanged local clock, acknowledged TEARDOWN, zero audio and blocked media.
 No hardware retest was performed in this cloud environment.
+
+### PR 61 review: source port, Sync policy and cleanup snapshots
+
+IEEE 1588-2008 section 7.5.2.3 numbers ordinary PTP ports starting at one;
+zero is not an ordinary source port for these event/general observations.
+`Packet::validate` already rejected the two zero source-port octets before any
+receive handler ran. The rule now uses the parsed `port_number()` explicitly,
+and the typed observation boundary independently rejects zero before updating
+port pins, sequence tracking or liveness. Raw-wire and typed regression tests
+cover all six accepted incoming message types; the nonzero documentation remains
+accurate. Signaling wildcard *targets* are separate from source identities.
+
+`Packet::decode` checks header, domain, reserved bytes, source identity, generic
+flag mask, timestamp and bounded TLVs. Its generic flag mask and signed correction
+field are deliberately broader than the supported Sync observation policy.
+Incoming Sync now additionally requires exactly the ten-byte timestamp body,
+zero correction, and only twoStepFlag (0x0200), unicastFlag (0x0400), and
+ptpTimescale (0x0008). Both one-step and two-step observations remain supported.
+Nonzero correction or extensions may be legitimate PTP in other profiles, but
+PiAir does not implement their semantics and retains a safe restriction pending
+protocol/capture evidence. Unsupported flags (including time-properties flags
+belonging to Announce), corrections and extensions cannot pin a source port,
+consume a sequence, establish pending Follow_Up correlation or refresh liveness.
+Tests also inject malformed headers, timestamps and truncated Sync bytes.
+
+The lifecycle stores the peer-liveness result at successful observation
+completion, independently of the live timing service. Before cleanup on an
+incomplete observation it instead saves the current checked liveness result.
+`peer liveness at snapshot` is explicitly historical; it does not assert current
+session validity after cancellation, revocation or shutdown. Final `PTP snapshot`
+now reports the post-cleanup Shutdown state, while the saved observation result
+and completion status remain intact. Successful token-bearing and tokenless
+observation/TEARDOWN tests cover ordinary cleanup and a timing service already
+shut down before authorized TEARDOWN. Timing shutdown never grants media;
+authorization checks and zero-audio behavior are unchanged.

@@ -122,11 +122,11 @@ impl Packet {
             "invalid PTP body"
         );
         ensure!(
-            self.source[..8] != [0; 8]
-                && self.source[..8] != [255; 8]
-                && self.source[8..] != [0; 2],
+            self.source[..8] != [0; 8] && self.source[..8] != [255; 8],
             "invalid source identity"
         );
+        // sourcePortIdentity names a real port, not a management/default port.
+        ensure!(self.port_number() != 0, "invalid zero source port number");
         ensure!(self.flags & !0x677f == 0, "unsupported PTP flags");
         if self.kind != Kind::Signaling {
             Timestamp::decode(&self.body[..10])?;

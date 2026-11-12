@@ -873,9 +873,7 @@ fn inband_rejections_at_every_control_stage_discard_session_and_key_case() {
         assert!(owner.diagnostic().contains(&format!(
             "last accepted: {accepted}; attempted: {attempted}"
         )));
-        assert!(owner
-            .diagnostic()
-            .contains("PTP snapshot: Some(PeerObserved)"));
+        assert!(owner.diagnostic().contains("PTP snapshot: Some(Shutdown)"));
         assert!(owner.diagnostic().contains("TEARDOWN: acknowledged"));
         assert_eq!(owner.state(), State::Failed);
         assert!(owner.prepared.is_none());
@@ -1557,7 +1555,16 @@ fn timing_only_handoff_orders_record_setpeers_and_releases_sockets() {
         );
         assert_eq!(evidence.delay_requests, 1);
         assert_eq!(evidence.delay_responses_sent, 1);
+        // Completed observation remains historical evidence even if the timing
+        // service shuts down before the authorized TEARDOWN runs.
+        assert_eq!(owner.observed_peer_liveness, Some(true));
+        if tokenless {
+            owner.timing.as_mut().unwrap().shutdown();
+            assert_eq!(owner.timing.as_ref().unwrap().state(), ptp::State::Shutdown);
+        }
         owner.stop().unwrap();
+        assert!(owner.diagnostic().contains("PTP snapshot: Some(Shutdown)"));
+        assert!(owner.diagnostic().contains("TEARDOWN: acknowledged"));
         assert!(owner.diagnostic().contains("audio bytes: 0"));
         assert!(owner
             .diagnostic()

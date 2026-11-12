@@ -1578,3 +1578,104 @@ fn service_reports_each_validated_message_and_rejection_separately() {
     assert_eq!(service.clock.clock_id, 42);
     assert!(!service.clock.media_permitted());
 }
+
+#[test]
+fn zero_source_port_is_rejected_before_any_observation() {
+    let now = Instant::now();
+    for kind in [
+        Kind::DelayReq,
+        Kind::PdelayReq,
+        Kind::Sync,
+        Kind::FollowUp,
+        Kind::Announce,
+        Kind::Signaling,
+    ] {
+        let length = match kind {
+            Kind::PdelayReq => 20,
+            Kind::Announce => 30,
+            _ => 10,
+        };
+        let mut packet = Packet::new(kind, 0x1122334455667788, 7, vec![0; length]);
+        let mut bytes = packet.encode().unwrap();
+        bytes[28..30].fill(0); // independent wire mutation bypasses encoder validation
+        packet.source[8..].fill(0);
+        assert_eq!(packet.port_number(), 0);
+        assert!(packet.encode().is_err());
+        assert!(Packet::decode(&bytes).is_err());
+        let mut clock = fixture_clock();
+        // Defense at the typed observation boundary as well as in the decoder.
+        assert!(clock.validate_observation(&packet, now).is_err());
+        assert!(clock.last_peer.is_none());
+        assert_eq!(clock.peer_ports, [None; 16]);
+        assert_eq!(clock.last_sequences, [None; 16]);
+        // A fresh clock uses this test's deterministic time base.
+        let mut clock =
+            Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+        let result = if kind.event() {
+            clock.receive(&bytes, now).map(|_| ())
+        } else {
+            clock.receive_general(&bytes, now)
+        };
+        assert!(result.is_err());
+        assert!(clock.last_peer.is_none());
+        assert!(!clock.media_permitted());
+    }
+}
+
+#[test]
+fn unsupported_and_malformed_sync_cannot_pin_or_refresh_peer() {
+    let now = Instant::now();
+    let mut clock = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
+    peer(&mut clock, now, 1);
+    let sync = request(Kind::Sync, 9);
+    let valid = sync.encode().unwrap();
+    let mut rejected = Vec::new();
+    for correction in [-1i64, 1, i64::MAX] {
+        let mut bytes = valid.clone();
+        bytes[8..16].copy_from_slice(&correction.to_be_bytes());
+        assert!(Packet::decode(&bytes).is_ok()); // valid wire form, unsupported policy
+        rejected.push(bytes);
+    }
+    for bit in 0..16 {
+        if (1u16 << bit) & 0x0608 != 0 {
+            continue;
+        }
+        let mut bytes = valid.clone();
+        bytes[6..8].copy_from_slice(&(sync.flags | (1u16 << bit)).to_be_bytes());
+        rejected.push(bytes);
+    }
+    let mut extended = valid.clone();
+    extended.extend_from_slice(&[0, 0x7f, 0, 0]); // bounded unknown TLV
+    extended[2..4].copy_from_slice(&48u16.to_be_bytes());
+    assert!(Packet::decode(&extended).is_ok());
+    rejected.push(extended);
+    for (index, value) in [(1, 1), (4, 1), (16, 1), (32, 1), (40, 255)] {
+        let mut bytes = valid.clone();
+        bytes[index] = value;
+        rejected.push(bytes);
+    }
+    rejected.push(valid[..43].to_vec());
+    for bytes in rejected {
+        assert!(clock.receive(&bytes, now + Duration::from_secs(1)).is_err());
+        assert_eq!(clock.last_peer, Some(now));
+        assert_eq!(clock.peer_ports[Kind::Sync as usize], None);
+        assert_eq!(clock.last_sequences[Kind::Sync as usize], None);
+        assert!(clock.incoming_sync.is_none());
+        assert_eq!(clock.clock_id, 42);
+        assert!(!clock.media_permitted());
+    }
+    // Invalid Sync did not consume this sequence or prevent a supported one.
+    assert!(clock
+        .receive(&valid, now + Duration::from_secs(1))
+        .unwrap()
+        .is_empty());
+    assert_eq!(clock.last_peer, Some(now + Duration::from_secs(1)));
+    for second in 2..=4 {
+        clock
+            .check(now + Duration::from_secs(second), false)
+            .unwrap();
+    }
+    assert!(clock
+        .check(now + Duration::from_millis(4001), false)
+        .is_err());
+}

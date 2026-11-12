@@ -316,6 +316,13 @@ impl Grandmaster {
         );
         ensure!(p.kind.event(), "general packet on event channel");
         if p.kind == Kind::Sync {
+            // Observation-only subset: one/two-step, unicast and PTP timescale.
+            // Correction fields can be valid PTP, but corrected/extended Sync
+            // semantics are not implemented here. Reject before pinning or liveness.
+            ensure!(
+                p.correction == 0 && p.flags & !0x0608 == 0 && p.body.len() == 10,
+                "unsupported Sync correction/flags/extensions"
+            );
             self.validate_observation(&p, received)?;
             self.incoming_sync = if p.flags & 0x0200 != 0 {
                 Some((p.port_number(), p.sequence, received))
@@ -362,6 +369,10 @@ impl Grandmaster {
             p.kind as usize
         };
         let port = p.port_number();
+        // IEEE 1588-2008 7.5.2.3 assigns ordinary port numbers starting at 1.
+        // Packet::decode already enforces this; keep the observation boundary
+        // explicit so a future typed caller cannot pin zero or refresh liveness.
+        ensure!(port != 0, "invalid zero source port number");
         if let Some(expected) = self.peer_ports[slot] {
             ensure!(port == expected, "peer role port identity changed");
         }
