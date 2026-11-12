@@ -344,7 +344,7 @@ impl Session {
         self.check()?;
         let info = Self::plist(&self.call("GET", Some("/info"), &[])?)?;
         let wire = self.control.as_ref().context("control absent")?;
-        validate_info(&info, wire.receiver_id())?;
+        validate_info(&info, wire.receiver_id(), wire.stored_hap_verification())?;
         let local = wire.local_ip()?;
         let peer = wire.ptp_lease()?.peer();
         let authority = match local {
@@ -607,7 +607,11 @@ fn info_policy_diagnostic(root: &plist::Dictionary) -> String {
     .join("; ")
 }
 
-fn validate_info(value: &Value, receiver_id: &str) -> Result<()> {
+fn validate_info(
+    value: &Value,
+    receiver_id: &str,
+    verified_stored_hap: Option<&pairing::VerifiedStoredHap>,
+) -> Result<()> {
     let root = profile::dictionary(value)?;
     let id = root
         .get("deviceID")
@@ -632,13 +636,19 @@ fn validate_info(value: &Value, receiver_id: &str) -> Result<()> {
         format_diagnostic
     );
     // Separate authenticated observation, never substituted from mDNS flags/sf.
-    // Retain the conservative gate until the receiver's exact rejection is known.
+    // One-time pairing is satisfied only by pinned StoredHap verification on
+    // this control wire. Method selection and transient encryption are insufficient.
     let policy = info_policy_diagnostic(root);
     tracing::debug!(target: "piair::rtsp", policy = %policy,
         "authenticated /info access policy");
     let flags = profile::integer(root, "statusFlags")
         .with_context(|| format!("invalid authenticated access policy: rejected field=statusFlags; expected unsigned integer; {policy}"))?;
-    let rejected = flags & ((1 << 3) | (1 << 7) | (1 << 9));
+    let pairing_required = if verified_stored_hap.is_some() {
+        0
+    } else {
+        1 << 9
+    };
+    let rejected = flags & ((1 << 3) | (1 << 7) | pairing_required);
     ensure!(
         rejected == 0,
         "unsupported authenticated access policy: rejected field=statusFlags; rejected mask=0x{rejected:x} (bit 3=PIN, bit 7=password, bit 9=one-time pairing); {policy}"

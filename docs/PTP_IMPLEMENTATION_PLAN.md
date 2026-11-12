@@ -5,7 +5,8 @@
 Foundation reviewed main `2cb41c9eb956e3ce2694e7c4bcf0f0adbc1fc57a` (#56);
 Prompt 58 builds on merged #57 (`79f71c129eee07b7d06ab8d71af19d91669e6b33`).
 The explicit CLI below provides authenticated PTP negotiation, not Apple TV audio playback.
-No receiver or Raspberry Pi hardware was used. UDP send success, RTSP 200,
+No receiver or Raspberry Pi hardware was used by this implementation session;
+user-supplied hardware evidence is recorded below. UDP send success, RTSP 200,
 accepted anchors and `PeerObserved` do not prove synchronization or audibility.
 `Grandmaster::media_permitted()` remains unconditionally false.
 
@@ -235,7 +236,7 @@ fixtures, latency, sample wrap and loss before permitting any WAV bytes. An
 accepted SETPEERS, elapsed observation or `PeerObserved` cannot open that gate.
 The existing NTP WAV path and its regression suite remain unchanged.
 
-## Prompt 59: exact authenticated access-policy rejection
+## Prompt 59: exact authenticated access-policy rejection (historical)
 
 Reported physical result on Apple TV Stua (AppleTV6,2, tvOS 26.6.1): stored-HAP
 pair-verify M1/M2 and M3/M4 succeeded, encrypted GET /info returned HTTP 200,
@@ -300,3 +301,37 @@ session exists to TEARDOWN. Existing timing-only success/cleanup tests remain.
 This command is negotiation-only with zero audio bytes. No PTP synchronization,
 clock adoption, PTP WAV playback or audible playback is claimed; default protocol
 selection and the HomePod NTP WAV path are unchanged.
+
+
+## Prompt 60: verified StoredHap one-time pairing policy
+
+Confirmed user-supplied hardware evidence for Stua (AppleTV6,2, tvOS 26.6.1):
+StoredHap pair-verify M1/M2 and M3/M4 each returned HTTP 200 successfully;
+encrypted GET /info returned HTTP 200. Authenticated `statusFlags=99908`
+(`0x18644`) rejected only mask `0x200` (bit 9). `acl`, `act`,
+`accessControlLevel`, `accessControlType` and group/proxy fields were absent.
+Buffered ALAC24/48000/stereo was supported. PTP SETUP was not yet attempted.
+This supersedes Prompt 59's uncertainty about authenticated numeric provenance;
+`0x99908` remains a distinct synthetic PIN-required rejection case.
+
+Pair-verify now mints private StoredHap evidence only after checking the credential
+receiver binding, pinned pairing identifier and Ed25519 signature, successful M4,
+and installation of directional control keys. The same exclusive Wire owns that
+evidence through transfer from the WAV foundation. Closing clears it; failed or
+unencrypted wires cannot expose it. CLI method selection alone, transient SRP,
+and verification using enrollment methods do not grant this exception.
+
+Authenticated PTP /info permits bit 9 only with that evidence. It still requires
+the exact receiver deviceID and rejects bit 3, bit 7, nonzero or malformed
+access-control fields, malformed flags and unsupported group/proxy states.
+Discovery, selection pinning, allowlisting, planning, cancellation, deadlines,
+and cleanup are unchanged. Rejection before SETUP closes control and allocates no
+timing or media resources. The HomePod NTP WAV path remains unchanged.
+
+Next hardware validation: rebuild, restore UDP319/320 bind capability, and repeat
+the explicit negotiation-only command above. Verify /info passes and capture the
+initial PTP SETUP response, authenticated clock/address binding, timing socket
+startup, packet evidence and bounded cleanup. Then validate later diagnostic
+stages as documented above. No successful PTP synchronization, receiver clock
+adoption or audible playback is established by this evidence. Media readiness
+remains blocked, audio bytes remain zero and default protocol selection is unchanged.
