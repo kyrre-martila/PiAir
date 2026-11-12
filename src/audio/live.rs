@@ -22,6 +22,8 @@ const WAIT: Duration = Duration::from_millis(20);
 #[derive(Default)]
 struct Buffer {
     frames: VecDeque<[i16; 2]>,
+    automatic: Option<super::activity::Activity>,
+    last_samples: Option<Instant>,
     error: Option<String>,
     dropped: u64,
     silence: u64,
@@ -29,8 +31,27 @@ struct Buffer {
 }
 impl Buffer {
     fn push(&mut self, samples: &[i16]) {
+        if self.automatic.is_some() {
+            self.last_samples = Some(Instant::now());
+        }
         for pair in samples.as_chunks::<2>().0 {
-            if self.frames.len() == CAPACITY {
+            if let Some(activity) = &mut self.automatic {
+                let generation = activity.generation;
+                activity.push(*pair);
+                if activity.generation != generation {
+                    let keep = activity.retained_start_frames();
+                    self.dropped = 0;
+                    while self.frames.len() > keep {
+                        self.frames.pop_front();
+                    }
+                }
+            }
+            let capacity = if self.automatic.is_some() {
+                RATE as usize * 10
+            } else {
+                CAPACITY
+            };
+            if self.frames.len() == capacity {
                 self.frames.pop_front();
                 self.dropped += 1;
             }
@@ -43,6 +64,10 @@ impl Buffer {
         self.dropped += self.frames.len() as u64;
         self.frames.clear();
         self.recoveries += 1;
+        if let Some(activity) = &mut self.automatic {
+            activity.reset();
+        }
+        println!("ALSA capture recovered; interrupted PCM queue discarded");
     }
     fn check(&self) -> Result<()> {
         ensure!(
@@ -292,8 +317,79 @@ impl Capture {
             );
             thread::park_timeout(Duration::from_millis(5));
         }
-        println!("Live capture: 44100 Hz S16 stereo; startup=96 ms; queue capacity=192 ms; underrun=silence; overflow=drop oldest");
+        if self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("capture buffer poisoned"))?
+            .automatic
+            .is_some()
+        {
+            println!("Automatic capture: 44100 Hz S16 stereo; pre-roll/queue capacity=10 seconds; underrun=silence; overflow=drop oldest");
+        } else {
+            println!("Live capture: 44100 Hz S16 stereo; startup=96 ms; queue capacity=192 ms; underrun=silence; overflow=drop oldest");
+        }
         Ok(())
+    }
+    /// Automatic owner outlives per-session readers. Only the owner joins ALSA.
+    pub fn automatic(device: &str, settings: super::activity::Settings) -> Result<Self> {
+        let settings = settings.validate()?;
+        let capture = Self::start(device)?;
+        capture.enable_automatic(settings)?;
+        Ok(capture)
+    }
+    pub(crate) fn enable_automatic(&self, settings: super::activity::Settings) -> Result<()> {
+        self.buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("capture buffer poisoned"))?
+            .automatic = Some(super::activity::Activity::new(settings.validate()?));
+        Ok(())
+    }
+    pub fn activity(&self) -> Result<(bool, u64)> {
+        let b = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("capture buffer poisoned"))?;
+        b.check()?;
+        let a = b.automatic.as_ref().context("automatic detection absent")?;
+        Ok((
+            a.meaningful()
+                && b.last_samples
+                    .is_some_and(|at| at.elapsed() < Duration::from_millis(100)),
+            a.generation,
+        ))
+    }
+    /// A failed AirPlay attempt requires a fresh sustained interval, so a click
+    /// in the following quiet passage cannot redial using an old qualification.
+    pub fn rearm(&self) -> Result<()> {
+        let mut b = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("capture buffer poisoned"))?;
+        b.check()?;
+        b.automatic
+            .as_mut()
+            .context("automatic detection absent")?
+            .reset();
+        Ok(())
+    }
+    pub fn reader(&self) -> Self {
+        let counters = self.buffer.lock().ok().map(|b| (b.frames.len(), b.dropped));
+        if let Some((retained, dropped)) = counters {
+            println!("AirPlay pre-roll: {retained} retained frames; {dropped} frames lost to bounded-buffer overflow since detection (startup preservation is limited to ten seconds)");
+        }
+        Self {
+            buffer: self.buffer.clone(),
+            stop: self.stop.clone(),
+            worker: None,
+        }
+    }
+    pub fn ended(&self) -> Result<bool> {
+        let b = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("capture buffer poisoned"))?;
+        b.check()?;
+        Ok(b.automatic.as_ref().is_some_and(|a| !a.active))
     }
     pub fn block(&mut self) -> Result<[[i16; 2]; SPF]> {
         self.buffer
@@ -304,6 +400,9 @@ impl Capture {
 }
 impl Drop for Capture {
     fn drop(&mut self) {
+        if self.worker.is_none() {
+            return;
+        }
         self.stop.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
             worker.thread().unpark();

@@ -143,6 +143,23 @@ pub enum Command {
         #[arg(long)]
         experimental_owntone_transient: bool,
     },
+    /// Automatically play live ALSA audio on the explicitly selected receiver until Ctrl+C.
+    AutomaticPtpCapture {
+        receiver_id: String,
+        #[arg(long)]
+        capture_device: String,
+        /// Strongest-channel 20 ms RMS activity threshold in dBFS.
+        #[arg(long, default_value_t = -45.0, allow_negative_numbers = true)]
+        threshold_dbfs: f64,
+        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(20..=9000))]
+        start_duration_ms: u64,
+        #[arg(long, default_value_t = 30000, value_parser = clap::value_parser!(u64).range(20..=120000))]
+        stop_duration_ms: u64,
+        #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i32).range(-60..=-10))]
+        volume_db: Option<i32>,
+        #[arg(long)]
+        experimental_owntone_transient: bool,
+    },
     /// Buffered PTP foundation diagnostic; live audio remains blocked pending clock-adoption evidence.
     BufferedTest {
         receiver_id: String,
