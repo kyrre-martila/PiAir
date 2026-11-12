@@ -125,6 +125,8 @@ pub enum Command {
         /// Explicit receiver volume change; omitted preserves the receiver's volume.
         #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i32).range(-60..=-10))]
         volume_db: Option<i32>,
+        /// Use shared OwnTone transient SRP; requires explicit --method transient selection.
+        /// Omitted: require existing stored HAP credentials, with no fallback.
         #[arg(long)]
         experimental_owntone_transient: bool,
     },
@@ -713,5 +715,46 @@ mod ptp_wav_arguments {
         .is_ok());
         assert!(Cli::try_parse_from(["piair", "ptp-wav-playback"]).is_err());
         assert!(Cli::try_parse_from(["piair", "ptp-wav-playback", "device:112233445566"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ptp_transient_arguments {
+    use super::*;
+
+    #[test]
+    fn homepod_transient_command_preserves_playback_options() {
+        for opt_in in [false, true] {
+            let mut args = vec![
+                "piair",
+                "-v",
+                "ptp-wav-playback",
+                "device:0a05559f132f",
+                "--audio-file",
+                "tests/assets/audio/Pachelbel_Canon_audio_test.wav",
+                "--seconds",
+                "15",
+                "--volume-db",
+                "-20",
+            ];
+            if opt_in {
+                args.push("--experimental-owntone-transient");
+            }
+            match Cli::try_parse_from(args).unwrap().command {
+                Command::PtpWavPlayback {
+                    receiver_id,
+                    seconds,
+                    volume_db,
+                    experimental_owntone_transient,
+                    ..
+                } => {
+                    assert_eq!(receiver_id, "device:0a05559f132f");
+                    assert_eq!(seconds, 15);
+                    assert_eq!(volume_db, Some(-20));
+                    assert_eq!(experimental_owntone_transient, opt_in);
+                }
+                _ => panic!("expected PTP playback"),
+            }
+        }
     }
 }

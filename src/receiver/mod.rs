@@ -852,6 +852,9 @@ fn ptp_operation(
         "PTP operation requires interactive confirmation"
     );
     let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    if transient {
+        println!("Explicit OwnTone-reference transient SRP on the selected receiver: no persistent HAP credentials or verified persistent receiver identity; no credentials saved and no authentication fallback. Authenticated capabilities and PTP/type-96 negotiation must succeed before media transmission.");
+    }
     if let Some((wav, volume)) = &playback {
         println!("Selected receiver: {id}; PTP type96, UDP, ALAC16 stereo, 44100 Hz, 352 samples/packet. WAV frames: {}; EOF: {}; volume: {volume:?} dB (None preserves current volume). Explicit volume changes may persist. Local transmission does not prove audible playback.", wav.frames.len(), wav.eof);
     } else {
@@ -870,19 +873,28 @@ fn ptp_operation(
     let mut authenticated = session::Session::new();
     let cancel = authenticated.cancel.clone();
     ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
-    authenticated.authenticate_ptp_selected(
-        || match &credential {
-            Some(credential) => {
-                wire::Wire::connect_hap_operation(&loaded.path, &operation, &snapshot, credential)
-            }
-            None => wire::Wire::connect(&loaded.path, id, &operation, &snapshot),
-        },
-        credential.as_ref(),
-    )?;
+    authenticated
+        .authenticate_ptp_selected(
+            || match &credential {
+                Some(credential) => wire::Wire::connect_hap_operation(
+                    &loaded.path,
+                    &operation,
+                    &snapshot,
+                    credential,
+                ),
+                None => wire::Wire::connect(&loaded.path, id, &operation, &snapshot),
+            },
+            credential.as_ref(),
+        )
+        .context("selected receiver PTP authentication failed; no fallback")?;
     let mut session = authenticated.into_ptp_foundation()?;
     let result = (|| {
-        session.setup_realtime_authenticated()?;
-        session.negotiate_realtime()?;
+        session.setup_realtime_authenticated().context(
+            "authenticated receiver capabilities or initial PTP SETUP rejected; advertised PTP support alone is insufficient; no fallback",
+        )?;
+        session.negotiate_realtime().context(
+            "receiver rejected PTP realtime type-96 UDP negotiation; playback cannot proceed; no fallback",
+        )?;
         if let Some((wav, volume)) = &playback {
             session.play_wav(&wav.frames, *volume)?;
         } else {
