@@ -1,4 +1,4 @@
-//! Fixed-format live input. ALSA's plug layer performs rate/format conversion.
+//! Fixed-format live input; ALSA plug PCMs handle native device conversion.
 use alsa::{
     pcm::{Access, Format, HwParams, PCM},
     Direction, ValueOr,
@@ -13,15 +13,19 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+const RATE: u32 = 44100;
 const SPF: usize = 352;
 const CAPACITY: usize = SPF * 24;
 const PREFILL: usize = SPF * 12;
+const WAIT: Duration = Duration::from_millis(20);
+
 #[derive(Default)]
 struct Buffer {
     frames: VecDeque<[i16; 2]>,
     error: Option<String>,
     dropped: u64,
     silence: u64,
+    recoveries: u64,
 }
 impl Buffer {
     fn push(&mut self, samples: &[i16]) {
@@ -30,15 +34,26 @@ impl Buffer {
                 self.frames.pop_front();
                 self.dropped += 1;
             }
-            self.frames.push_back([pair[0], pair[1]]);
+            self.frames.push_back(*pair);
         }
     }
-    fn block(&mut self) -> Result<[[i16; 2]; SPF]> {
+    fn recovered(&mut self) {
+        // The old ALSA epoch is no longer contiguous with the new one. Bound
+        // latency by discarding its queue; the sender fills missing slots.
+        self.dropped += self.frames.len() as u64;
+        self.frames.clear();
+        self.recoveries += 1;
+    }
+    fn check(&self) -> Result<()> {
         ensure!(
             self.error.is_none(),
             "ALSA capture failed: {}",
             self.error.as_deref().unwrap_or_default()
         );
+        Ok(())
+    }
+    fn block(&mut self) -> Result<[[i16; 2]; SPF]> {
+        self.check()?;
         Ok(std::array::from_fn(|_| {
             self.frames.pop_front().unwrap_or_else(|| {
                 self.silence += 1;
@@ -47,12 +62,128 @@ impl Buffer {
         }))
     }
 }
+
+pub(crate) enum Read {
+    Frames(usize),
+    Pending,
+    Recovered,
+}
+/// Reads/recovery must be nonblocking; waits have a maximum WAIT duration.
+/// Factories run on the capture worker, which exclusively owns the source.
+pub(crate) trait Source {
+    fn read(&mut self, samples: &mut [i16]) -> Result<Read>;
+    fn wait(&self) -> Result<()> {
+        thread::park_timeout(WAIT);
+        Ok(())
+    }
+}
+struct Alsa(PCM);
+impl Alsa {
+    fn open(device: &str) -> Result<Self> {
+        match Self::open_exact(device) {
+            Ok(source) => Ok(source),
+            Err(original) => {
+                // hw has no conversion layer. Retry the *same* device through
+                // ALSA's documented plughw adapter, never another card/source.
+                if let Some(hw) = device.strip_prefix("hw:") {
+                    return Self::open_exact(&format!("plughw:{hw}")).with_context(|| {
+                        format!("direct capture failed ({original:#}); plug conversion also failed")
+                    });
+                }
+                Err(original).context("use plughw:CARD=<id>,DEV=0 or a configured plug PCM for native rate/format/channel conversion")
+            }
+        }
+    }
+    fn open_exact(device: &str) -> Result<Self> {
+        let pcm = PCM::new(device, Direction::Capture, true).context("open capture device")?;
+        // Period/buffer tuning is a preference, not an interoperability gate.
+        Self::configure(&pcm, true).or_else(|_| Self::configure(&pcm, false))?;
+        let actual = pcm.hw_params_current()?;
+        ensure!(
+            actual.get_access()? == Access::RWInterleaved,
+            "capture requires interleaved access"
+        );
+        validate_actual(
+            actual.get_rate()?,
+            actual.get_channels()?,
+            actual.get_format()?,
+            actual.get_period_size()?,
+            actual.get_buffer_size()?,
+        )?;
+        println!("ALSA live input {device:?}: {} Hz, {} channels, {:?}, interleaved; period={} frames, buffer={} frames", actual.get_rate()?, actual.get_channels()?, actual.get_format()?, actual.get_period_size()?, actual.get_buffer_size()?);
+        drop(actual);
+        pcm.prepare()?;
+        Ok(Self(pcm))
+    }
+    fn configure(pcm: &PCM, tune: bool) -> Result<()> {
+        let hw = HwParams::any(pcm)?;
+        hw.set_access(Access::RWInterleaved)?;
+        hw.set_channels(2)?;
+        hw.set_format(Format::s16())?;
+        hw.set_rate(RATE, ValueOr::Nearest)?;
+        if tune {
+            hw.set_period_size_near(SPF as i64, ValueOr::Nearest)?;
+            hw.set_buffer_size_near(i64::from(RATE / 10))?;
+        }
+        pcm.hw_params(&hw)?;
+        Ok(())
+    }
+}
+fn validate_actual(
+    rate: u32,
+    channels: u32,
+    format: Format,
+    period: i64,
+    buffer: i64,
+) -> Result<()> {
+    // Exact *client* format is necessary for the encoder; native hardware may
+    // have any format/rate the ALSA plug layer can convert. Reads are fixed-size
+    // and partial reads are valid, so no duration ceiling or period=SPF rule.
+    ensure!(
+        rate == RATE && channels == 2 && format == Format::s16(),
+        "capture client requires 44100 Hz S16 stereo; use an ALSA plug PCM for conversion"
+    );
+    ensure!(period > 0 && buffer > 0, "invalid ALSA period/buffer size");
+    Ok(())
+}
+impl Source for Alsa {
+    fn read(&mut self, samples: &mut [i16]) -> Result<Read> {
+        match self.0.io_i16()?.readi(samples) {
+            Ok(0) => Ok(Read::Pending),
+            Ok(n) => Ok(Read::Frames(n)),
+            Err(e) if e.errno() == libc::EAGAIN || e.errno() == libc::EINTR => Ok(Read::Pending),
+            Err(e) if e.errno() == libc::EPIPE || e.errno() == libc::ESTRPIPE => {
+                // snd_pcm_recover may loop indefinitely trying to resume a
+                // suspended device. Re-prepare this capture epoch instead.
+                self.0.prepare()?;
+                Ok(Read::Recovered)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+    fn wait(&self) -> Result<()> {
+        match self.0.wait(Some(WAIT.as_millis() as u32)) {
+            Ok(_) => Ok(()),
+            // Let the next read perform recovery; no recursive retry loop.
+            Err(e)
+                if [libc::EPIPE, libc::ESTRPIPE, libc::EINTR, libc::EAGAIN]
+                    .contains(&e.errno()) =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
 pub struct Capture {
     buffer: Arc<Mutex<Buffer>>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
 impl Capture {
+    /// Starts the worker without waiting for ALSA or prefill. The session keeps
+    /// timing/authorization alive while wait_ready observes startup.
     pub fn start(device: &str) -> Result<Self> {
         ensure!(
             !device.trim().is_empty()
@@ -60,6 +191,12 @@ impl Capture {
                 && !device.chars().any(char::is_control),
             "invalid ALSA device"
         );
+        let device = device.to_owned();
+        Self::spawn(move || Alsa::open(&device))
+    }
+    pub(crate) fn spawn<S: Source>(
+        open: impl FnOnce() -> Result<S> + Send + 'static,
+    ) -> Result<Self> {
         let buffer = Arc::new(Mutex::new(Buffer {
             frames: VecDeque::with_capacity(CAPACITY),
             ..Buffer::default()
@@ -67,139 +204,115 @@ impl Capture {
         let stop = Arc::new(AtomicBool::new(false));
         let shared = buffer.clone();
         let stopped = stop.clone();
-        let device = device.to_owned();
-        let worker = thread::spawn(move || {
-            let result = (|| -> Result<()> {
-                let pcm =
-                    PCM::new(&device, Direction::Capture, true).context("open capture device")?;
-                {
-                    let hw = HwParams::any(&pcm)?;
-                    hw.set_access(Access::RWInterleaved)?;
-                    hw.set_channels(2)?;
-                    hw.set_format(Format::s16())?;
-                    hw.set_rate(44100, ValueOr::Nearest)?;
-                    hw.set_period_size_near(SPF as i64, ValueOr::Nearest)?;
-                    hw.set_buffer_size_near(4410)?;
-                    pcm.hw_params(&hw)?;
-                    let actual = pcm.hw_params_current()?;
-                    ensure!(
-                        actual.get_buffer_size()? <= 44100,
-                        "ALSA buffer exceeds one second"
-                    );
-                    ensure!(actual.get_rate()? == 44100 && actual.get_channels()? == 2 && actual.get_format()? == Format::s16(), "capture requires 44100 Hz S16 stereo; use plughw:CARD=<id>,DEV=0 for ALSA conversion");
-                }
-                pcm.prepare()?;
-                let io = pcm.io_i16()?;
-                let mut samples = [0i16; SPF * 2];
-                let mut last = Instant::now();
-                while !stopped.load(Ordering::Acquire) {
-                    match io.readi(&mut samples) {
-                        Ok(n) if n > 0 => {
-                            last = Instant::now();
-                            shared.lock().unwrap().push(&samples[..n * 2]);
+        let worker = thread::Builder::new()
+            .name("piair-capture".into())
+            .spawn(move || {
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+                        let mut source = open()?;
+                        let mut samples = [0i16; SPF * 2];
+                        let mut burst = 0;
+                        while !stopped.load(Ordering::Acquire) {
+                            match source.read(&mut samples)? {
+                                Read::Frames(n) => {
+                                    ensure!((1..=SPF).contains(&n), "invalid capture frame count");
+                                    shared
+                                        .lock()
+                                        .map_err(|_| anyhow::anyhow!("capture buffer poisoned"))?
+                                        .push(&samples[..n * 2]);
+                                    burst += 1;
+                                    // Even a synthetic/unclocked plug PCM cannot spin
+                                    // forever. Real hardware normally reaches EAGAIN.
+                                    if burst == 16 {
+                                        thread::park_timeout(Duration::from_millis(1));
+                                        burst = 0;
+                                    }
+                                }
+                                Read::Recovered => {
+                                    shared
+                                        .lock()
+                                        .map_err(|_| anyhow::anyhow!("capture buffer poisoned"))?
+                                        .recovered();
+                                    thread::park_timeout(WAIT);
+                                    burst = 0;
+                                }
+                                Read::Pending => {
+                                    let before = Instant::now();
+                                    source.wait()?;
+                                    // A misbehaving plug PCM or repeated EINTR
+                                    // must not make this loop spin.
+                                    if before.elapsed() < Duration::from_millis(1) {
+                                        thread::park_timeout(Duration::from_millis(1));
+                                    }
+                                    burst = 0;
+                                }
+                            }
                         }
-                        Err(e) if e.errno() == libc::EPIPE || e.errno() == libc::ESTRPIPE => {
-                            // Re-prepare discards the interrupted ALSA epoch. Avoid
-                            // snd_pcm_recover's potentially unbounded suspend retry.
-                            // RTP and the sender clock continue unchanged.
-                            pcm.prepare()?;
-                            thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(e) if e.errno() != libc::EAGAIN && e.errno() != libc::EINTR => {
-                            return Err(e.into())
-                        }
-                        _ => thread::sleep(Duration::from_millis(2)),
+                        Ok(())
+                    }))
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("capture worker panicked")));
+                if let Err(e) = result {
+                    if let Ok(mut buffer) = shared.lock() {
+                        buffer.error = Some(format!("{e:#}"));
                     }
-                    ensure!(
-                        last.elapsed() < Duration::from_secs(2),
-                        "capture stalled for two seconds"
-                    );
                 }
-                Ok(())
-            })();
-            if let Err(e) = result {
-                shared.lock().unwrap().error = Some(format!("{e:#}"));
-            }
-        });
-        let capture = Self {
+            })
+            .context("start capture worker")?;
+        Ok(Self {
             buffer,
             stop,
             worker: Some(worker),
-        };
-        let deadline = Instant::now() + Duration::from_secs(3);
+        })
+    }
+    pub fn wait_ready(&self, cancel: &AtomicBool, check: impl FnMut() -> Result<()>) -> Result<()> {
+        self.wait_ready_until(cancel, Instant::now() + Duration::from_secs(10), check)
+    }
+    fn wait_ready_until(
+        &self,
+        cancel: &AtomicBool,
+        deadline: Instant,
+        mut check: impl FnMut() -> Result<()>,
+    ) -> Result<()> {
         loop {
+            ensure!(!cancel.load(Ordering::Relaxed), "capture startup cancelled");
+            check()?;
             {
-                let b = capture.buffer.lock().unwrap();
-                ensure!(b.error.is_none(), "capture startup failed: {:?}", b.error);
+                let b = self
+                    .buffer
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("capture buffer poisoned"))?;
+                b.check()?;
                 if b.frames.len() >= PREFILL {
                     break;
                 }
             }
-            ensure!(Instant::now() < deadline, "capture startup timed out");
-            thread::sleep(Duration::from_millis(5));
+            ensure!(
+                Instant::now() < deadline,
+                "capture startup timed out without sufficient samples"
+            );
+            thread::park_timeout(Duration::from_millis(5));
         }
         println!("Live capture: 44100 Hz S16 stereo; startup=96 ms; queue capacity=192 ms; underrun=silence; overflow=drop oldest");
-        Ok(capture)
+        Ok(())
     }
     pub fn block(&mut self) -> Result<[[i16; 2]; SPF]> {
-        self.buffer.lock().unwrap().block()
+        self.buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("capture buffer poisoned"))?
+            .block()
     }
 }
 impl Drop for Capture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
             let _ = worker.join();
         }
-        let b = self.buffer.lock().unwrap();
-        println!(
-            "Live capture stopped: dropped_frames={} silence_frames={}; ALSA released",
-            b.dropped, b.silence
-        );
+        if let Ok(b) = self.buffer.lock() {
+            println!("Live capture stopped: dropped_frames={} silence_frames={} recoveries={}; ALSA released", b.dropped, b.silence, b.recoveries);
+        }
     }
 }
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn shutdown_joins_mock_capture_worker() {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = stop.clone();
-        let finished = Arc::new(AtomicBool::new(false));
-        let done = finished.clone();
-        let worker = thread::spawn(move || {
-            while !stopped.load(Ordering::Acquire) {
-                thread::park_timeout(Duration::from_millis(2));
-            }
-            done.store(true, Ordering::Release);
-        });
-        let capture = Capture {
-            buffer: Arc::new(Mutex::new(Buffer::default())),
-            stop,
-            worker: Some(worker),
-        };
-        drop(capture);
-        assert!(finished.load(Ordering::Acquire));
-    }
-    #[test]
-    fn failed_open_joins_worker_and_releases_state() {
-        let start = Instant::now();
-        assert!(Capture::start("piair_nonexistent_test_pcm").is_err());
-        assert!(start.elapsed() < Duration::from_secs(3));
-        assert!(Capture::start("").is_err());
-    }
-    #[test]
-    fn partial_stereo_reads_silence_and_bounded_overflow() {
-        let mut b = Buffer::default();
-        b.push(&[i16::MIN, i16::MAX, 123, -456]);
-        let block = b.block().unwrap();
-        assert_eq!(block[0], [i16::MIN, i16::MAX]);
-        assert_eq!(block[1], [123, -456]);
-        assert_eq!(b.silence, 350);
-        b.push(&vec![7; (CAPACITY + 3) * 2]);
-        assert_eq!(b.frames.len(), CAPACITY);
-        assert_eq!(b.dropped, 3);
-        b.error = Some("disconnected".into());
-        assert!(b.block().is_err());
-    }
-}
+pub(crate) mod tests;

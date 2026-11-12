@@ -2342,7 +2342,29 @@ fn complete_ptp_wav_lifecycle_encrypts_paces_syncs_retransmits_and_releases() {
 
 #[test]
 fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() {
-    for mode in ["cancel", "timing-loss", "disconnect", "malformed"] {
+    for (mode, live) in [
+        ("cancel", false),
+        ("timing-loss", false),
+        ("disconnect", false),
+        ("malformed", false),
+        ("cancel", true),
+        ("device", true),
+        ("disconnect", true),
+        ("startup", true),
+        ("startup-cancel", true),
+        ("startup-disconnect", true),
+        ("slow-start", true),
+        ("teardown-timeout", true),
+        ("duration", true),
+    ] {
+        let closed = Arc::new(AtomicBool::new(false));
+        let server_closed = closed.clone();
+        let failure = Arc::new(AtomicBool::new(false));
+        let failed = failure.clone();
+        let opened = Arc::new(AtomicBool::new(false));
+        let did_open = opened.clone();
+        let gate = Arc::new(AtomicBool::new(false));
+        let ready = gate.clone();
         let data = UdpSocket::bind("127.0.0.2:0").unwrap();
         let control = UdpSocket::bind("127.0.0.2:0").unwrap();
         let data_port = data.local_addr().unwrap().port();
@@ -2405,11 +2427,21 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
             loop {
                 let (header, _) = read_request(&mut socket, &mut keys);
                 if header.starts_with("TEARDOWN ") {
+                    if live && mode != "startup" {
+                        assert!(
+                            server_closed.load(Ordering::Acquire),
+                            "capture must join before TEARDOWN"
+                        );
+                    }
+                    if mode == "teardown-timeout" {
+                        thread::sleep(Duration::from_millis(500));
+                        break;
+                    }
                     reply(&mut socket, &mut keys, seq, None);
                     break;
                 }
                 assert!(header.starts_with("POST /feedback "));
-                if mode == "disconnect" {
+                if matches!(mode, "disconnect" | "startup-disconnect") {
                     return;
                 }
                 reply(&mut socket, &mut keys, seq, None);
@@ -2463,13 +2495,43 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
             .unwrap();
 
         let cancel = owner.cancel.clone();
+        let (finished, playback_done) = std::sync::mpsc::channel();
         let receiver = thread::spawn(move || {
             data.set_nonblocking(false).unwrap();
             data.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
             let mut packet = [0; 2048];
+            if matches!(mode, "startup" | "startup-cancel" | "startup-disconnect") {
+                if mode == "startup-cancel" {
+                    let until = Instant::now() + Duration::from_secs(2);
+                    while !did_open.load(Ordering::Acquire) {
+                        assert!(Instant::now() < until);
+                        thread::park_timeout(Duration::from_millis(1));
+                    }
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                playback_done.recv_timeout(Duration::from_secs(5)).unwrap();
+                data.set_nonblocking(true).unwrap();
+                assert_eq!(
+                    data.recv(&mut packet).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+                return;
+            }
+            if mode == "slow-start" {
+                let until = Instant::now() + Duration::from_secs(4);
+                while Instant::now() < until {
+                    delay.sequence = delay.sequence.wrapping_add(1);
+                    peer_event.send(&delay.encode().unwrap()).unwrap();
+                    thread::park_timeout(Duration::from_millis(100));
+                }
+                ready.store(true, Ordering::Release);
+            }
             assert!(data.recv(&mut packet).unwrap() > 12);
-            if mode == "cancel" {
+            if matches!(mode, "cancel" | "teardown-timeout" | "slow-start") {
                 cancel.store(true, Ordering::Relaxed);
+            }
+            if mode == "device" {
+                failed.store(true, Ordering::Release);
             }
             if mode == "malformed" {
                 control
@@ -2480,12 +2542,69 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
                     .unwrap();
             }
             // Keep the negotiated endpoints alive through the failure.
-            while data.recv(&mut packet).is_ok() {}
+            while data.recv(&mut packet).is_ok() {
+                if mode == "duration" {
+                    delay.sequence = delay.sequence.wrapping_add(1);
+                    peer_event.send(&delay.encode().unwrap()).unwrap();
+                }
+            }
         });
-        let result = owner.play_wav(&vec![[123, -456]; 4 * profile::RATE as usize], None);
-        assert!(result.is_err(), "{mode}");
-        assert_eq!(owner.state(), State::Failed);
-        assert!(owner.playback_stats.packets > 0);
+        let started = Instant::now();
+        let result = if live {
+            let capture_closed = closed.clone();
+            owner.play_pcm(
+                None,
+                Some((
+                    Box::new(move || {
+                        opened.store(true, Ordering::Release);
+                        crate::audio::live::Capture::spawn(move || {
+                            if mode == "startup" {
+                                anyhow::bail!("mock capture open failed");
+                            }
+                            Ok(crate::audio::live::tests::Mock {
+                                closed: capture_closed,
+                                reads: 0,
+                                fail_after: None,
+                                pending: matches!(mode, "startup-cancel" | "startup-disconnect"),
+                                failure: Some(failure),
+                                gate: (mode == "slow-start").then_some(gate),
+                            })
+                        })
+                    }),
+                    (mode == "duration").then_some(1),
+                )),
+                None,
+            )
+        } else {
+            owner.play_wav(&vec![[123, -456]; 4 * profile::RATE as usize], None)
+        };
+        let _ = finished.send(());
+        if mode == "teardown-timeout" {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "TEARDOWN exceeded cleanup bound"
+            );
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(if mode == "slow-start" { 7 } else { 5 }),
+            "unbounded playback/cleanup: {mode}"
+        );
+        if live && mode != "startup" {
+            assert!(closed.load(Ordering::Acquire));
+        }
+        if mode == "duration" {
+            result.unwrap();
+            owner.stop().unwrap();
+            assert_eq!(owner.state(), State::Closed);
+        } else {
+            assert!(result.is_err(), "{mode}");
+            assert_eq!(owner.state(), State::Failed);
+        }
+        if matches!(mode, "startup" | "startup-cancel" | "startup-disconnect") {
+            assert_eq!(owner.playback_stats.packets, 0);
+        } else {
+            assert!(owner.playback_stats.packets > 0);
+        }
         assert!(owner.playback_stats.packets < 4 * u64::from(profile::RATE) / profile::SPF as u64);
         assert!(owner.control.is_none() && owner.timing.is_none());
         assert!(owner.realtime_encoder.is_none() && owner.realtime_transport.is_none());

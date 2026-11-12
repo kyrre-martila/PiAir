@@ -522,21 +522,38 @@ Expected diagnostics include:
 
 ```text
 Live capture: 44100 Hz S16 stereo; startup=96 ms; queue capacity=192 ms; underrun=silence; overflow=drop oldest
-Live capture stopped: dropped_frames=0 silence_frames=0; ALSA released
+Live capture stopped: dropped_frames=0 silence_frames=0 recoveries=0; ALSA released
 PTP operation: ...
 ```
 
 The counters vary with scheduling and clock drift. Capture runs on a dedicated
 nonblocking ALSA thread; the sender never waits for capture samples. Partial reads
 preserve stereo order. ALSA's plug layer converts native USB PCM format and rate
-to signed 16-bit stereo at exactly 44100 Hz. Direct `hw:` devices must support
-that exact format. Startup queues twelve 352-frame packets (~96 ms); the queue
+to signed 16-bit stereo at exactly 44100 Hz. If direct `hw:` negotiation fails,
+PiAir retries the same device through `plughw:`; custom PCM aliases can supply a
+plug layer in ALSA configuration. Actual client rate, channels, format, period
+and buffer are reported. Period/buffer tuning is optional; periods need not
+match RTP packets and buffers larger than one second are accepted.
+Startup queues twelve 352-frame packets (~96 ms); the queue
 holds at most twenty-four (~192 ms). Overflow drops oldest frames, keeping recent
 audio instead of accumulating latency. Empty queue slots become silence; RTP
 sample timestamps and periodic PTP synchronization continue on the same clock.
-XRUN/suspend recovery does not restart that clock. Device failure or a two-second
-capture stall terminates playback and invokes the existing bounded teardown.
+XRUN/suspend recovery re-prepares ALSA, discards the old capture queue and does
+not restart that clock. Temporary missing input becomes silence without an
+arbitrary runtime gap timeout; explicit device errors terminate playback and
+invoke the existing bounded teardown. Startup waits up to ten seconds for prefill,
+while continuing PTP, authorization, feedback and cancellation checks. Capture
+readiness waits are bounded to 20 ms, and workers join before TEARDOWN.
 There is no silence detection. Clock drift can occasionally cause drops or silence.
+
+Indefinite live sessions have no media-duration limit. Their retransmission
+allowance renews every two seconds; bounded work, three retries per cached packet,
+nonce exhaustion checks and receiver authorization remain enforced. Live sender
+scheduling tolerates up to 1.5 seconds of catch-up (below the existing two-second
+playback lead); WAV retains its original 100 ms policy. PTP liveness expiry,
+network failures and unrecoverable capture errors still stop a live session.
+See [live capture compatibility and validation](docs/LIVE_CAPTURE.md) for the
+OwnTone source comparison, technical reasons for retained limits, and tests.
 
 If opening fails, check `arecord -l`, capture permissions and other programs using
 the card. Use `plughw:` for sample-rate/format mismatch. For missing audio, first
