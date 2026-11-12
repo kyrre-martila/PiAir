@@ -1466,3 +1466,118 @@ fn authenticated_handoff_retains_cipher_cseq_cancel_and_receiver_without_setup()
     transferred.stop().unwrap();
     server.join().unwrap();
 }
+
+#[test]
+fn timing_only_handoff_orders_record_setpeers_and_releases_sockets() {
+    for tokenless in [false, true] {
+        TOKENLESS.with(|mode| mode.set(tokenless));
+        let (mut original, _approval, server) = fixture(|mut socket| {
+            let mut keys = server_keys();
+            for (seq, method, response) in [
+                (1, "GET /info ", Some(info())),
+                (2, "SETUP ", Some(setup(123))),
+                (3, "RECORD ", None),
+                (4, "SETPEERS ", None),
+                (5, "TEARDOWN ", None),
+            ] {
+                let (header, body) = read_request(&mut socket, &mut keys);
+                assert!(header.starts_with(method));
+                assert!(header.contains(&format!("CSeq: {seq}\r\n")));
+                if seq == 2 {
+                    let offer = profile::parse(&body).unwrap();
+                    let d = profile::dictionary(&offer).unwrap();
+                    assert_eq!(d["timingProtocol"].as_string(), Some("PTP"));
+                    assert_eq!(
+                        d["timingPeerList"].as_array().unwrap(),
+                        &[d["timingPeerInfo"].clone()]
+                    );
+                    assert!(!d.contains_key("streams"));
+                }
+                reply(&mut socket, &mut keys, seq, response);
+            }
+        });
+        let cancel = original.cancel.clone();
+        let mut owner =
+            Session::from_authenticated(original.control.take().unwrap(), cancel).unwrap();
+        let id = owner.clock_id;
+        let (event, peer_event) = udp_pair();
+        let (general, _peer_general) = udp_pair();
+        let addresses = (event.local_addr().unwrap(), general.local_addr().unwrap());
+        owner
+            .negotiate_with(|wire, setup, clock| {
+                assert_eq!(clock, id);
+                Ok((
+                    None,
+                    ptp::Service::attach(
+                        ptp::Grandmaster::new(
+                            clock,
+                            setup.clock_id,
+                            Instant::now(),
+                            Duration::from_secs(30),
+                        )?,
+                        event,
+                        general,
+                        wire.ptp_lease()?,
+                    )?,
+                ))
+            })
+            .unwrap();
+        owner.negotiate_timing_peers().unwrap();
+        assert!(owner.prepared.is_none() && owner.stream.is_none());
+        peer_event
+            .send(
+                &ptp::packet::Packet::new(ptp::packet::Kind::DelayReq, 123, 1, vec![0; 10])
+                    .encode()
+                    .unwrap(),
+            )
+            .unwrap();
+        owner.observe(Duration::from_millis(2)).unwrap();
+        let evidence = owner.timing.as_ref().unwrap().evidence();
+        assert!(
+            evidence.sync_sent > 0 && evidence.follow_up_sent > 0 && evidence.announce_sent > 0
+        );
+        assert_eq!(evidence.delay_requests, 1);
+        assert_eq!(evidence.delay_responses_sent, 1);
+        owner.stop().unwrap();
+        assert!(owner.diagnostic().contains("audio bytes: 0"));
+        let _event = UdpSocket::bind(addresses.0).unwrap();
+        let _general = UdpSocket::bind(addresses.1).unwrap();
+        server.join().unwrap();
+        TOKENLESS.with(|mode| mode.set(false));
+    }
+}
+
+#[test]
+fn initial_ptp_offer_preserves_one_signed_clock_identity_and_verified_address() {
+    let uuid = uuid::Uuid::nil();
+    let local = "192.0.2.1".parse().unwrap();
+    for clock in [1, 0x8123456789abcdef, u64::MAX - 1] {
+        let bytes = initial_offer("02:01:02:03:04:05", local, clock, uuid).unwrap();
+        let value = Value::from_reader(std::io::Cursor::new(&*bytes)).unwrap();
+        let root = profile::dictionary(&value).unwrap();
+        let peer = profile::dictionary(&root["timingPeerInfo"]).unwrap();
+        assert_eq!(peer["ClockID"].as_signed_integer().unwrap() as u64, clock);
+        assert_eq!(
+            peer["Addresses"].as_array().unwrap(),
+            &[Value::String(local.to_string())]
+        );
+        assert_eq!(
+            peer["SupportsClockPortMatchingOverride"].as_boolean(),
+            Some(false)
+        );
+        assert_eq!(
+            root["timingPeerList"].as_array().unwrap(),
+            &[root["timingPeerInfo"].clone()]
+        );
+        assert!(!root.contains_key("timingPort") && !root.contains_key("streams"));
+        let now = Instant::now();
+        let mut gm = ptp::Grandmaster::new(clock, 123, now, Duration::from_secs(30)).unwrap();
+        for packet in gm.due(now).unwrap() {
+            assert_eq!(&packet.source[..8], &clock.to_be_bytes());
+        }
+    }
+    for clock in [0, u64::MAX] {
+        assert!(initial_offer("sender", local, clock, uuid).is_err());
+    }
+    assert!(initial_offer("sender", "0.0.0.0".parse().unwrap(), 1, uuid).is_err());
+}

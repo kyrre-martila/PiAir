@@ -1409,3 +1409,96 @@ fn wav_feedback_round_trips_of_15_and_40_ms_do_not_hold_rtp() {
         );
     }
 }
+
+#[test]
+fn stored_hap_ptp_handoff_keeps_encrypted_control_and_rejects_timing_switch() {
+    fn ptp_reply(
+        socket: &mut TcpStream,
+        keys: &mut ControlKeys,
+        r: &Request,
+        value: Option<Value>,
+        _: &str,
+    ) {
+        let mut body = Vec::new();
+        if let Some(value) = value {
+            value.to_writer_binary(&mut body).unwrap();
+        }
+        let mut message = format!("RTSP/1.0 200 OK\r\nCSeq: {}\r\nContent-Type: application/x-apple-binary-plist\r\nContent-Length: {}\r\n\r\n", r.headers["cseq"], body.len()).into_bytes();
+        message.extend_from_slice(&body);
+        socket.write_all(&keys.encrypt(&message).unwrap()).unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, format!("receiver_allowlist=['{HAP_FIXTURE_ID}']")).unwrap();
+    let store = store::Store::new(&config).unwrap();
+    let mut c = credential();
+    c.receiver_id = HAP_FIXTURE_ID.into();
+    store.save(&c).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let observed = stua_snapshot(listener.local_addr().unwrap().port());
+    let selected = Selection::from_receiver(&observed[0], Method::StoredHap).unwrap();
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        diagnostic_auth_mock(true, socket, |mut socket, shared| {
+            let mut keys = ControlKeys::new(shared);
+            keys.swap_directions_for_test();
+            let info = read_message(&mut socket, &mut keys);
+            assert_eq!(info.method, "GET");
+            assert_eq!(info.uri, "/info");
+            assert_eq!(info.headers["cseq"], "3");
+            let body = profile::dict([
+                ("deviceID", Value::String("02:D8:99:C1:83:3F".into())),
+                ("features", profile::uint((1u64 << 40) | (1u64 << 41))),
+                ("statusFlags", profile::uint(0)),
+                (
+                    "supportedFormats",
+                    profile::dict([("bufferStream", profile::uint(1 << 21))]),
+                ),
+            ]);
+            ptp_reply(&mut socket, &mut keys, &info, Some(body), "");
+            let setup = read_message(&mut socket, &mut keys);
+            assert_eq!(setup.method, "SETUP");
+            assert_eq!(setup.headers["cseq"], "4");
+            assert_eq!(
+                plist(&setup).as_dictionary().unwrap()["timingProtocol"].as_string(),
+                Some("PTP")
+            );
+            ptp_reply(
+                &mut socket,
+                &mut keys,
+                &setup,
+                Some(profile::dict([(
+                    "timingProtocol",
+                    Value::String("NTP".into()),
+                )])),
+                "",
+            );
+            let teardown = read_message(&mut socket, &mut keys);
+            assert_eq!(teardown.method, "TEARDOWN");
+            assert_eq!(teardown.headers["cseq"], "5");
+            ptp_reply(&mut socket, &mut keys, &teardown, None, "");
+            assert_eof(&mut socket);
+        });
+    });
+    let mut session = Session::new();
+    let cancel = session.cancel.clone();
+    session
+        .authenticate_ptp_selected(
+            || Wire::connect_hap_operation(&config, &selected, &observed, &c),
+            Some(&c),
+        )
+        .unwrap();
+    let mut ptp = session.into_ptp_foundation().unwrap();
+    assert!(Arc::ptr_eq(&cancel, &ptp.cancel));
+    let error = ptp.setup_authenticated().unwrap_err();
+    assert!(
+        error.to_string().contains("changed timing protocol"),
+        "{error:#}"
+    );
+    assert!(ptp
+        .diagnostic()
+        .contains("initial SETUP RTSP accepted: true"));
+    assert!(ptp.diagnostic().contains("TEARDOWN: acknowledged"));
+    assert!(ptp.diagnostic().contains("audio bytes: 0"));
+    server.join().unwrap();
+}

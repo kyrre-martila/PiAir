@@ -254,11 +254,19 @@ impl Session {
         connect: impl FnOnce() -> Result<Wire>,
         credential: Option<&Credential>,
     ) -> Result<()> {
+        self.start_selected_with_cancel(connect, credential, false)
+    }
+    fn start_selected_with_cancel(
+        &mut self,
+        connect: impl FnOnce() -> Result<Wire>,
+        credential: Option<&Credential>,
+        preserve_cancel: bool,
+    ) -> Result<()> {
         ensure!(
             self.state == State::Disconnected,
             "session already started or failed"
         );
-        if self.record_only {
+        if self.record_only || preserve_cancel {
             ensure!(
                 !self.cancel.load(Ordering::Relaxed),
                 "diagnostic interrupted"
@@ -313,6 +321,39 @@ impl Session {
         })();
         self.finish(result)
     }
+    /// Authenticate once before the consuming PTP handoff, without NTP resources.
+    pub fn authenticate_ptp_selected(
+        &mut self,
+        connect: impl FnOnce() -> Result<Wire>,
+        credential: Option<&Credential>,
+    ) -> Result<()> {
+        let cancel = self.cancel.clone();
+        ensure!(
+            !cancel.load(Ordering::Relaxed),
+            "PTP authentication cancelled"
+        );
+        self.start_selected_with_cancel(
+            || {
+                let mut wire = connect()?;
+                wire.buffered_authorization()?;
+                wire.diagnostic_cancel = Some(cancel);
+                ensure!(
+                    matches!(
+                        wire.method(),
+                        super::compatibility::Method::StoredHap
+                            | super::compatibility::Method::Transient
+                    ),
+                    "PTP diagnostic requires stored HAP or explicit transient authentication"
+                );
+                if wire.method() == super::compatibility::Method::Transient {
+                    wire.buffered_transient()?;
+                }
+                Ok(wire)
+            },
+            credential,
+            true,
+        )
+    }
     pub fn check_control(&mut self) -> Result<()> {
         let result = (|| {
             ensure!(
@@ -346,7 +387,6 @@ impl Session {
     /// Explicit ownership handoff for future PTP WAV negotiation. It sends no
     /// SETUP or audio. The existing NTP WAV entry points never call this method.
     /// Consuming self prevents concurrent NTP/PTP owners of cipher/CSeq state.
-    #[allow(dead_code)] // PR #58 selects this only after authenticated capability validation.
     pub(super) fn into_ptp_foundation(mut self) -> Result<super::lifecycle::Session> {
         self.check_ptp_handoff()?;
         let wire = self
@@ -1369,6 +1409,16 @@ mod ptp_handoff_tests {
         assert!(ptp.setup_authenticated().is_err());
         assert_eq!(ptp.state(), super::super::lifecycle::State::Failed);
         assert_eq!(receiver.read(&mut [0; 1]).unwrap(), 0);
+    }
+    #[test]
+    fn ptp_authentication_preserves_preexisting_cancellation_without_dialing() {
+        let mut session = Session::new();
+        session.cancel.store(true, Ordering::Relaxed);
+        assert!(session
+            .authenticate_ptp_selected(|| panic!("cancelled session cannot dial"), None)
+            .is_err());
+        assert!(session.cancel.load(Ordering::Relaxed));
+        assert_eq!(session.packets_sent, 0);
     }
     #[test]
     fn handoff_rejects_started_ntp_diagnostics_terminal_and_cancelled_owners() {

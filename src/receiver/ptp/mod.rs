@@ -198,7 +198,7 @@ impl Grandmaster {
         self.last_tick = now;
         ensure!(
             self.state != State::Lost,
-            "PTP synchronization lost; recreate session clock"
+            "PTP timing evidence expired; recreate session clock"
         );
         if self.state == State::Initializing {
             self.state = State::Synchronizing;
@@ -390,6 +390,16 @@ impl Drop for Grandmaster {
     }
 }
 
+/// Successful socket sends and validated pinned-peer receives, never servo evidence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Evidence {
+    pub sync_sent: u64,
+    pub follow_up_sent: u64,
+    pub announce_sent: u64,
+    pub delay_requests: u64,
+    pub delay_responses_sent: u64,
+    pub general_received: u64,
+}
 /// No socket creation: Wire supplies connected event/general sockets for the
 /// selected authenticated receiver (UDP 319/320). Dropping releases both sockets.
 /// Poll on the session thread; no worker/service survives the session owner.
@@ -399,6 +409,7 @@ pub struct Service {
     general: Option<UdpSocket>,
     lease: super::wire::PtpLease,
     diagnostics: Diagnostics,
+    evidence: Evidence,
 }
 // Separate lifetime budgets: rejected floods cannot hide successful exchanges.
 // No packet contents, clock identities, addresses or control-session data.
@@ -451,6 +462,7 @@ impl Service {
             general: Some(general),
             lease,
             diagnostics: Diagnostics::default(),
+            evidence: Evidence::default(),
         })
     }
     fn check_authorization(&mut self) -> Result<()> {
@@ -470,6 +482,13 @@ impl Service {
         };
         let socket = socket.as_ref().context("PTP socket closed")?;
         ensure!(socket.send(&b)? == b.len(), "partial PTP datagram");
+        match p.kind {
+            Kind::Sync => self.evidence.sync_sent += 1,
+            Kind::FollowUp => self.evidence.follow_up_sent += 1,
+            Kind::Announce => self.evidence.announce_sent += 1,
+            Kind::DelayResp | Kind::PdelayResp => self.evidence.delay_responses_sent += 1,
+            _ => (),
+        }
         Ok(())
     }
     pub fn poll(&mut self, cancel: &AtomicBool) -> Result<()> {
@@ -510,6 +529,7 @@ impl Service {
                     match self.clock.receive(&b[..n], Instant::now()) {
                         Err(reason) => self.diagnostics.reject("event", &b[..n], &reason),
                         Ok(responses) => {
+                            self.evidence.delay_requests += 1;
                             for p in responses {
                                 self.send(&p)?;
                                 if p.kind == Kind::DelayResp {
@@ -551,6 +571,8 @@ impl Service {
                     self.check_authorization()?;
                     if let Err(reason) = self.clock.receive_general(&bytes[..n]) {
                         self.diagnostics.reject("general", &bytes[..n], &reason);
+                    } else {
+                        self.evidence.general_received += 1;
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -564,6 +586,9 @@ impl Service {
         self.clock.shutdown();
         self.event.take();
         self.general.take();
+    }
+    pub fn evidence(&self) -> Evidence {
+        self.evidence
     }
     pub(super) fn peer(&self) -> std::net::IpAddr {
         self.lease.peer()

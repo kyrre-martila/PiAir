@@ -1109,14 +1109,18 @@ fn connected_udp_rejects_unsolicited_source_and_authenticated_clock_mismatch() {
     attacker.send_to(&valid, destination).unwrap();
     service.poll(&AtomicBool::new(false)).unwrap();
     assert!(service.clock.last_peer.is_none());
+    assert_eq!(service.evidence().delay_requests, 0);
     let mut wrong = request(Kind::DelayReq, 2);
     wrong.source[0] ^= 1;
     peer_event.send(&wrong.encode().unwrap()).unwrap();
     service.poll(&AtomicBool::new(false)).unwrap();
     assert!(service.clock.last_peer.is_none());
+    assert_eq!(service.evidence().delay_requests, 0);
     peer_event.send(&valid).unwrap();
     service.poll(&AtomicBool::new(false)).unwrap();
     assert!(service.clock.last_peer.is_some());
+    assert_eq!(service.evidence().delay_requests, 1);
+    assert_eq!(service.evidence().delay_responses_sent, 1);
     assert!(!service.clock.media_permitted());
 }
 

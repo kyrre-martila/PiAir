@@ -104,6 +104,16 @@ pub enum Command {
         #[arg(long, requires = "setup_check", value_enum)]
         setup_profile: Option<crate::receiver::SetupProfile>,
     },
+    /// Authenticate the selected receiver and negotiate PTP only; zero audio bytes.
+    PtpNegotiationCheck {
+        receiver_id: String,
+        /// Explicit OwnTone transient authentication; default requires stored HAP.
+        #[arg(long)]
+        experimental_owntone_transient: bool,
+        /// Bounded timing observation after RECORD and SETPEERS.
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(5..=20))]
+        observation_seconds: u64,
+    },
     /// Buffered PTP foundation diagnostic; live audio remains blocked pending clock-adoption evidence.
     BufferedTest {
         receiver_id: String,
@@ -611,5 +621,43 @@ mod wav_arguments {
                 .validate()
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod ptp_arguments {
+    use super::*;
+    #[test]
+    fn explicit_ptp_is_bounded_selected_and_audio_free() {
+        let base = ["piair", "ptp-negotiation-check", "device:112233445566"];
+        assert!(matches!(
+            Cli::try_parse_from(base).unwrap().command,
+            Command::PtpNegotiationCheck {
+                observation_seconds: 10,
+                experimental_owntone_transient: false,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["piair", "ptp-negotiation-check"]).is_err());
+        for seconds in ["5", "10", "20"] {
+            assert!(Cli::try_parse_from(
+                base.into_iter().chain(["--observation-seconds", seconds])
+            )
+            .is_ok());
+        }
+        for seconds in ["0", "1", "21"] {
+            assert!(Cli::try_parse_from(
+                base.into_iter().chain(["--observation-seconds", seconds])
+            )
+            .is_err());
+        }
+        for flag in [
+            "--audio-file",
+            "--volume-db",
+            "--playback-check",
+            "--confirm-audio",
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain([flag])).is_err());
+        }
     }
 }
