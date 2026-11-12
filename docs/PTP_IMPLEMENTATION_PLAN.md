@@ -13,7 +13,8 @@ reader, so file I/O never blocks the PTP worker.
 
 The proven PR 62 session remains the sole authenticated owner. Startup is:
 
-1. Verify stored HAP on the selected connection and transfer that Wire once.
+1. Authenticate on the selected connection using stored HAP, or explicitly
+   selected OwnTone-reference transient SRP, and transfer that Wire once.
 2. Authenticated `/info`, initial PTP SETUP, RECORD, SETPEERS, type96 stream SETUP.
 3. Validate session binding, negotiated ephemeral UDP ports and stream profile.
 4. Wait at most five seconds for healthy local timing and live authorized peer
@@ -150,3 +151,55 @@ result, output route and any dropouts. Repeat with Ctrl+C, receiver disconnect
 and timing loss to check prompt failure and local socket release. Re-run the
 existing NTP HomePod WAV command unchanged as the hardware regression. Packet
 captures may supplement failures, but cannot replace the listening result.
+
+
+## Explicit HomePod transient test (PR 64)
+
+`ptp-wav-playback --experimental-owntone-transient` requires the exact approved
+receiver to be selected with `--method transient`. Without the flag, the command
+requires a persistent selection and existing stored HAP credentials. A persistent
+selection combined with the flag, or a transient selection without the flag,
+fails locally. There is no automatic fallback or receiver switching.
+
+The flag reuses `stream-test`'s `wav_authentication` policy and session SRP
+implementation, including the OwnTone-reference RTSP `/info` preamble. The same
+connection then supplies authenticated capabilities and negotiates initial PTP
+SETUP, RECORD, SETPEERS and realtime type-96 UDP SETUP. Discovery advertisements
+are only a prerequisite: authenticated capability checks and actual negotiation
+must pass. Rejection fails with a stage-specific diagnostic and bounded cleanup;
+an established session attempts authenticated TEARDOWN while the control channel
+is usable. An RTSP rejection or disconnect can invalidate that channel, so remote
+expiry remains unconfirmed and local resources are released. Failed authentication
+closes the connection without attempting an unauthenticated TEARDOWN.
+
+Transient authentication does not verify a persistent receiver identity and saves
+no pairing credentials. Approval, exact selection, fresh discovery validation,
+interactive consent, and ongoing authorization checks still apply. ALAC, RTP,
+media encryption, PTP, pacing, latency, UDP and feedback are unchanged.
+
+Deploy on the Raspberry Pi:
+
+```sh
+cd ~/PiAir
+git pull
+cargo build --release
+
+./target/release/piair select device:0a05559f132f --method transient
+
+./target/release/piair -v ptp-wav-playback device:0a05559f132f \
+  --experimental-owntone-transient \
+  --audio-file tests/assets/audio/Pachelbel_Canon_audio_test.wav \
+  --seconds 15 \
+  --volume-db -20
+```
+
+Confirm the interactive prompt. The receiver must already be approved. Explicit
+volume changes can persist. This deployment sequence assumes the PR has been
+merged into the Pi's current branch.
+
+HomePod Stua advertised PTP and ALAC; that does not establish realtime type-96
+compatibility or audibility. Its earlier audible transient NTP stream stopped
+with `receiver NTP timing stalled` after roughly four seconds. The NTP timeout
+logic is unchanged here. Apple TV Stua accepted authenticated PTP type-96 UDP,
+but audible playback remains unconfirmed. Automated tests verify local protocol
+and cleanup behavior; physical HomePod playback must be confirmed separately.

@@ -476,3 +476,10 @@ precise 48 kHz anchors and authenticated timing-control requests. Complete buffe
 playback remains disabled pending receiver clock-adoption evidence and media
 lifecycle integration; staged control diagnostics are mock-tested only;
 no buffered hardware playback is claimed.
+
+
+For explicitly selected HomePod transient PTP WAV playback, use
+`ptp-wav-playback --experimental-owntone-transient` after
+`select device:0a05559f132f --method transient`. The default still requires stored
+HAP credentials; no fallback occurs. See the [15-second Raspberry Pi test and
+authentication limitations](docs/PTP_IMPLEMENTATION_PLAN.md#explicit-homepod-transient-test-pr-64).

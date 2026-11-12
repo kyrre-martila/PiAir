@@ -1986,7 +1986,7 @@ fn complete_realtime_ptp_negotiation_owns_udp_key_and_bounded_cleanup() {
 
 #[test]
 fn realtime_stream_rejection_and_disconnect_destroy_prepared_resources() {
-    for fault in 0..5 {
+    for fault in 0..6 {
         let (mut owner, _approval, server) = fixture(move |mut socket| {
             let mut keys = server_keys();
             for (seq, method, response) in [
@@ -2000,6 +2000,14 @@ fn realtime_stream_rejection_and_disconnect_destroy_prepared_resources() {
             }
             let (header, body) = read_request(&mut socket, &mut keys);
             assert!(header.starts_with("SETUP "));
+            if fault == 5 {
+                let response = b"RTSP/1.0 461 Unsupported Transport\r\nCSeq: 5\r\nSession: test-session\r\nContent-Length: 0\r\n\r\n";
+                socket.write_all(&keys.encrypt(response).unwrap()).unwrap();
+                // A rejected RTSP exchange invalidates the control wire. Cleanup
+                // must close it rather than write TEARDOWN on a failed channel.
+                assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+                return;
+            }
             if fault == 4 {
                 return;
             } // actual TCP disconnect during stream SETUP

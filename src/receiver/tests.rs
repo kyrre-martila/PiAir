@@ -2881,6 +2881,13 @@ fn buffered_files(dir: &tempfile::TempDir) -> std::collections::BTreeMap<String,
 }
 #[test]
 fn buffered_transient_reuses_rtsp_srp_and_enters_encrypted_negotiation() {
+    transient_reuses_rtsp_srp_and_enters_encrypted_negotiation(false);
+}
+#[test]
+fn ptp_transient_reuses_stream_test_srp_before_authenticated_capability_rejection() {
+    transient_reuses_rtsp_srp_and_enters_encrypted_negotiation(true);
+}
+fn transient_reuses_rtsp_srp_and_enters_encrypted_negotiation(ptp: bool) {
     let (mut wire, server) = local_mock_method(Method::Transient, |mut socket| {
         owntone_info(&mut socket, 200, &info_body(0));
         setup_mock_transport(
@@ -2914,15 +2921,37 @@ fn buffered_transient_reuses_rtsp_srp_and_enters_encrypted_negotiation() {
     });
     let dir = buffered_transient_fixture(&mut wire);
     let before = buffered_files(&dir);
-    let mut owner = lifecycle::Session::new();
-    let error = format!("{:#}", owner.start(|| Ok(wire), None).unwrap_err());
+    let (error, state) = if ptp {
+        let mut authenticated = session::Session::new();
+        authenticated
+            .authenticate_ptp_selected(|| Ok(wire), None)
+            .unwrap();
+        let mut owner = authenticated.into_ptp_foundation().unwrap();
+        (
+            format!("{:#}", owner.setup_realtime_authenticated().unwrap_err()),
+            owner.state(),
+        )
+    } else {
+        let mut owner = lifecycle::Session::new();
+        (
+            format!("{:#}", owner.start(|| Ok(wire), None).unwrap_err()),
+            owner.state(),
+        )
+    };
     assert!(error.contains("403"), "{error}");
-    assert_eq!(owner.state(), lifecycle::State::Failed);
+    assert_eq!(state, lifecycle::State::Failed);
     assert_eq!(before, buffered_files(&dir));
     server.join().unwrap();
 }
 #[test]
 fn buffered_transient_authentication_failures_close_without_fallback_or_writes() {
+    transient_authentication_failures_close_without_fallback_or_writes(false);
+}
+#[test]
+fn ptp_transient_authentication_failures_close_without_fallback_or_writes() {
+    transient_authentication_failures_close_without_fallback_or_writes(true);
+}
+fn transient_authentication_failures_close_without_fallback_or_writes(ptp: bool) {
     for fault in [
         "info403",
         "m1-403",
@@ -2979,13 +3008,24 @@ fn buffered_transient_authentication_failures_close_without_fallback_or_writes()
             store.select(&selection).unwrap();
         }
         let before = buffered_files(&dir);
-        let mut owner = lifecycle::Session::new();
-        assert!(owner.start(|| Ok(wire), None).is_err(), "{fault}");
-        assert_eq!(owner.state(), lifecycle::State::Failed);
+        if ptp {
+            let mut owner = session::Session::new();
+            assert!(
+                owner.authenticate_ptp_selected(|| Ok(wire), None).is_err(),
+                "{fault}"
+            );
+            assert_eq!(owner.state(), session::State::Failed);
+            assert_eq!(owner.packets_sent, 0);
+            assert!(owner.into_ptp_foundation().is_err());
+        } else {
+            let mut owner = lifecycle::Session::new();
+            assert!(owner.start(|| Ok(wire), None).is_err(), "{fault}");
+            assert_eq!(owner.state(), lifecycle::State::Failed);
+            assert!(owner
+                .start(|| panic!("failed owner must not reconnect"), None)
+                .is_err());
+        }
         assert_eq!(before, buffered_files(&dir), "{fault}");
-        assert!(owner
-            .start(|| panic!("failed owner must not reconnect"), None)
-            .is_err());
         server.join().unwrap();
     }
 }
@@ -3174,4 +3214,39 @@ fn stored_hap_proof_requires_completed_pair_verify_and_live_control() {
         assert!(wire.stored_hap_verification().is_none());
         server.join().unwrap();
     }
+}
+
+#[test]
+fn ptp_transient_opt_in_needs_selection_but_never_hap_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let store = store::Store::new(&path).unwrap();
+    let mut selected = selection(7000);
+    selected.method = Method::Transient;
+    selected.capabilities.features |= (1 << 9) | (1 << 19) | (1 << 41) | (1 << 48);
+    selected.capabilities.flags = Some(0);
+    store.select(&selected).unwrap();
+    let selection_path = dir.path().join("receiver-state/selected.toml");
+    let before = std::fs::read(&selection_path).unwrap();
+    let selected = store.selection().unwrap().unwrap();
+    assert!(store.credential(&selected.id).unwrap().is_none());
+    let (operation, credential) = wav_authentication(&store, &selected, true).unwrap();
+    assert_eq!(operation.method, Method::Transient);
+    assert!(credential.is_none());
+    assert!(wav_authentication(&store, &selected, false)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("--experimental-owntone-transient"));
+    for method in [Method::PinDisplay, Method::SetupCode, Method::StoredHap] {
+        let mut conflicting = selected.clone();
+        conflicting.method = method;
+        assert!(wav_authentication(&store, &conflicting, true)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("requires explicit transient selection"));
+    }
+    assert_eq!(std::fs::read(selection_path).unwrap(), before);
+    assert!(store.credential(&selected.id).unwrap().is_none());
 }
