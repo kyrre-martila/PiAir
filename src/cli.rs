@@ -130,6 +130,19 @@ pub enum Command {
         #[arg(long)]
         experimental_owntone_transient: bool,
     },
+    /// Experimental live ALSA playback on the explicitly selected PTP receiver.
+    ExperimentalPtpCapture {
+        receiver_id: String,
+        #[arg(long)]
+        capture_device: String,
+        /// Omitted: run until Ctrl+C.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=86400))]
+        seconds: Option<u32>,
+        #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i32).range(-60..=-10))]
+        volume_db: Option<i32>,
+        #[arg(long)]
+        experimental_owntone_transient: bool,
+    },
     /// Buffered PTP foundation diagnostic; live audio remains blocked pending clock-adoption evidence.
     BufferedTest {
         receiver_id: String,
@@ -756,5 +769,47 @@ mod ptp_transient_arguments {
                 _ => panic!("expected PTP playback"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod live_arguments {
+    use super::*;
+    #[test]
+    fn live_requires_explicit_device_receiver_and_valid_bounds() {
+        let base = [
+            "piair",
+            "experimental-ptp-capture",
+            "device:112233445566",
+            "--capture-device",
+            "plughw:CARD=USB,DEV=0",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(base).unwrap().command,
+            Command::ExperimentalPtpCapture {
+                seconds: None,
+                volume_db: None,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(base.into_iter().chain([
+            "--seconds",
+            "15",
+            "--volume-db",
+            "-20"
+        ]))
+        .is_ok());
+        for extra in [
+            ["--seconds", "0"],
+            ["--seconds", "86401"],
+            ["--volume-db", "-9"],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
+        }
+        assert!(Cli::try_parse_from(["piair", "experimental-ptp-capture"]).is_err());
+        assert!(
+            Cli::try_parse_from(["piair", "experimental-ptp-capture", "device:112233445566"])
+                .is_err()
+        );
     }
 }

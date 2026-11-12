@@ -488,3 +488,80 @@ Linux/Raspberry Pi PTP playback binds privileged UDP 319/320. After each release
 build or deployment, follow [PTP port permissions](docs/PTP_PORT_PERMISSIONS.md)
 to grant only `CAP_NET_BIND_SERVICE` to the executable and keep running as your
 normal user.
+
+### Experimental live USB input over PTP
+
+This command uses the same authenticated type-96 ALAC16 stereo 44100 Hz sender
+as `ptp-wav-playback`. It requires the existing explicit allowlist, selection,
+authentication method and terminal confirmation. No receiver is selected automatically.
+It does not require root; retain the existing CAP_NET_BIND_SERVICE setup for
+PTP UDP 319/320. Explicit receiver volume changes may persist after shutdown.
+
+Discover the capture card ID (do not copy a numeric card index):
+
+```sh
+arecord -l
+arecord -L
+piair audio devices
+# Substitute the USB card ID printed above, e.g. CODEC, for <USB_ID>.
+arecord -D 'plughw:CARD=<USB_ID>,DEV=0' -f S16_LE -r 44100 -c 2 -d 5 /tmp/usb-test.wav
+```
+
+With your already approved and selected receiver ID:
+
+```sh
+piair experimental-ptp-capture '<receiver-id>' --capture-device 'plughw:CARD=<USB_ID>,DEV=0' --seconds 15 --volume-db -20
+piair experimental-ptp-capture '<receiver-id>' --capture-device 'plughw:CARD=<USB_ID>,DEV=0'
+```
+
+For an explicitly selected transient receiver, append
+`--experimental-owntone-transient`, as with PTP WAV playback. Otherwise stored HAP
+credentials are required. Omit `--seconds` to run until Ctrl+C. Omit `--volume-db`
+to preserve receiver volume. Confirm the selected receiver at the terminal prompt.
+Expected diagnostics include:
+
+```text
+Live capture: 44100 Hz S16 stereo; startup=96 ms; queue capacity=192 ms; underrun=silence; overflow=drop oldest
+Live capture stopped: dropped_frames=0 silence_frames=0 recoveries=0; ALSA released
+PTP operation: ...
+```
+
+The counters vary with scheduling and clock drift. Capture runs on a dedicated
+nonblocking ALSA thread; the sender never waits for capture samples. Partial reads
+preserve stereo order. ALSA's plug layer converts native USB PCM format and rate
+to signed 16-bit stereo at exactly 44100 Hz. If direct `hw:` negotiation fails,
+PiAir retries the same device through `plughw:`; custom PCM aliases can supply a
+plug layer in ALSA configuration. Actual client rate, channels, format, period
+and buffer are reported. Period/buffer tuning is optional; periods need not
+match RTP packets and buffers larger than one second are accepted.
+Startup queues twelve 352-frame packets (~96 ms); the queue
+holds at most twenty-four (~192 ms). Overflow drops oldest frames, keeping recent
+audio instead of accumulating latency. Empty queue slots become silence; RTP
+sample timestamps and periodic PTP synchronization continue on the same clock.
+XRUN/suspend recovery re-prepares ALSA, discards the old capture queue and does
+not restart that clock. Temporary missing input becomes silence without an
+arbitrary runtime gap timeout; explicit device errors terminate playback and
+invoke the existing bounded teardown. Startup waits up to ten seconds for prefill,
+while continuing PTP, authorization, feedback and cancellation checks. Capture
+readiness waits are bounded to 20 ms, and workers join before TEARDOWN.
+There is no silence detection. Clock drift can occasionally cause drops or silence.
+
+Indefinite live sessions have no media-duration limit. Their retransmission
+allowance renews every two seconds; bounded work, three retries per cached packet,
+nonce exhaustion checks and receiver authorization remain enforced. Live sender
+scheduling tolerates up to 1.5 seconds of catch-up (below the existing two-second
+playback lead); WAV retains its original 100 ms policy. PTP liveness expiry,
+network failures and unrecoverable capture errors still stop a live session.
+See [live capture compatibility and validation](docs/LIVE_CAPTURE.md) for the
+OwnTone source comparison, technical reasons for retained limits, and tests.
+
+If opening fails, check `arecord -l`, capture permissions and other programs using
+the card. Use `plughw:` for sample-rate/format mismatch. For missing audio, first
+verify the short arecord recording and the UCA202 input connections; enable the
+turntable's built-in phono preamp and confirm receiver volume. Successful packet
+transmission alone does not prove sound. AirPlay receiver buffering adds latency
+beyond the capture queue. Rising `silence_frames` indicates capture starvation;
+rising `dropped_frames` indicates scheduling delays or capture/playback clock drift.
+Check CPU load, USB power and network quality on the Pi before changing buffers.
+Physical UCA202/Pi 3B capture, unplug recovery, sustained clock drift, Ctrl+C and
+HomePod audibility require hardware validation and cannot be established in CI.

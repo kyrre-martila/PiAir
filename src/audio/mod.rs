@@ -5,6 +5,7 @@ pub(crate) mod alac;
 mod calibration;
 mod capture;
 pub mod detector;
+pub(crate) mod live;
 
 use crate::{cli::AudioCommand, config::Loaded};
 use anyhow::{bail, Result};
