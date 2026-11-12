@@ -1233,6 +1233,12 @@ pub(super) struct PtpLease {
 }
 impl PtpLease {
     pub(super) fn check(&self) -> Result<()> {
+        let selected = match &self.authorization {
+            Authorization::Persisted(selected) | Authorization::HapOperation { selected, .. } => {
+                selected
+            }
+        };
+        ensure!(selected.id == self.id, "PTP receiver identity changed");
         self.authorization.check(&self.path, &self.id)
     }
     pub(super) fn peer(&self) -> IpAddr {
@@ -2319,5 +2325,57 @@ mod timing_interface_tests {
                 validate_timing_interface(local.parse().unwrap(), peer.parse().unwrap()).is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ptp_lease_offline_tests {
+    use super::*;
+    #[test]
+    fn receiver_bound_lease_rechecks_revocation_and_selection_without_sockets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let id = "device:112233445566";
+        std::fs::write(
+            &path,
+            format!("receiver_allowlist=['{id}', 'device:aabbccddeeff']"),
+        )
+        .unwrap();
+        let selected = Selection {
+            id: id.into(),
+            advertised_pi: None,
+            method: Method::Transient,
+            addresses: ["192.0.2.10".parse().unwrap()].into_iter().collect(),
+            port: 7000,
+            capabilities: super::super::compatibility::Capabilities {
+                features: (1 << 40) | (1 << 41) | (1 << 48),
+                flags: Some(0),
+                password: None,
+                access_control: None,
+                access_control_type: None,
+                protocol_version: None,
+            },
+        };
+        let store = super::super::store::Store::new(&path).unwrap();
+        store.select(&selected).unwrap();
+        let mut lease = PtpLease {
+            path: path.clone(),
+            authorization: Authorization::Persisted(selected.clone()),
+            id: id.into(),
+            peer: "192.0.2.10".parse().unwrap(),
+        };
+        lease.check().unwrap();
+        // An allowed second receiver still cannot reuse the first receiver's pin.
+        lease.id = "device:aabbccddeeff".into();
+        assert!(lease.check().is_err());
+        lease.id = id.into();
+        let mut changed = selected.clone();
+        changed.port = 7001;
+        store.select(&changed).unwrap();
+        assert!(lease.check().is_err());
+        store.select(&selected).unwrap();
+        lease.check().unwrap();
+        std::fs::write(&path, "receiver_allowlist=[]").unwrap();
+        assert!(lease.check().is_err());
     }
 }

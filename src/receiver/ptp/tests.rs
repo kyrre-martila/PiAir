@@ -1393,3 +1393,71 @@ fn inbound_sync_and_different_timeline_follow_up_never_refresh_liveness() {
         .is_err());
     assert_eq!(clock.state(), State::Lost);
 }
+
+#[test]
+fn session_timing_cancellation_revocation_and_control_failure_release_resources() {
+    use super::session::{Phase, TimingSession};
+    for failure in 0..3 {
+        let fixture = authorized_ptp_fixture();
+        let (event, _peer_event) = udp_pair();
+        let (general, _peer_general) = udp_pair();
+        let addresses = (event.local_addr().unwrap(), general.local_addr().unwrap());
+        let service = Service::attach(
+            fixture_clock(),
+            event,
+            general,
+            fixture.wire.ptp_lease().unwrap(),
+        )
+        .unwrap();
+        let mut owner = TimingSession::attach(service);
+        assert_eq!(owner.phase(), Phase::Observing);
+        let cancel = AtomicBool::new(failure == 0);
+        if failure == 1 {
+            fixture.revoke();
+        }
+        let result = if failure == 2 {
+            owner.during_control(&cancel, || -> Result<()> {
+                anyhow::bail!("control rejected")
+            })
+        } else {
+            owner.during_control(&cancel, || -> Result<()> {
+                panic!("invalid session cannot issue control")
+            })
+        };
+        assert!(result.is_err());
+        assert_eq!(owner.phase(), Phase::Failed);
+        assert_eq!(owner.state(), State::Shutdown);
+        assert!(owner.poll(&AtomicBool::new(false)).is_err());
+        owner.shutdown();
+        assert_eq!(owner.phase(), Phase::Failed);
+        let _event = UdpSocket::bind(addresses.0).unwrap();
+        let _general = UdpSocket::bind(addresses.1).unwrap();
+    }
+}
+
+#[test]
+fn session_timing_drop_and_repeated_shutdown_close_both_sockets() {
+    use super::session::{Phase, TimingSession};
+    for explicit in [false, true] {
+        let fixture = authorized_ptp_fixture();
+        let (event, _peer_event) = udp_pair();
+        let (general, _peer_general) = udp_pair();
+        let addresses = (event.local_addr().unwrap(), general.local_addr().unwrap());
+        let service = Service::attach(
+            fixture_clock(),
+            event,
+            general,
+            fixture.wire.ptp_lease().unwrap(),
+        )
+        .unwrap();
+        let mut owner = TimingSession::attach(service);
+        if explicit {
+            owner.shutdown();
+            owner.shutdown();
+            assert_eq!(owner.phase(), Phase::Closed);
+        }
+        drop(owner);
+        let _event = UdpSocket::bind(addresses.0).unwrap();
+        let _general = UdpSocket::bind(addresses.1).unwrap();
+    }
+}

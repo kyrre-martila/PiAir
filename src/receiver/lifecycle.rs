@@ -80,7 +80,7 @@ pub struct Session {
     final_ptp: Option<ptp::State>,
     teardown: &'static str,
     control: Option<Wire>,
-    timing: Option<ptp::Service>,
+    timing: Option<ptp::session::TimingSession>,
     events: Option<Worker>,
     uri: String,
     token: Option<String>,
@@ -136,7 +136,7 @@ impl Session {
         let ptp = self
             .timing
             .as_ref()
-            .map(ptp::Service::state)
+            .map(ptp::session::TimingSession::state)
             .or(self.final_ptp);
         format!("session: {:?}; last accepted: {}; attempted: {}; PTP snapshot: {ptp:?}; receiver clock adoption: unverified; TEARDOWN: {}; audio bytes: 0",
             self.state(), self.last_accepted, self.attempted, self.teardown)
@@ -196,6 +196,38 @@ impl Session {
         })();
         self.finish(result)
     }
+    /// Transfer the already authenticated control channel from the WAV session
+    /// foundation. No authentication retry, socket redial or NTP fallback occurs.
+    pub(super) fn from_authenticated(wire: Wire, cancel: Arc<AtomicBool>) -> Result<Self> {
+        let mut owner = Self::new();
+        owner.cancel = cancel;
+        let mut wire = wire;
+        wire.diagnostic_cancel = Some(owner.cancel.clone());
+        owner.control = Some(wire);
+        owner.state.advance(State::Authentication)?;
+        let result = (|| {
+            owner.check()?;
+            owner
+                .control
+                .as_ref()
+                .context("control absent")?
+                .buffered_authorization()?;
+            owner.state.advance(State::Negotiation)
+        })();
+        owner.finish(result)?;
+        Ok(owner)
+    }
+    /// Initial PTP SETUP only. The transferred owner is deliberately inert until
+    /// this explicit call; normal WAV negotiation never enters it automatically.
+    #[allow(dead_code)] // PR #58 explicit PTP negotiation entry; never selected by NTP.
+    pub fn setup_authenticated(&mut self) -> Result<()> {
+        ensure!(
+            self.state == State::Negotiation && !self.attempted_setup,
+            "PTP setup already used or unavailable"
+        );
+        let result = self.negotiate();
+        self.finish(result)
+    }
     fn call(
         &mut self,
         method: &str,
@@ -232,28 +264,15 @@ impl Session {
         // control I/O. Join before interpreting the response or advancing state.
         let wire = self.control.as_mut().context("control absent")?;
         let uri = path.unwrap_or(&self.uri);
-        let done = AtomicBool::new(false);
-        let reply = std::thread::scope(|scope| -> Result<_> {
-            let worker = self.timing.as_mut().map(|timing| {
-                let done = &done;
-                let cancel = &self.cancel;
-                scope.spawn(move || -> Result<()> {
-                    while !done.load(Ordering::Acquire) {
-                        timing.poll(cancel)?;
-                        std::thread::park_timeout(Duration::from_millis(2));
-                    }
-                    timing.poll(cancel)
-                })
-            });
-            let response = wire.request(method, uri, &headers, body);
-            done.store(true, Ordering::Release);
-            if let Some(worker) = worker {
-                worker
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("timing worker panicked"))??;
+        let reply = if let Some(timing) = self.timing.as_mut() {
+            if method == "TEARDOWN" {
+                timing.during_cleanup(&self.cancel, || wire.request(method, uri, &headers, body))
+            } else {
+                timing.during_control(&self.cancel, || wire.request(method, uri, &headers, body))
             }
-            response
-        })?;
+        } else {
+            wire.request(method, uri, &headers, body)
+        }?;
         // Only initial SETUP may establish a token. Omission later keeps the
         // original binding; a tokenless session cannot acquire a token late.
         // Timing state separately proves semantic SETUP/resource validation.
@@ -332,7 +351,7 @@ impl Session {
         let wire = self.control.as_mut().context("control absent")?;
         let (events, timing) = resources(wire, setup, self.clock_id)?;
         self.events = events;
-        self.timing = Some(timing);
+        self.timing = Some(ptp::session::TimingSession::attach(timing));
         self.state.advance(State::Timing)
     }
     /// All stages require a separately confirmed CLI opt-in. Never opens a media
@@ -390,28 +409,18 @@ impl Session {
             return Ok(());
         }
         let now = Instant::now();
-        let clock = self.timing.as_mut().context("timing absent")?.clock_mut();
-        clock.check(now, false)?;
-        let origin = clock.network_time(now + Duration::from_secs(1))?;
-        let mapping = ptp::time::SampleTimeline::new(self.clock_id, clock.generation(), origin, 0)?;
-        // A paused anchor tests acceptance without activating a decode timeline.
-        let anchor = ptp::control::AnchorRequest::generate(
-            clock,
-            &mapping,
-            0,
-            ptp::control::Rate::Pause,
-            now,
-        )?;
+        let anchor = self
+            .timing
+            .as_mut()
+            .context("timing absent")?
+            .paused_anchor(0, now)?;
         let body = anchor.encode()?;
         let reply = self.call("SETRATEANCHORTIME", None, &body)?;
         ptp::control::validate_reply(&reply, Some(&profile::parse(&body)?))?;
-        let clock = self.timing.as_mut().context("timing absent")?.clock_mut();
-        clock.check(Instant::now(), false)?;
-        ensure!(
-            clock.state() == ptp::State::PeerObserved,
-            "timing lost during anchor request"
-        );
-        anchor.validate(clock, Instant::now())?;
+        self.timing
+            .as_mut()
+            .context("timing absent")?
+            .validate_anchor(&anchor, Instant::now())?;
         self.last_accepted = "paused anchor";
         self.anchor_accepted = true;
         self.stage = Some(Stage::Anchor);
