@@ -90,6 +90,7 @@ pub struct Session {
     attempted_setup: bool,
     setup_rtsp_accepted: bool,
     observed: bool,
+    observation_complete: bool,
     stage: Option<Stage>,
     prepared: Option<Prepared>,
     stream: Option<NegotiatedStream>,
@@ -122,6 +123,7 @@ impl Session {
             attempted_setup: false,
             setup_rtsp_accepted: false,
             observed: false,
+            observation_complete: false,
             stage: None,
             prepared: None,
             stream: None,
@@ -147,7 +149,21 @@ impl Session {
             .as_ref()
             .map(|s| s.evidence())
             .unwrap_or(self.final_evidence);
-        format!("initial SETUP RTSP accepted: {}; packet evidence: {evidence:?}; media readiness: blocked; session: {:?}; last accepted: {}; attempted: {}; PTP snapshot: {ptp:?}; receiver clock adoption: unverified; TEARDOWN: {}; audio bytes: 0",
+        let peer_live = ptp == Some(ptp::State::PeerObserved);
+        let observation = if self.observation_complete {
+            "completed"
+        } else {
+            "incomplete"
+        };
+        let local_cleanup = if matches!(self.state, State::Closed | State::Failed)
+            && self.timing.is_none()
+            && self.control.is_none()
+        {
+            "released"
+        } else {
+            "pending"
+        };
+        format!("local cleanup: {local_cleanup}; negotiation observation: {observation}; peer liveness at snapshot: {peer_live}; synchronization: unverified; initial SETUP RTSP accepted: {}; packet evidence: {evidence:?}; media readiness: blocked; session: {:?}; last accepted: {}; attempted: {}; PTP snapshot: {ptp:?}; receiver clock adoption: unverified; TEARDOWN: {}; audio bytes: 0",
             self.setup_rtsp_accepted, self.state(), self.last_accepted, self.attempted, self.teardown)
     }
     fn check(&self) -> Result<()> {
@@ -475,6 +491,7 @@ impl Session {
                 }
                 std::thread::park_timeout(Duration::from_millis(2));
             }
+            self.observation_complete = true;
             Ok(self.timing.as_ref().context("timing absent")?.state())
         })();
         match result {

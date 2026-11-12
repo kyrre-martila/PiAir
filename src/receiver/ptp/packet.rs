@@ -215,6 +215,10 @@ impl Packet {
     pub(super) fn kind_body_len(&self) -> usize {
         self.kind.body_len()
     }
+    /// IEEE sourcePortIdentity = clockIdentity (8 octets) + portNumber (2).
+    pub fn port_number(&self) -> u16 {
+        u16::from_be_bytes([self.source[8], self.source[9]])
+    }
     pub fn timestamp(&self) -> Result<Timestamp> {
         ensure!(self.kind != Kind::Signaling, "signaling has no timestamp");
         ensure!(self.body.len() >= 10, "timestamp body too short");

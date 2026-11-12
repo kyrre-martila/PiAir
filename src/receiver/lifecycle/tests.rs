@@ -1559,6 +1559,14 @@ fn timing_only_handoff_orders_record_setpeers_and_releases_sockets() {
         assert_eq!(evidence.delay_responses_sent, 1);
         owner.stop().unwrap();
         assert!(owner.diagnostic().contains("audio bytes: 0"));
+        assert!(owner
+            .diagnostic()
+            .contains("negotiation observation: completed"));
+        assert!(owner.diagnostic().contains("synchronization: unverified"));
+        assert!(owner
+            .diagnostic()
+            .contains("peer liveness at snapshot: true"));
+        assert!(owner.diagnostic().contains("local cleanup: released"));
         let _event = UdpSocket::bind(addresses.0).unwrap();
         let _general = UdpSocket::bind(addresses.1).unwrap();
         server.join().unwrap();
@@ -1730,6 +1738,14 @@ fn rejected_authenticated_policy_closes_control_before_setup_without_resources()
             assert!(owner.control.is_none() && owner.timing.is_none() && owner.events.is_none());
             assert!(owner.prepared.is_none() && owner.stream.is_none());
             assert!(owner.diagnostic().contains("audio bytes: 0"));
+            assert!(owner
+                .diagnostic()
+                .contains("negotiation observation: incomplete"));
+            assert!(owner.diagnostic().contains("synchronization: unverified"));
+            assert!(owner
+                .diagnostic()
+                .contains("peer liveness at snapshot: false"));
+            assert!(owner.diagnostic().contains("local cleanup: released"));
             assert!(owner.request_playback().is_err());
             server.join().unwrap();
         }

@@ -94,7 +94,7 @@ buffered/anchor sequence must not be attributed to this upstream snapshot.
 | Ports and ownership | `ptpd_find_or_bind` can reuse a host daemon or bind a private service. `airptp_daemon_bind` binds event/general services (default319/320); `airptp_ports_override` permits overrides. | Session-owned connected sockets only; no shared daemon or privileged-port workaround. Bind failures fail closed. |
 | Initial SETUP | `payload_make_setup_session_ptp` emits PTP, sessionUUID, name/deviceID, timingPeerInfo and timingPeerList; peer has ID UUID, DeviceType0, signed ClockID, local Addresses and SupportsClockPortMatchingOverride=false. Also emits MAC/group/MRP fields. | Existing initial_offer includes core timing fields; optional override/MAC/group/MRP semantics are not established for PiAir and are not guessed. Signed bplist clock IDs preserve all bits. |
 | Peer binding | `response_handler_setup_session` invokes `handle_timingpeerinfo`; it walks Addresses of active family, adds IPv6 scope and calls `ptpd_slave_add` until successful. `airptp_peer_add` registers address-derived peer ID through local daemon signaling. | Require authenticated ClockID and bounded numeric address list, original receiver authorization, one selected destination, matching route source, no private UDP registration. Upstream functions reviewed here do not enforce PiAir's receiver-bound ClockID lease policy. |
-| Sync/Follow_Up | `src/libairptp/src/ptp_msg_handle.c`: `ptp_msg_sync_send` emits two-step Sync and Follow_Up; `current_time_get` uses CLOCK_MONOTONIC. `msg_sync_follow_up_make` emits standard and Apple clock-ID TLVs. `sync_handle`/`follow_up_handle` parse/log incoming timestamps. | Existing PiAir fixed GM sends timestamped pairs; inbound Sync does not elect a clock or refresh delay liveness. Follow_Up uses the actual userspace send completion time; no kernel timestamp accuracy claim. |
+| Sync/Follow_Up | `src/libairptp/src/ptp_msg_handle.c`: `ptp_msg_sync_send` emits two-step Sync and Follow_Up; `current_time_get` uses CLOCK_MONOTONIC. `msg_sync_follow_up_make` emits standard and Apple clock-ID TLVs. `sync_handle`/`follow_up_handle` parse/log incoming timestamps. | Existing PiAir fixed GM sends timestamped pairs; inbound Sync does not elect a clock; fresh validated observations refresh peer liveness (Prompt 61). Follow_Up uses the actual userspace send completion time; no kernel timestamp accuracy claim. |
 | Announce and delays | `msg_announce_make` advertises high clock quality; `announce_handle` explicitly assumes local GM and otherwise logs/ignores Announce. `delay_msg_handle` replies on general service; `pdelay_msg_handle` emits response/follow-up. | Keep truthful free-running oscillator quality. Bind request source to authenticated ClockID and pinned port identity; reject replay. Delay traffic proves activity only. |
 | RTP clock mapping | `master_session_make` supplies daemon clock ID to `rtp_session_new`; `packets_sync_send` passes monotonic sample/time correspondence to `rtp_sync_packet_next`. In `src/outputs/rtp_common.c`, `sync_packet_ptp_make` emits 28-byte type0xd7, sample position, 64-bit nanoseconds, earliest sample expression `pos-11025`, clock ID. NTP uses a different packet. | Existing realtime::sync is type0xd4/NTP and must not be reused as PTP. New timing owner only binds 48 kHz mapping/paused anchor. Upstream RTP latency constant is profile-specific, not a validated PiAir buffered value. |
 | Control and teardown | `airplay_seq_request` orders initial SETUP, RECORD, SETPEERS, stream SETUP, volume. `payload_make_setpeers` includes receiver/local addresses. Stop/failure sequences issue TEARDOWN; `session_free` calls `ptpd_slave_remove`; `airplay_deinit` frees sessions before `ptpd_deinit`. | Existing staged buffered diagnostics also register commands/audioMode and can test paused anchors; this upstream table is not evidence for those extensions. Preserve bounded TEARDOWN, no new volume or audio operation. |
@@ -212,13 +212,13 @@ and triggers bounded authorized TEARDOWN, with no alternate port or NTP retry.
 The default observation is ten seconds (explicit range 5–20), servicing timing
 through RECORD, SETPEERS and cleanup. Existing 30-second initial peer deadline
 and three-second peer/poll liveness rules still apply; loss may end the diagnostic
-early. A completed observation with zero delay exchanges is evidence of absence
-of an observed peer, not success at synchronization.
+early. Zero delay exchanges do not exclude observations of other validated PTP
+message types; no receive count proves synchronization.
 
 Expected final evidence is `initial SETUP RTSP accepted: true`,
 `last accepted: SETPEERS`, packet evidence containing
 successful Sync, Follow_Up and Announce sends, validated pinned-ClockID delay
-requests and successful delay responses, `PeerObserved` only after valid delay
+requests and successful delay responses, `PeerObserved` after fresh validated peer
 traffic, `TEARDOWN: acknowledged`, and `audio bytes: 0`. General-channel receive
 counts are validated observations, not adoption reports. Send counts prove only
 local socket acceptance. Receiver clock adoption stays `unverified` and media
@@ -335,3 +335,85 @@ startup, packet evidence and bounded cleanup. Then validate later diagnostic
 stages as documented above. No successful PTP synchronization, receiver clock
 adoption or audible playback is established by this evidence. Media readiness
 remains blocked, audio bytes remain zero and default protocol selection is unchanged.
+
+## Prompt 61: peer identity and observation liveness
+
+User-reported AppleTV6,2 / tvOS 26.6.1 evidence (device:02d899c1833f,
+receiver 192.168.1.236, sender 192.168.1.43): StoredHap and authenticated
+GET /info, SETUP, RECORD, SETPEERS and TEARDOWN succeeded with HTTP 200.
+Before failure, 24 Sync, 24 Follow_Up and 3 Announce were sent; one Delay_Req
+received one response. Additional incoming Sync, Follow_Up, Announce and Signaling
+were observed. Main 30e3423 rejected general traffic against the first
+Delay_Req's entire sourcePortIdentity, rejected incoming Sync, and expired after
+three seconds without another delay request. Audio bytes were zero. These are
+user reports, not captures generated or hardware tests performed in this PR.
+
+Reference review: OwnTone 8ed84f2b3cba25d3de65e05660d59ce034b5adab,
+`src/libairptp/src/ptp_msg_handle.c` dispatches Sync, Follow_Up, Announce,
+Delay_Req, Pdelay_Req and Signaling separately. Sync/Follow_Up handlers observe
+headers/timestamps; Announce does not elect another master. Delay responses echo
+the requesting port identity. Neither those handlers nor `airptp.c` establishes
+that all types share one source port. `src/ptpd.c` delegates clock/peer lifecycle;
+`src/outputs/airplay.c` supplies PTP ClockID/addresses in timingPeerInfo/list and
+registers the SETUP-selected peer. Its signaling implementation can mutate daemon
+peers; PiAir deliberately does not implement that behavior. Reference only:
+no GPL implementation code was copied.
+
+IEEE sourcePortIdentity separates an 8-byte clockIdentity from a 2-byte
+portNumber. A clock may have multiple ports; the supplied hardware report shows
+that cross-type equality is unsafe, but supplies no exact port values. PiAir
+therefore retains the authorized connected UDP endpoint and authenticated clock
+identity, parses the nonzero portNumber explicitly, and pins the first validated
+port independently for Delay_Req, Pdelay_Req, Sync, Announce and Signaling. Later
+port changes within a role fail closed. Follow_Up must match a pending two-step
+Sync's exact source port and sequence within three seconds; duplicates,
+unmatched/out-of-order Follow_Up and sequences outside the forward half-range
+are rejected. The pending slot and per-type sequence/port tables are fixed-size.
+This is a conservative observation policy, not a claim about Apple's internal
+port allocation. Multiple simultaneous ports within a role remain unsupported.
+
+Valid fresh Delay_Req/Pdelay_Req, Sync, correlated Follow_Up, Announce and
+correctly targeted Signaling establish/refresh **peer liveness**. All packet
+length/domain/reserved/flag/timestamp/TLV checks still apply before acceptance.
+Signaling TLVs remain inert and cannot change peers, destinations, authorization,
+intervals or timing policy. Rejected, reflected, replayed, wrong-clock,
+wrong-channel and wrong-target packets cannot refresh liveness. Connected sockets
+retain IP/UDP-port filtering; no multicast, arbitrary peers or destinations are
+introduced. Rejection logs have a lifetime bound and expose only header message
+type, clock identity and port number, never TLV/control payloads.
+
+The independent budgets are unchanged: initial peer setup deadline (30 seconds
+in the diagnostic), local poll/monotonic continuity (three seconds), and validated
+peer silence (three seconds after first observation). The CLI observation has
+its own requested 5–20 second bound. Thus one Delay_Req followed by fresh valid
+peer traffic can complete ten seconds, while actual silence still terminates.
+No timeout was globally increased. Cancellation, lease revocation and socket
+errors remain terminal, release resources, and preserve authorized bounded
+TEARDOWN attempts. Observation completion, per-type receive/send counts,
+rejections, peer liveness snapshot, RTSP acceptance and TEARDOWN are reported
+separately. Completed observation does not prove receiver synchronization.
+
+Local grandmaster identity, epoch and generation never change on reception.
+No BMCA election, servo submission or remote clock adoption is performed.
+`PeerObserved` means traffic only; adoption and synchronization stay unverified,
+media readiness blocked and audio bytes zero. Existing HomePod NTP behavior and
+default protocol selection are unchanged.
+
+Remaining hardware uncertainties before WAV playback: actual source port values
+and ordering, any role-port changes, repeated signaling sequence semantics,
+private TLV clock/adoption semantics, accepted media profile, clock quality and
+revocable synchronization evidence. The existing conflicting Apple clock TLV
+restriction is retained; a TLV naming a different clock is not proof of adoption.
+These need captures and protocol evidence before relaxing restrictions or sending
+PTP audio. Synthetic regression fixtures model the reported sequence; they are
+not byte-for-byte hardware captures.
+
+Exact hardware retest command (after rebuilding and restoring bind capability):
+
+```sh
+./target/release/piair -v ptp-negotiation-check device:02d899c1833f --observation-seconds 10
+```
+
+Verify completed observation, fresh per-type traffic, rejected counts/reasons,
+unchanged local clock, acknowledged TEARDOWN, zero audio and blocked media.
+No hardware retest was performed in this cloud environment.
