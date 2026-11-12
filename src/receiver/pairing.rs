@@ -11,6 +11,15 @@ use rand::{rngs::OsRng, RngCore};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
+/// Evidence minted only after pinned HAP identity verification and M4 success.
+/// The private field prevents other production modules from manufacturing it.
+pub(super) struct VerifiedStoredHap(());
+
+#[cfg(test)]
+pub(super) fn verified_stored_hap_for_test() -> VerifiedStoredHap {
+    VerifiedStoredHap(())
+}
+
 fn exchange(
     wire: &mut Wire,
     path: &str,
@@ -269,6 +278,9 @@ pub fn verify(mut wire: Wire, credential: &Credential) -> Result<Wire> {
     let (keys, events, shared) = verify_inner(&mut wire, credential)?;
     let mut wire = wire.secure(keys, events)?;
     wire.install_audio_key(shared.as_ref())?;
+    if wire.method() == super::compatibility::Method::StoredHap {
+        wire.bind_stored_hap_verification(VerifiedStoredHap(()));
+    }
     Ok(wire)
 }
 fn verify_inner(

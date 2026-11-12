@@ -69,6 +69,7 @@ pub struct Wire {
     receiver_id: String,
     method: Method,
     authorization: Option<(PathBuf, Authorization)>,
+    verified_stored_hap: Option<super::pairing::VerifiedStoredHap>,
     keys: Option<super::crypto::ControlKeys>,
     events: Option<super::crypto::ControlKeys>,
     audio_key: Option<Zeroizing<[u8; 32]>>,
@@ -265,6 +266,7 @@ impl Wire {
             receiver_id,
             method,
             authorization: None,
+            verified_stored_hap: None,
             keys: None,
             events: None,
             audio_key: None,
@@ -457,6 +459,19 @@ impl Wire {
         self.events = Some(events);
         Ok(self)
     }
+    pub(super) fn bind_stored_hap_verification(
+        &mut self,
+        proof: super::pairing::VerifiedStoredHap,
+    ) {
+        self.verified_stored_hap = Some(proof);
+    }
+    pub(super) fn stored_hap_verification(&self) -> Option<&super::pairing::VerifiedStoredHap> {
+        if !self.failed && self.keys.is_some() && self.method == Method::StoredHap {
+            self.verified_stored_hap.as_ref()
+        } else {
+            None
+        }
+    }
     pub(super) fn install_audio_key(&mut self, shared: &[u8]) -> Result<()> {
         ensure!(
             self.keys.is_some() && shared.len() >= 32,
@@ -477,6 +492,7 @@ impl Wire {
                 elapsed_ms = self.auth_started.elapsed().as_millis() as u64, "authentication connection closed locally");
         }
         self.failed = true;
+        self.verified_stored_hap = None;
         self.keys = None;
         self.events = None;
         self.audio_key = None;
@@ -865,7 +881,13 @@ impl Wire {
         let selected = Selection {
             id: self.receiver_id.clone(),
             advertised_pi: None,
-            method: self.method,
+            // StoredHap is operation-local and deliberately not serializable.
+            // Keep a persistable enrollment selection for this loopback lease.
+            method: if self.method == Method::StoredHap {
+                Method::PinDisplay
+            } else {
+                self.method
+            },
             addresses: [peer.ip()].into_iter().collect(),
             port: peer.port(),
             capabilities: super::compatibility::Capabilities {

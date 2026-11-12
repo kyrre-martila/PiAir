@@ -3156,3 +3156,22 @@ fn persisted_wav_selection_validates_stored_hap_and_rejects_drift_without_fallba
         assert_eq!(std::fs::read(&credential_path).unwrap(), credential_bytes);
     }
 }
+
+#[test]
+fn stored_hap_proof_requires_completed_pair_verify_and_live_control() {
+    for method in [Method::StoredHap, Method::PinDisplay, Method::SetupCode] {
+        let (wire, server) = local_mock_method(method, |s| {
+            let (mut socket, _) = verify_mock_continue(s, Fault::None, PI).unwrap();
+            assert_eof(&mut socket);
+        });
+        assert!(wire.stored_hap_verification().is_none());
+        let mut wire = pairing::verify(wire, &credential()).unwrap();
+        assert_eq!(
+            wire.stored_hap_verification().is_some(),
+            method == Method::StoredHap
+        );
+        wire.close();
+        assert!(wire.stored_hap_verification().is_none());
+        server.join().unwrap();
+    }
+}

@@ -99,6 +99,17 @@ thread_local! {
 fn fixture(
     server: impl FnOnce(TcpStream) + Send + 'static,
 ) -> (Session, tempfile::TempDir, thread::JoinHandle<()>) {
+    fixture_auth(
+        server,
+        super::super::compatibility::Method::PinDisplay,
+        false,
+    )
+}
+fn fixture_auth(
+    server: impl FnOnce(TcpStream) + Send + 'static,
+    method: super::super::compatibility::Method,
+    verified: bool,
+) -> (Session, tempfile::TempDir, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.2:0").unwrap();
     let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let tokenless = TOKENLESS.with(std::cell::Cell::get);
@@ -110,11 +121,19 @@ fn fixture(
             .unwrap();
         server(socket);
     });
-    let mut wire = Wire::mock(socket, Duration::from_millis(500), "device:112233445566");
+    let mut wire = Wire::mock_method(
+        socket,
+        Duration::from_millis(500),
+        "device:112233445566",
+        method,
+    );
     let authorization = wire.ptp_test_authorization().unwrap();
-    let wire = wire
+    let mut wire = wire
         .secure(ControlKeys::new(b"lifecycle"), ControlKeys::new(b"events"))
         .unwrap();
+    if verified {
+        wire.bind_stored_hap_verification(pairing::verified_stored_hap_for_test());
+    }
     let mut owner = Session::new();
     owner.control = Some(wire);
     owner.state.advance(State::Authentication).unwrap();
@@ -173,8 +192,8 @@ fn state_machine_has_no_path_to_playing_and_rejects_duplicate_or_stale_operation
 }
 #[test]
 fn authenticated_info_checks_identity_codec_policy_and_conflicting_evidence() {
-    assert!(validate_info(&info(), "device:112233445566").is_ok());
-    assert!(validate_info(&info(), "device:223344556677").is_err());
+    assert!(validate_info(&info(), "device:112233445566", None).is_ok());
+    assert!(validate_info(&info(), "device:223344556677", None).is_err());
     for (field, value) in [
         ("deviceID", Value::String("bad".into())),
         ("features", profile::uint(1 << 40)),
@@ -196,7 +215,7 @@ fn authenticated_info_checks_identity_codec_policy_and_conflicting_evidence() {
             .unwrap()
             .insert(field.into(), value);
         assert!(
-            validate_info(&value_info, "device:112233445566").is_err(),
+            validate_info(&value_info, "device:112233445566", None).is_err(),
             "{field}"
         );
     }
@@ -1048,7 +1067,7 @@ fn signed_mask_reconciliation_reaches_the_existing_authenticated_gate() {
             )]),
         );
         assert_eq!(
-            validate_info(&value, "device:112233445566").is_ok(),
+            validate_info(&value, "device:112233445566", None).is_ok(),
             accepted
         );
     }
@@ -1584,14 +1603,14 @@ fn initial_ptp_offer_preserves_one_signed_clock_identity_and_verified_address() 
 
 #[test]
 fn authenticated_policy_reports_exact_fields_without_guessing_from_discovery() {
-    // These /info values are synthetic, NOT a capture from Stua.
+    // Policy combinations are synthetic; 99908 is the confirmed Stua statusFlags.
     for flags in [0, 4, 99908, 0x98404, 1 << 3, 1 << 7, 1 << 9, 0x99908] {
         let mut value = info();
         value
             .as_dictionary_mut()
             .unwrap()
             .insert("statusFlags".into(), profile::uint(flags));
-        let result = validate_info(&value, "device:112233445566");
+        let result = validate_info(&value, "device:112233445566", None);
         let rejected = flags & ((1 << 3) | (1 << 7) | (1 << 9));
         if rejected == 0 {
             result.unwrap();
@@ -1622,7 +1641,7 @@ fn authenticated_policy_reports_exact_fields_without_guessing_from_discovery() {
                 .as_dictionary_mut()
                 .unwrap()
                 .insert(field.into(), v.clone());
-            let result = validate_info(&value, "device:112233445566");
+            let result = validate_info(&value, "device:112233445566", None);
             if v.as_unsigned_integer() == Some(0) {
                 result.unwrap();
             } else {
@@ -1646,7 +1665,7 @@ fn authenticated_policy_reports_exact_fields_without_guessing_from_discovery() {
                 .as_dictionary_mut()
                 .unwrap()
                 .insert(field.into(), v.clone());
-            let result = validate_info(&value, "device:112233445566");
+            let result = validate_info(&value, "device:112233445566", None);
             assert_eq!(result.is_ok(), v.as_boolean() == Some(false));
             if let Err(error) = result {
                 assert!(error
@@ -1670,7 +1689,7 @@ fn authenticated_policy_reports_exact_fields_without_guessing_from_discovery() {
         }
         let error = format!(
             "{:#}",
-            validate_info(&value, "device:112233445566").unwrap_err()
+            validate_info(&value, "device:112233445566", None).unwrap_err()
         );
         assert!(error.contains("statusFlags="));
         assert!(!error.contains("PRIVATE"));
@@ -1680,33 +1699,123 @@ fn authenticated_policy_reports_exact_fields_without_guessing_from_discovery() {
 
 #[test]
 fn rejected_authenticated_policy_closes_control_before_setup_without_resources() {
-    for (field, value) in [
-        ("statusFlags", profile::uint(0x99908)),
-        ("acl", profile::uint(2)),
-        ("accessControlType", Value::String("PRIVATE".into())),
-        ("isProxyGroupPlayer", Value::Boolean(true)),
+    for verified in [false, true] {
+        for (field, value) in [
+            ("statusFlags", profile::uint(0x99908)),
+            ("acl", profile::uint(2)),
+            ("accessControlType", Value::String("PRIVATE".into())),
+            ("isProxyGroupPlayer", Value::Boolean(true)),
+        ] {
+            let (mut owner, _approval, server) = fixture_auth(
+                move |mut socket| {
+                    let mut keys = server_keys();
+                    let (head, _) = read_request(&mut socket, &mut keys);
+                    assert!(head.starts_with("GET /info "));
+                    let mut rejected = info();
+                    rejected
+                        .as_dictionary_mut()
+                        .unwrap()
+                        .insert(field.into(), value);
+                    reply(&mut socket, &mut keys, 1, Some(rejected));
+                    // No SETUP, RECORD, SETPEERS, audio or premature TEARDOWN.
+                    assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+                },
+                super::super::compatibility::Method::StoredHap,
+                verified,
+            );
+            let error = owner.setup_authenticated().unwrap_err();
+            assert!(format!("{error:#}").contains(&format!("rejected field={field}")));
+            assert_eq!(owner.state(), State::Failed);
+            assert!(!owner.attempted_setup);
+            assert!(owner.control.is_none() && owner.timing.is_none() && owner.events.is_none());
+            assert!(owner.prepared.is_none() && owner.stream.is_none());
+            assert!(owner.diagnostic().contains("audio bytes: 0"));
+            assert!(owner.request_playback().is_err());
+            server.join().unwrap();
+        }
+    }
+}
+
+#[test]
+fn stored_hap_policy_exception_is_narrow() {
+    let proof = pairing::verified_stored_hap_for_test();
+    for flags in [99908, 0x200, 0x200 | 8, 0x200 | 128] {
+        let mut value = info();
+        value
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("statusFlags".into(), profile::uint(flags));
+        assert_eq!(
+            validate_info(&value, "device:112233445566", Some(&proof)).is_ok(),
+            flags & (8 | 128) == 0
+        );
+        assert!(validate_info(&value, "device:112233445566", None).is_err());
+        assert!(validate_info(&value, "device:223344556677", Some(&proof)).is_err());
+        for field in [
+            "acl",
+            "act",
+            "accessControlLevel",
+            "accessControlType",
+            "statusFlags",
+            "isGroupLeader",
+            "isGroupMember",
+            "isProxyGroupPlayer",
+        ] {
+            for invalid in [
+                profile::uint(1),
+                Value::String("invalid".into()),
+                Value::Integer((-1).into()),
+            ] {
+                if field == "statusFlags" && invalid.as_unsigned_integer() == Some(1) {
+                    continue;
+                }
+                let mut invalid_info = value.clone();
+                invalid_info
+                    .as_dictionary_mut()
+                    .unwrap()
+                    .insert(field.into(), invalid);
+                assert!(validate_info(&invalid_info, "device:112233445566", Some(&proof)).is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn stua_policy_reaches_setup_only_on_verified_stored_hap_wire() {
+    use super::super::compatibility::Method;
+    for (method, verified) in [
+        (Method::StoredHap, true),
+        (Method::StoredHap, false),
+        (Method::Transient, false),
     ] {
-        let (mut owner, _approval, server) = fixture(move |mut socket| {
-            let mut keys = server_keys();
-            let (head, _) = read_request(&mut socket, &mut keys);
-            assert!(head.starts_with("GET /info "));
-            let mut rejected = info();
-            rejected
-                .as_dictionary_mut()
-                .unwrap()
-                .insert(field.into(), value);
-            reply(&mut socket, &mut keys, 1, Some(rejected));
-            // No SETUP, RECORD, SETPEERS, audio or premature TEARDOWN.
-            assert_eq!(socket.read(&mut [0]).unwrap(), 0);
-        });
-        let error = owner.setup_authenticated().unwrap_err();
-        assert!(format!("{error:#}").contains(&format!("rejected field={field}")));
+        let accepted = method == Method::StoredHap && verified;
+        let (mut owner, _approval, server) = fixture_auth(
+            move |mut socket| {
+                let mut keys = server_keys();
+                let (head, _) = read_request(&mut socket, &mut keys);
+                assert!(head.starts_with("GET /info "));
+                let mut value = info();
+                value
+                    .as_dictionary_mut()
+                    .unwrap()
+                    .insert("statusFlags".into(), profile::uint(99908));
+                reply(&mut socket, &mut keys, 1, Some(value));
+                if accepted {
+                    let (head, _) = read_request(&mut socket, &mut keys);
+                    assert!(head.starts_with("SETUP "));
+                    // End the mock at initial SETUP; no synchronization is simulated.
+                } else {
+                    assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+                }
+            },
+            method,
+            verified,
+        );
+        let result = owner.setup_authenticated();
+        assert!(result.is_err());
+        assert_eq!(owner.attempted == "initial SETUP", accepted, "{result:?}");
         assert_eq!(owner.state(), State::Failed);
-        assert!(!owner.attempted_setup);
-        assert!(owner.control.is_none() && owner.timing.is_none() && owner.events.is_none());
-        assert!(owner.prepared.is_none() && owner.stream.is_none());
-        assert!(owner.diagnostic().contains("audio bytes: 0"));
-        assert!(owner.request_playback().is_err());
+        assert!(owner.control.is_none() && owner.events.is_none() && owner.timing.is_none());
         server.join().unwrap();
     }
 }
