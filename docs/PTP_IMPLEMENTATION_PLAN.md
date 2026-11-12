@@ -183,6 +183,8 @@ Deploy on the Raspberry Pi:
 cd ~/PiAir
 git pull
 cargo build --release
+sudo python3 scripts/grant-ptp-capability.py "$PWD/target/release/piair"
+getcap "$PWD/target/release/piair"
 
 ./target/release/piair select device:0a05559f132f --method transient
 
@@ -203,3 +205,7 @@ with `receiver NTP timing stalled` after roughly four seconds. The NTP timeout
 logic is unchanged here. Apple TV Stua accepted authenticated PTP type-96 UDP,
 but audible playback remains unconfirmed. Automated tests verify local protocol
 and cleanup behavior; physical HomePod playback must be confirmed separately.
+
+See [PTP port permissions](PTP_PORT_PERMISSIONS.md) for the capability security
+scope, helper validation, and the required repeatable post-build step. Run PiAir
+as kyrre; only the capability installation step uses sudo.

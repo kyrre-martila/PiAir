@@ -2506,3 +2506,36 @@ fn wav_cannot_send_without_authenticated_negotiated_owner() {
     assert_eq!(owner.playback_stats.syncs, 0);
     assert!(owner.control.is_none() && owner.realtime_transport.is_none());
 }
+
+#[test]
+fn local_ptp_bind_permission_failure_tears_down_accepted_setup() {
+    for port in [319, 320] {
+        let (mut owner, _approval, server) = fixture(|mut socket| {
+            let mut keys = server_keys();
+            read_request(&mut socket, &mut keys);
+            reply(&mut socket, &mut keys, 1, Some(info()));
+            read_request(&mut socket, &mut keys);
+            reply(&mut socket, &mut keys, 2, Some(setup(123)));
+            let (head, _) = read_request(&mut socket, &mut keys);
+            assert!(head.starts_with("TEARDOWN "));
+            reply(&mut socket, &mut keys, 3, None);
+            assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+        });
+        let result = owner.negotiate_with(|_, _, _| {
+            Err(super::super::wire::ptp_bind_error(
+                port,
+                std::io::Error::from_raw_os_error(libc::EACCES),
+            ))
+        });
+        let error = owner.finish(result).unwrap_err();
+        assert!(error.to_string().contains(&format!("local PTP UDP {port}")));
+        assert!(error
+            .downcast_ref::<super::super::wire::ResponseFailure>()
+            .is_none());
+        assert_eq!(owner.state(), State::Failed);
+        assert!(!owner.session_bound);
+        assert!(owner.control.is_none() && owner.timing.is_none() && owner.events.is_none());
+        assert!(owner.diagnostic().contains("TEARDOWN: acknowledged"));
+        server.join().unwrap();
+    }
+}
