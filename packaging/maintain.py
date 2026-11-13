@@ -154,7 +154,7 @@ class Services:
         return run("/usr/bin/systemctl", "--system", "--no-pager", *args)
 
     def properties(self, unit):
-        fields = "ActiveState,User,FragmentPath,DropInPaths,Environment,EnvironmentFiles,MainPID,UnitFileState"
+        fields = "ActiveState,User,FragmentPath,DropInPaths,Environment,EnvironmentFiles,MainPID,UnitFileState,ExecStart,WorkingDirectory"
         return dict(line.split("=", 1) for line in self.ctl("show", unit, "--property=" + fields).splitlines()
                     if "=" in line)
 
@@ -184,6 +184,11 @@ class Services:
                         not p.get("DropInPaths") and not p.get("Environment") and
                         not p.get("EnvironmentFiles") and p.get("User", "") in ("", user),
                         "Customized PiAir service; deliberate administration required")
+                if p.get("FragmentPath") == FILES["piair@.service"][0]:
+                    start = p.get("ExecStart", "")
+                    require(start.startswith("{ path=/usr/local/bin/piair ; argv[]=/usr/local/bin/piair run --allow-unattended ;")
+                            and start.count("argv[]=") == 1 and p.get("WorkingDirectory") == "~",
+                            "Unexpected loaded service executable or working directory; review systemd configuration")
         # No other foreground/legacy process using the shared executable may be replaced.
         service_pid = self.properties(own).get("MainPID", "0")
         for proc in Path("/proc").iterdir():
@@ -409,6 +414,11 @@ def commit(action, archive=None, v=None, services=None, installation=None):
             require(confirm("Interrupted update found. Restore the previous installation first?"), "Recovery cancelled")
             unit, active = services.inspect(uid, recovery=True)
             require(not active, "Stop the service before recovery")
+            state_path = install.path(JOURNAL / "state.json")
+            install.safe(state_path)
+            if state_path.exists():
+                require(json.loads(state_path.read_text()).get("unit") == unit,
+                        "Interrupted maintenance belongs to another account; recover as that account")
             with runtime_locks():
                 state = install.recover()
                 services.reload()
@@ -452,8 +462,8 @@ def commit(action, archive=None, v=None, services=None, installation=None):
         if action == "uninstall":
             services.disable(unit)
         # Guard before touching files; persist the guard information for crash recovery.
-        install.prepare(old, unit)
         try:
+            install.prepare(old, unit)
             services.guard(unit)
             with runtime_locks():
                 services.inspect(uid, removing=action == "uninstall", recovery=True)
@@ -464,14 +474,18 @@ def commit(action, archive=None, v=None, services=None, installation=None):
                 services.reload()
                 services.unguard(unit)
                 install.clear_journal()
-        except BaseException:
+        except BaseException as original:
             # Includes Ctrl+C. SIGKILL/power loss leaves the durable journal and mask.
-            with runtime_locks():
-                state = install.recover()
-                services.reload()
-                services.unguard(unit)
-                if state:
-                    install.clear_journal()
+            try:
+                with runtime_locks():
+                    state = install.recover()
+                    services.reload()
+                    services.unguard(unit)
+                    if state:
+                        install.clear_journal()
+            except BaseException as rollback_error:
+                raise RuntimeError(f"{original}; rollback incomplete: {rollback_error}. "
+                                   "Leave playback stopped and run piair update for recovery; see docs/INSTALL.md") from original
             print("Installation failed; previous application files restored. User data unchanged." if state else
                   "Maintenance finalization failed; inspect installed version and service status. User data unchanged.")
             if old and active:
