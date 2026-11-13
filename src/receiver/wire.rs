@@ -128,6 +128,7 @@ enum Authorization {
     HapOperation {
         selected: Selection,
         credential: Zeroizing<[u8; 64]>,
+        persisted_selection: Option<Box<Selection>>,
     },
 }
 impl Authorization {
@@ -142,7 +143,14 @@ impl Authorization {
             Self::HapOperation {
                 selected,
                 credential,
+                persisted_selection,
             } => {
+                if let Some(expected) = persisted_selection {
+                    ensure!(
+                        store.selection()?.as_ref() == Some(expected.as_ref()),
+                        "receiver selection changed"
+                    );
+                }
                 ensure!(selected.id == id, "operation receiver identity changed");
                 let current = store
                     .credential_fingerprint(id)?
@@ -180,6 +188,15 @@ impl Wire {
         snapshot: &[Receiver],
         credential: &super::store::Credential,
     ) -> Result<Self> {
+        Self::connect_hap_scoped(config_path, selected, snapshot, credential, None)
+    }
+    pub(super) fn connect_hap_scoped(
+        config_path: &Path,
+        selected: &Selection,
+        snapshot: &[Receiver],
+        credential: &super::store::Credential,
+        persisted_selection: Option<&Selection>,
+    ) -> Result<Self> {
         let id = selected.id.as_str();
         ensure!(
             selected.method == Method::StoredHap
@@ -209,6 +226,7 @@ impl Wire {
         let authorization = Authorization::HapOperation {
             selected: selected.clone(),
             credential: snapshot_credential.fingerprint,
+            persisted_selection: persisted_selection.cloned().map(Box::new),
         };
         Self::connect_authorized(config_path, id, selected, snapshot, authorization)
     }

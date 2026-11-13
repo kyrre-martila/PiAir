@@ -26,6 +26,7 @@ and protocol understanding. No existing AirPlay sender is a dependency.
 - `audio/calibration.rs`: bounded noise statistics/rejection, explicit prompts,
   comment-preserving TOML threshold edits and temporary-file persistence.
 
+- `receiver/runtime.rs`: reusable automatic orchestration and typed invocation settings; shared by interactive automatic capture and explicit unattended `run`. See [RUNTIME.md](RUNTIME.md).
 - `receiver/mod.rs`: exact identity operations, explicit method selection and
   approval/selection revalidation before enrollment persistence.
 - `receiver/compatibility.rs`: pure requested-method decision over defensively

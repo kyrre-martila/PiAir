@@ -11,7 +11,7 @@ plist = { version = "1", default-features = false }
 alsa = "0.9"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-ctrlc = "3"
+ctrlc = { version = "3", features = ["termination"] }
 libc = "0.2"
 mdns-sd = { version = "=0.13.11", default-features = false }
 serde = { version = "1", features = ["derive"] }

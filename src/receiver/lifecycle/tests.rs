@@ -2710,3 +2710,74 @@ fn local_ptp_bind_permission_failure_tears_down_accepted_setup() {
         server.join().unwrap();
     }
 }
+
+#[test]
+fn cancellation_at_each_realtime_control_stage_releases_all_local_resources() {
+    for pending_stage in 1..=5 {
+        let (entered, pending) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            let mut keys = server_keys();
+            for (seq, method, response) in [
+                (1, "GET /info ", Some(realtime_info())),
+                (2, "SETUP ", Some(setup(123))),
+                (3, "RECORD ", None),
+                (4, "SETPEERS ", None),
+                (5, "SETUP ", None),
+            ] {
+                let header = read_request(&mut socket, &mut keys).0;
+                assert!(
+                    header.starts_with(method),
+                    "stage {pending_stage}, expected {method}, got {header}"
+                );
+                if seq == pending_stage {
+                    entered.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(2)).unwrap();
+                    // Cancellation must close the wire without a later control
+                    // stage, media request, redial, or reuse of cipher state.
+                    assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+                    return;
+                }
+                reply(&mut socket, &mut keys, seq, response);
+            }
+        });
+        let cancel = owner.cancel.clone();
+        owner.control.as_mut().unwrap().diagnostic_cancel = Some(cancel.clone());
+        owner.realtime_profile = true;
+        let change = thread::spawn(move || {
+            pending.recv_timeout(Duration::from_secs(2)).unwrap();
+            cancel.store(true, Ordering::Relaxed);
+            release.send(()).unwrap();
+        });
+        let start = Instant::now();
+        let (event, _peer_event) = udp_pair();
+        let (general, _peer_general) = udp_pair();
+        let result = owner.negotiate_with(|wire, setup, clock| {
+            Ok((
+                None,
+                ptp::Service::attach(
+                    ptp::Grandmaster::new(
+                        clock,
+                        setup.clock_id,
+                        Instant::now(),
+                        Duration::from_secs(30),
+                    )?,
+                    event,
+                    general,
+                    wire.ptp_lease()?,
+                )?,
+            ))
+        });
+        let result = owner
+            .finish(result)
+            .and_then(|()| owner.negotiate_realtime());
+        assert!(result.is_err(), "pending stage {pending_stage}");
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(owner.state(), State::Failed);
+        assert!(owner.control.is_none() && owner.timing.is_none() && owner.events.is_none());
+        assert!(owner.realtime_transport.is_none() && owner.realtime_encoder.is_none());
+        assert!(owner.prepared.is_none() && owner.stream.is_none());
+        change.join().unwrap();
+        server.join().unwrap();
+    }
+}

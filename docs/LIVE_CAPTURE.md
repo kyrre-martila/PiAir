@@ -232,3 +232,7 @@ and Ctrl+C while monitoring, connecting and playing. Measure audibility,
 startup latency, CPU/memory, ALSA counters and released sockets after each cycle.
 Manual `experimental-ptp-capture` and `ptp-wav-playback` retain their existing
 options, defaults and timing policies.
+
+Automatic orchestration is shared with the explicit unattended `piair run` command.
+See [RUNTIME.md](RUNTIME.md) for authorization, SIGINT/SIGTERM, structured lifecycle
+logs and exit codes. No service or installer is included.

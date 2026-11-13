@@ -9,6 +9,7 @@ mod hex_u64;
 pub(crate) mod interactive;
 pub(crate) mod lifecycle;
 pub(crate) mod planning;
+pub(crate) mod runtime;
 // Sans-I/O components only; blocked by the documented unresolved transport profile.
 #[allow(dead_code)]
 mod media;
@@ -809,7 +810,7 @@ pub fn ptp_negotiation_check(
     transient: bool,
     seconds: u64,
 ) -> Result<()> {
-    ptp_operation(loaded, id, transient, seconds, None, None, None)
+    ptp_operation(loaded, id, transient, seconds, None, None)
 }
 
 pub fn ptp_wav_playback(
@@ -821,7 +822,7 @@ pub fn ptp_wav_playback(
     transient: bool,
 ) -> Result<()> {
     let wav = wav::Playback::open(path, seconds)?;
-    ptp_operation(loaded, id, transient, 10, Some((wav, volume)), None, None)
+    ptp_operation(loaded, id, transient, 10, Some((wav, volume)), None)
 }
 
 pub fn ptp_capture(
@@ -839,7 +840,6 @@ pub fn ptp_capture(
         10,
         None,
         Some((device, seconds, volume)),
-        None,
     )
 }
 
@@ -851,15 +851,37 @@ pub fn automatic_capture(
     transient: bool,
     settings: crate::audio::activity::Settings,
 ) -> Result<()> {
-    ptp_operation(
+    let runtime = runtime::Runtime::prepare(
         loaded,
-        id,
-        transient,
-        10,
+        runtime::Settings {
+            receiver_id: id.to_owned(),
+            capture_device: device.to_owned(),
+            detection: settings,
+            authentication: if transient {
+                runtime::Authentication::OwnToneTransient
+            } else {
+                runtime::Authentication::StoredHap
+            },
+            volume_db: volume,
+        },
+    )?;
+    ensure!(
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+        "PTP operation requires interactive confirmation"
+    );
+    let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    if transient {
+        println!("Explicit OwnTone-reference transient SRP on the selected receiver: no persistent HAP credentials or verified persistent receiver identity; no credentials saved and no authentication fallback. Authenticated capabilities and PTP/type-96 negotiation must succeed before media transmission.");
+    }
+    println!("Automatic selected receiver {id}: threshold={} dBFS; start={} ms; silence={} ms; volume={volume:?} dB (may persist). Authentication is explicit; no fallback. Authorize repeated sessions until interrupted.", settings.threshold_dbfs, settings.start_ms, settings.stop_ms);
+    interactive::confirm_operation(
+        loaded,
         None,
-        Some((device, None, volume)),
-        Some(settings.validate()?),
-    )
+        &snapshot,
+        "Authorize automatic sessions on this selected receiver until Ctrl+C? [y/N]: ",
+    )?;
+    let cancel = runtime::signal_cancellation()?;
+    runtime.run(cancel)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -870,7 +892,6 @@ fn ptp_operation(
     seconds: u64,
     playback: Option<(wav::Playback, Option<i32>)>,
     live: Option<(&str, Option<u32>, Option<i32>)>,
-    automatic: Option<crate::audio::activity::Settings>,
 ) -> Result<()> {
     exact_id(id)?;
     ensure!(
@@ -897,9 +918,7 @@ fn ptp_operation(
     if transient {
         println!("Explicit OwnTone-reference transient SRP on the selected receiver: no persistent HAP credentials or verified persistent receiver identity; no credentials saved and no authentication fallback. Authenticated capabilities and PTP/type-96 negotiation must succeed before media transmission.");
     }
-    if let Some(settings) = automatic {
-        println!("Automatic selected receiver {id}: RMS threshold={} dBFS; start={} ms; silence={} ms; pre-roll capacity=10 seconds. Authorize repeated sessions until Ctrl+C; explicit volume changes may persist.", settings.threshold_dbfs, settings.start_ms, settings.stop_ms);
-    } else if let Some((device, duration, volume)) = live {
+    if let Some((device, duration, volume)) = live {
         println!("Experimental live PTP capture: device={device:?}; seconds={duration:?} (None = Ctrl+C); volume={volume:?} dB (None preserves current volume). Explicit volume changes may persist. Stereo 44100 Hz S16; no activity detection.");
     } else if let Some((wav, volume)) = &playback {
         println!("Selected receiver: {id}; PTP type96, UDP, ALAC16 stereo, 44100 Hz, 352 samples/packet. WAV frames: {}; EOF: {}; volume: {volume:?} dB (None preserves current volume). Explicit volume changes may persist. Local transmission does not prove audible playback.", wav.frames.len(), wav.eof);
@@ -910,9 +929,7 @@ fn ptp_operation(
         loaded,
         None,
         &snapshot,
-        if automatic.is_some() {
-            "Authorize automatic sessions on this selected receiver until Ctrl+C? [y/N]: "
-        } else if live.is_some() {
+        if live.is_some() {
             "Start experimental selected receiver live PTP capture? [y/N]: "
         } else if playback.is_some() {
             "Start selected receiver PTP WAV playback? [y/N]: "
@@ -920,88 +937,40 @@ fn ptp_operation(
             "Authorize selected receiver PTP negotiation only? [y/N]: "
         },
     )?;
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
-    use std::time::{Duration, Instant};
-    let cancel = Arc::new(AtomicBool::new(false));
-    let signal = cancel.clone();
-    ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
-    let capture = automatic
-        .map(|settings| crate::audio::live::Capture::automatic(live.unwrap().0, settings))
-        .transpose()?;
-    let mut retry = automatic::Retry::new(Instant::now());
-    let mut snapshot = snapshot;
-    loop {
-        if let Some(capture) = &capture {
-            println!("Audio monitoring started/resumed; waiting for meaningful audio");
-            loop {
-                if cancel.load(Ordering::Relaxed) {
-                    return Ok(());
-                }
-                if retry.ready(Instant::now(), capture.activity()?.0) {
-                    break;
-                }
-                std::thread::park_timeout(Duration::from_millis(20));
-            }
-            println!("Audio activity detected; AirPlay connection starting for explicitly selected receiver {id}");
-        }
-        let result = (|| {
-            if capture.is_some() {
-                snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
-            }
-            let mut authenticated = session::Session::new();
-            authenticated.cancel = cancel.clone();
-            authenticated
-                .authenticate_ptp_selected(
-                    || match &credential {
-                        Some(credential) => wire::Wire::connect_hap_operation(
-                            &loaded.path,
-                            &operation,
-                            &snapshot,
-                            credential,
-                        ),
-                        None => wire::Wire::connect(&loaded.path, id, &operation, &snapshot),
-                    },
-                    credential.as_ref(),
-                )
-                .context("selected receiver PTP authentication failed; no fallback")?;
-            let mut session = authenticated.into_ptp_foundation()?;
-            let result = (|| {
-                session.setup_realtime_authenticated().context(
+    let cancel = runtime::signal_cancellation()?;
+    let mut authenticated = session::Session::new();
+    authenticated.cancel = cancel;
+    authenticated
+        .authenticate_ptp_selected(
+            || match &credential {
+                Some(credential) => wire::Wire::connect_hap_operation(
+                    &loaded.path,
+                    &operation,
+                    &snapshot,
+                    credential,
+                ),
+                None => wire::Wire::connect(&loaded.path, id, &operation, &snapshot),
+            },
+            credential.as_ref(),
+        )
+        .context("selected receiver PTP authentication failed; no fallback")?;
+    let mut session = authenticated.into_ptp_foundation()?;
+    let result = (|| {
+        session.setup_realtime_authenticated().context(
             "authenticated receiver capabilities or initial PTP SETUP rejected; advertised PTP support alone is insufficient; no fallback",
         )?;
-                session.negotiate_realtime().context(
-            "receiver rejected PTP realtime type-96 UDP negotiation; playback cannot proceed; no fallback",
-        )?;
-                if let Some(capture) = &capture {
-                    session.play_automatic(capture.reader(), live.unwrap().2)?;
-                } else if let Some((device, duration, volume)) = live {
-                    session.play_live(device, duration, volume)?;
-                } else if let Some((wav, volume)) = &playback {
-                    session.play_wav(&wav.frames, *volume)?;
-                } else {
-                    session.observe(std::time::Duration::from_secs(seconds))?;
-                }
-                session.stop()
-            })();
-            println!("PTP operation: {}", session.diagnostic());
-            result
-        })();
-        if capture.is_none() {
-            return result;
-        }
-        println!("AirPlay session stopped; resources released");
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-        if let Err(error) = result {
-            capture.as_ref().unwrap().rearm()?;
-            let delay = retry.failed(Instant::now());
-            println!("AirPlay connection/playback failure: {error:#}; retry delay {delay}s (requires meaningful input)");
+        session
+            .negotiate_realtime()
+            .context("receiver rejected PTP realtime type-96 UDP negotiation; playback cannot proceed; no fallback")?;
+        if let Some((device, duration, volume)) = live {
+            session.play_live(device, duration, volume)?;
+        } else if let Some((wav, volume)) = &playback {
+            session.play_wav(&wav.frames, *volume)?;
         } else {
-            retry = automatic::Retry::new(Instant::now());
+            session.observe(std::time::Duration::from_secs(seconds))?;
         }
-    }
+        session.stop()
+    })();
+    println!("PTP operation: {}", session.diagnostic());
+    result
 }

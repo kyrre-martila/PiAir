@@ -718,3 +718,58 @@ fn automatic_capture_requires_explicit_receiver_device_and_valid_durations() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("receiver is not approved"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("ALSA"));
 }
+
+#[test]
+fn unattended_run_requires_opt_in_receiver_and_explicit_authentication() {
+    let base = [
+        "run",
+        "device:aabbccddeeff",
+        "--capture-device",
+        "synthetic-only",
+    ];
+    for extra in [
+        vec![],
+        vec!["--authentication", "own-tone-transient"],
+        vec!["--allow-unattended"],
+        vec!["--allow-unattended", "--authentication", "legacy"],
+    ] {
+        let args: Vec<_> = base.into_iter().chain(extra).collect();
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("ALSA"));
+    }
+    let output = run(&["run", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--allow-unattended"));
+    assert!(help.contains("stored-hap"));
+    assert!(help.contains("own-tone-transient"));
+}
+
+#[test]
+fn run_without_approval_fails_without_tty_prompt_or_device_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "receiver_allowlist=[]").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_piair"))
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "run",
+            "device:aabbccddeeff",
+            "--allow-unattended",
+            "--capture-device",
+            "synthetic-only",
+            "--authentication",
+            "own-tone-transient",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("receiver is not approved"));
+    assert!(!error.contains("ALSA"));
+    assert!(!config.parent().unwrap().join("receiver-state").exists());
+}

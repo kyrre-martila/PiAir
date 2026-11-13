@@ -613,3 +613,5 @@ and terminal confirmation remain required. Explicit transient authentication
 still requires `--experimental-owntone-transient`. The ten-second pre-roll is
 bounded and cannot guarantee preserved openings after slow setup or overflow.
 See [automatic mode tuning, buffering and hardware validation](docs/LIVE_CAPTURE.md#automatic-turntable-mode).
+
+For foreground automatic playback without prompts, see [runtime and unattended operation](docs/RUNTIME.md), including explicit opt-in, authorization, shutdown and exit codes. No systemd service or installer is provided.
