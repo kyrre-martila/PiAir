@@ -2,7 +2,9 @@
 Description=PiAir automatic playback for %i
 Wants=network-online.target
 After=network-online.target sound.target
-StartLimitIntervalSec=300
+# Three starts fit even an inclusive 60-second window at RestartSec=30s.
+# Periodic recovery must never exhaust this limit after transient failures.
+StartLimitIntervalSec=60
 StartLimitBurst=3
 
 [Service]
@@ -17,7 +19,7 @@ StandardInput=null
 StandardOutput=journal
 StandardError=journal
 Restart=on-failure
-RestartSec=10s
+RestartSec=30s
 KillSignal=SIGTERM
 KillMode=control-group
 TimeoutStopSec=30s

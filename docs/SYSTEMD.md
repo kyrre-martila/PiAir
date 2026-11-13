@@ -126,12 +126,32 @@ network or sound-device dependency that would terminate PiAir on device/service
 changes. Receiver discovery, connection retries and existing fresh-audio backoff
 remain application responsibilities. No occupancy detection or switching is added.
 
-Restart=on-failure waits 10 seconds between failed invocations. At most three
-starts are permitted per 300 seconds, including manual starts. Persistent config,
-permission or lock errors therefore settle into a failed/rate-limited state.
-After fixing the cause, use `sudo systemctl reset-failed piair@USERNAME.service`
-and start again. Systemd does not restart an operator-requested stop, even if
-teardown reports failure. Successful exits are not automatically restarted.
+Restart=on-failure waits 30 seconds after each failed invocation before trying
+again, with no retry-count limit. Temporary startup failures, such as unavailable
+ALSA hardware or a network startup error that exits PiAir, can recover on a later
+attempt without another activation. Receiver/session failures handled inside the
+running application retain their existing retry and fresh-audio behavior.
+
+StartLimitIntervalSec=60 and StartLimitBurst=3 allow all normal automatic retries:
+even immediate failures produce at most three starts in an inclusive 60-second
+window (at 0, 30 and 60 seconds). Later starts continue indefinitely; failed
+invocations that take time only increase the spacing. These directives work on
+systemd 252 and require no newer restart-backoff features. The 30-second delay
+bounds automatic restart frequency; the start limit also protects against rapid
+external/manual activations. Such extra activations or overriding these settings
+can still cause start-limit-hit, which does not schedule its own recovery. After
+fixing that cause, use `sudo systemctl reset-failed piair@USERNAME.service` and
+start again. For an instance already exhausted under the old policy, reload the
+updated unit, reset-failed and explicitly start it once to resume recovery.
+
+Persistent configuration, permission or process-lock errors also retry every
+30 seconds until corrected or explicitly stopped; no policy can repair them.
+Inspect the journal and stop the service while fixing a persistent error. Hardware
+that remains absent cannot recover, and a receiver becoming reachable does not
+itself authorize playback. Systemd does not restart an operator-requested stop,
+even if teardown reports failure. Disable prevents future boot activation but
+does not stop an active service or its retries; use `disable --now` to do both.
+Successful exits are not automatically restarted.
 
 Stop sends SIGTERM directly to PiAir's control group. Existing cancellation stops
 monitoring/media, attempts bounded TEARDOWN, joins capture/timing/media workers,
@@ -183,6 +203,11 @@ standalone capability helper for PTP; the service grant ends with the process.
 
 Run `python3 -m unittest discover -s scripts -p 'test_*.py'`. Static tests assert
 the complete service contract and use systemd-analyze verify when installed.
+The retry regression checks that the delay, window and burst permit 10,000
+consecutive failures, including immediate failures and slower startup attempts,
+and detects exhaustion with the original policy. This is a conservative scheduling
+model, not a running-systemd test; manual activation storms and host overrides
+remain outside its automatic-retry assumptions.
 Verification uses user scope with a temporary runtime directory and substitutes
 only `/usr/bin/true` for the uninstalled executable; no service is started.
 This checks parsing, not system-manager privilege enforcement. On the Pi, also
