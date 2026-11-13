@@ -3251,3 +3251,38 @@ fn ptp_transient_opt_in_needs_selection_but_never_hap_credentials() {
     assert_eq!(std::fs::read(selection_path).unwrap(), before);
     assert!(store.credential(&selected.id).unwrap().is_none());
 }
+
+#[test]
+fn address_binding_requires_explicit_reselection_for_all_address_set_changes() {
+    for original in [
+        vec!["192.0.2.10"],
+        vec!["2001:db8::10"],
+        vec!["192.0.2.10", "2001:db8::10"],
+    ] {
+        let mut selected =
+            Selection::from_receiver(&snapshot(7000)[0], Method::PinDisplay).unwrap();
+        selected.addresses = original.iter().map(|ip| ip.parse().unwrap()).collect();
+        assert!(selected.matches_observation(&selected.clone()));
+        // Add/remove/rotate temporary IPv6, retaining even a valid IPv4:
+        // no automatic trust expansion or silent approved-set mutation.
+        for changed in [
+            vec!["192.0.2.10", "2001:db8::11"],
+            vec!["192.0.2.10"],
+            vec!["2001:db8::11"],
+            vec!["192.0.2.11"],
+        ] {
+            let mut observed = selected.clone();
+            observed.addresses = changed.iter().map(|ip| ip.parse().unwrap()).collect();
+            assert_eq!(
+                selected.matches_observation(&observed),
+                selected.addresses == observed.addresses
+            );
+        }
+        let mut observed = selected.clone();
+        observed.id = "device:112233445566".into();
+        assert!(!selected.matches_observation(&observed));
+        observed = selected.clone();
+        observed.port += 1;
+        assert!(!selected.matches_observation(&observed));
+    }
+}

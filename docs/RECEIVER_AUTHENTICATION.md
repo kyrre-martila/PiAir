@@ -52,7 +52,7 @@ wizard would extend orchestration and provisional selection semantics; this PR
 provides guidance to the existing command instead. There is no profile cycling,
 protocol fallback or automatic extension of stream-test authentication.
 
-## Even-Olai HomePod evidence, in order
+## Example HomePod evidence, in order
 
 Exact independently verified receiver: `device:<canonical-id>` (AudioAccessory5,1,
 reported firmware 27.2). Earlier [diagnostics](AUTHENTICATION_DIAGNOSTICS.md) and
@@ -76,16 +76,16 @@ output. No general HomePod compatibility or speculative protocol fix follows.
 
 Operator confirmation on 2026-11-08 establishes GET `/info`, M1/M2, M3/M4 and
 encrypted OPTIONS 200 with validated CSeq 4 for the HomePod above at
-192.168.1.33:7000. No audio was sent. See the
+192.0.2.33:7000. No audio was sent. See the
 [PR #33 single-attempt setup-check procedure](OWNTONE_TRANSIENT_SETUP_CHECK.md).
 No physical SETUP success or audible playback is established. The earlier
 procedure below records the preceding authentication/control round.
 
 ## Earlier Raspberry Pi diagnostic: authentication and control only
 
-1. Obtain explicit owner/operator authorization for **only** Even-Olai HomePod,
+1. Obtain explicit owner/operator authorization for **only** Example HomePod,
    `device:<canonical-id>`, and this single OwnTone-reference authentication/control
-   attempt. Do not contact Stua Apple TV. Do not change receiver access policy,
+   attempt. Do not contact Example Apple TV. Do not change receiver access policy,
    production OwnTone/autostream services, persistent enrollment or credentials.
 2. Build this reviewed revision in a separate checkout with
    `cargo build --release --locked`; record `git rev-parse HEAD`. Use its standalone

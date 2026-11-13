@@ -4,8 +4,8 @@ This diagnostic is authentication plus **initial NTP SETUP only**. Successful
 SETUP is not audible playback, stream readiness, persistent pairing, or durable
 receiver identity verification. No physical success is claimed for this change.
 
-Operator-confirmed PR #33 evidence on 2026-11-08: Even-Olai HomePod,
-`device:<canonical-id>`, `192.168.1.33:7000`, AudioAccessory5,1 firmware 27.2:
+Operator-confirmed PR #33 evidence on 2026-11-08: Example HomePod,
+`device:<canonical-id>`, `192.0.2.33:7000`, AudioAccessory5,1 firmware 27.2:
 transient SRP M1–M4, encrypted GET /info and initial NTP SETUP RTSP 200
 succeeded, including plist/timing-profile/port validation. Encrypted TEARDOWN
 CSeq 6 timed out after about three seconds with zero response bytes. No RECORD

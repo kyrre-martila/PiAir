@@ -414,7 +414,7 @@ defines bits 2 and 11–17. The
 [receiver implementation](https://github.com/openairplay/airplay2-receiver/blob/6c343d3679ddb561c61566985acaaf587d0a3bd3/ap2/bitflags.py)
 corroborates those names; its session lifecycle toggles bit 17. These are
 reverse-engineered references, not an Apple specification. Bit 20 is absent
-from their definitions: the supplied Stua observation is the evidence for this
+from their definitions: the supplied Example observation is the evidence for this
 specific exception, **not** proof of a general bit-20 meaning. The reported
 receiver ID, IPv4 address, port, `pi` and model stayed unchanged
 while flags changed `0x18644` ↔ `0x118644`. Model/name are informational discovery

@@ -28,7 +28,7 @@ credentials. OwnTone transient requires an explicit saved `--method transient`
 selection and an explicit authentication profile from CLI or `[playback]`. It provides no verified
 persistent receiver identity and is never a fallback for failed HAP authentication.
 
-For the verified UCA202 configuration, substitute the exact approved receiver ID:
+For a UCA202 configuration (verify on your own hardware), substitute the exact approved receiver ID:
 
 ```sh
 piair --config /path/to/config.toml run device:0123456789ab \
@@ -72,7 +72,7 @@ persistently selected receiver; it never establishes trust.
 | `volume_db` | Absent: preserve receiver volume | Integer -60..=-10 dB |
 
 See `config.example.toml` for a Behringer UCA202 / approved HomePod example.
-These are proven values for one setup, not general hardware recommendations.
+These are example values, not general hardware recommendations.
 Automatic RMS windows and qualification semantics remain unchanged (20 ms windows;
 start and stop are observed at window boundaries).
 
@@ -203,7 +203,8 @@ supervises this same `run --allow-unattended` command and existing persistent
 configuration. Interactive approval, selection and pairing remain separate
 preparation steps. Systemd provides boot startup, journal logging, bounded restart
 policy and SIGTERM shutdown; installation never starts or enables it automatically.
-No installer, daemonization or PID file is provided. Synthetic tests cover
+The [release installer](INSTALL.md) installs this template and resources;
+no daemonization or PID file is used. Synthetic tests cover
 orchestration, authorization, cancellation and cleanup without audio hardware. Process tests use synthetic ALSA `null` capture;
 active SIGINT/SIGTERM tests use mock PCM and loopback PTP/RTP/control sockets on
 unprivileged ports, verify packet transmission before cancellation, joined workers,

@@ -24,7 +24,18 @@ file capabilities for that service. The grant is applied at every start and
 survives binary upgrades without setcap. Do not run the manual helper for this
 service deployment. Existing configuration and credentials stay with their owner.
 
-## Explicit post-build step for standalone CLI use
+## Foreground setup versus the installed service
+
+`piair setup` runs as your ordinary user and can configure/save without playback.
+Its optional recording test cannot bind privileged timing ports on a standard
+installation. Skip it and explicitly start automatic playback through `piair start`
+after saving, or use a separate developer executable below to test a recording.
+The service grants its own process a capability; it does not grant permission to
+other foreground invocations. Never apply the helper to `/usr/local/bin/piair`:
+that managed executable deliberately has no file capabilities and maintenance
+checks its integrity. Do not change sudoers or privileged-port sysctls.
+
+## Explicit post-build step for standalone developer CLI use
 
 On Raspberry Pi OS, install `libcap2-bin` if `setcap` or `getcap` is missing:
 
@@ -32,7 +43,7 @@ On Raspberry Pi OS, install `libcap2-bin` if `setcap` or `getcap` is missing:
 sudo apt-get install libcap2-bin
 ```
 
-As **kyrre**, build and then grant the capability to that exact executable:
+As your **ordinary user**, build and then grant the capability to that exact executable:
 
 ```sh
 cd ~/PiAir
@@ -40,7 +51,7 @@ cargo build --release
 # Review this small helper before running it with installation privileges.
 sudo python3 scripts/grant-ptp-capability.py "$PWD/target/release/piair"
 getcap "$PWD/target/release/piair"
-# Expected: /home/kyrre/PiAir/target/release/piair cap_net_bind_service=ep
+# Expected: /home/USERNAME/PiAir/target/release/piair cap_net_bind_service=ep
 ```
 
 The helper accepts a canonical absolute path ending in `piair`. It rejects
@@ -75,15 +86,15 @@ or a directory. Do not build with sudo.
 For an already inspected, trusted path, the underlying explicit operation is:
 
 ```sh
-sudo setcap cap_net_bind_service=ep /home/kyrre/PiAir/target/release/piair
-getcap /home/kyrre/PiAir/target/release/piair
+sudo setcap cap_net_bind_service=ep /home/USERNAME/PiAir/target/release/piair
+getcap /home/USERNAME/PiAir/target/release/piair
 ```
 
 Prefer the validating helper for repeatable deployment. To revoke this grant:
 
 ```sh
-sudo setcap -r /home/kyrre/PiAir/target/release/piair
-getcap /home/kyrre/PiAir/target/release/piair
+sudo setcap -r /home/USERNAME/PiAir/target/release/piair
+getcap /home/USERNAME/PiAir/target/release/piair
 # Expected: no output
 ```
 
@@ -95,7 +106,7 @@ privileged ports. It permits binding **any privileged TCP/UDP port**, not just
 binary and control who can execute/replace that binary. It does not grant raw
 socket access, network administration, or root filesystem access. Do not grant
 `CAP_NET_RAW` or `CAP_NET_ADMIN`, change global sysctls, or run PiAir as root.
-PiAir must continue running as kyrre with its secure user-owned receiver-state
+PiAir must continue running as your ordinary user with its secure user-owned receiver-state
 directories. No config/state permission relaxation is needed.
 
 A filesystem without capability xattrs, a `nosuid` mount, a container capability
@@ -106,20 +117,20 @@ not that the current execution environment honors it.
 
 ## Manual Raspberry Pi verification
 
-Connect to `kyrre@192.168.1.43` and use the post-build sequence above. Confirm
-`id -un` prints `kyrre`, and verify the executable immediately before playback:
+Connect to your Pi (for example `USERNAME@PI_HOST`) and use the post-build sequence above. Confirm
+`id -un` prints your ordinary username, and verify the executable immediately before playback:
 
 ```sh
 getcap "$PWD/target/release/piair"
-./target/release/piair select device:0a05559f132f --method transient
-./target/release/piair -v ptp-wav-playback device:0a05559f132f \
+./target/release/piair select device:aabbccddeeff --method transient
+./target/release/piair -v ptp-wav-playback device:aabbccddeeff \
   --experimental-owntone-transient \
   --audio-file tests/assets/audio/Pachelbel_Canon_audio_test.wav \
   --seconds 15 \
   --volume-db -20
 ```
 
-HomePod Stua must already be approved. Confirm the interactive prompt; explicit
+HomePod Example must already be approved. Confirm the interactive prompt; explicit
 volume changes can persist. Check that initial SETUP proceeds without a local
 UDP bind permission error, music plays for approximately the full 15 seconds,
 and session cleanup completes. The operator reported this result after PR #64

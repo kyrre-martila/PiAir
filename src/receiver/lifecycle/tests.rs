@@ -2743,7 +2743,8 @@ fn local_ptp_bind_permission_failure_tears_down_accepted_setup() {
             ))
         });
         let error = owner.finish(result).unwrap_err();
-        assert!(error.to_string().contains(&format!("local PTP UDP {port}")));
+        assert!(format!("{error:#}").contains(&format!("local PTP UDP {port}")));
+        assert!(error.is::<super::super::wire::PtpPermissionDenied>());
         assert!(error
             .downcast_ref::<super::super::wire::ResponseFailure>()
             .is_none());

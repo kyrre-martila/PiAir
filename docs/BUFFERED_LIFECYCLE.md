@@ -190,8 +190,8 @@ No group expansion or group readiness inference is introduced here.
 ## Prompt 44: transient authentication compatibility (2026-11-10)
 
 Operator-supplied hardware evidence on main `9ad83d3` (PR #43): the approved,
-locally selected Even-Olai HomePod, `device:<canonical-id>`, endpoint
-`192.168.1.33:7000`, AudioAccessory5,1 firmware 27.2, rejected
+locally selected Example HomePod, `device:<canonical-id>`, endpoint
+`192.0.2.33:7000`, AudioAccessory5,1 firmware 27.2, rejected
 `piair -v buffered-test 'device:<canonical-id>' --setup-check` during M1/M2 with
 HTTP 403. That path sent `POST /pair-setup HTTP/1.1`, `User-Agent: PiAir/0.1`,
 and no preceding `/info`. It reached no SETUP, PTP or audio.
@@ -248,9 +248,9 @@ OwnTone, autostream, production configuration, volume or stored credentials.
 
 ## Prompt 45: authenticated format rejection (2026-11-10)
 
-Operator evidence on `694d038` (merged PR #44): Even-Olai HomePod,
+Operator evidence on `694d038` (merged PR #44): Example HomePod,
 `device:<canonical-id>`, AudioAccessory5,1 firmware 27.2 at
-`192.168.1.33:7000`, completed initial GET /info, transient SRP M1/M2 and
+`192.0.2.33:7000`, completed initial GET /info, transient SRP M1/M2 and
 M3/M4, and encrypted GET /info (all 200) using
 `piair -v buffered-test 'device:<canonical-id>' --setup-check`. Validation then
 reported `authenticated ALAC24/48000/stereo format unavailable or contradictory`.

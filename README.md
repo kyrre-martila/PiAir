@@ -23,7 +23,7 @@ piair setup       # Configure audio input, receiver and authentication
 piair             # Open the daily menu (also works over SSH with a TTY)
 ```
 
-Setup guides receiver identity verification and approval, explicit authentication,
+Setup guides speaker selection and approval, explicit authentication,
 audio detection settings, an optional 49-second recording test, and optional
 activation of the installed service. See [setup and troubleshooting](docs/SETUP.md).
 Existing configurations and stored credentials remain usable without pairing again.
@@ -85,7 +85,7 @@ uninstall preserves personal configuration and credentials by default. See
 Settings normally live in `~/.config/piair/config.toml`, with private selection
 and credentials in adjacent `receiver-state/`. `--config PATH`, `PIAIR_CONFIG`
 and XDG configuration paths remain supported. Use the menu's **Settings** or
-`piair setup` to reconfigure, then restart when ready. Manual configuration is
+`piair setup` to reconfigure while stopped, then explicitly start when ready. Manual configuration is
 available through `piair config --help` and [runtime settings](docs/RUNTIME.md).
 The legacy `[audio]` monitor/calibration thresholds and `[playback]` activity
 settings retain their different detector semantics; no migration is required.

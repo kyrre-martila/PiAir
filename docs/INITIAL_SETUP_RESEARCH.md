@@ -108,7 +108,7 @@ claim READY. No hardware success is claimed here.
    idle: stream-test can take over playback and the low test volume can persist.
    Do not run during other playback.
 3. Keep the existing config, allowlist, selection and credentials. Confirm the
-   selected/pinned receiver is `device:<canonical-id>` (Stua Apple TV). If identity,
+   selected/pinned receiver is `device:<canonical-id>` (Example Apple TV). If identity,
    endpoint or authorization validation fails, stop and review; do not re-pair
    or bypass checks as part of this test.
 4. From an interactive terminal run once:

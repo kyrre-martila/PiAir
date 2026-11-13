@@ -15,7 +15,7 @@ Examples use placeholders; verify the canonical ID independently.
 
 This change does not fix or establish HomePod compatibility. No receiver was
 contacted during development. The early hardware observation was:
-Even-Olai HomePod, `device:<canonical-id>`, `192.168.1.33:7000`,
+Example HomePod, `device:<canonical-id>`, `192.0.2.33:7000`,
 `AudioAccessory5,1`, firmware 27.2, AirPlay protocol 1.1, status `0x98404`,
 ACL 0. Persistent HKP 3 PIN-start returns HTTP 403; explicitly selected transient
 HKP 4 passes local capability policy but its first `/pair-setup` returns HTTP 403.

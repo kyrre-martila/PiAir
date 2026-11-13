@@ -48,6 +48,15 @@ pub(crate) fn command_error_message(error: &anyhow::Error, detailed: bool) -> St
     }
 }
 
+fn setup_problem(error: &anyhow::Error, guidance: &str, detailed: bool) -> String {
+    tracing::debug!(error = %format!("{error:#}"), "setup operation failed");
+    if detailed || error.is::<super::lifecycle::CleanupFailure>() {
+        format!("{guidance}\nDetails: {error:#}")
+    } else {
+        format!("{guidance}\nRun piair -v setup for details.")
+    }
+}
+
 pub(crate) fn run(loaded: Loaded) -> Result<()> {
     ui::require_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())?;
     let cancel = runtime::signal_cancellation()?;
@@ -73,9 +82,7 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
                 Ok(id) => id,
                 Err(e) if e.is::<Cancelled>() => return Err(e),
                 Err(e) => {
-                    ui.say(format!(
-                        "Receiver validation failed: {e:#}\n1. Rescan\n2. Cancel"
-                    ))?;
+                    ui.say(setup_problem(&e, "The speaker advertisement could not be validated. Check the intended speaker, then rescan or cancel.\n1. Rescan\n2. Cancel", tracing::enabled!(tracing::Level::DEBUG)))?;
                     if ui.choice("Choose:", 2, None)? == 2 {
                         return Err(Cancelled.into());
                     }
@@ -107,7 +114,7 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
                 }
                 Err(e) if e.is::<Cancelled>() => return Err(e),
                 Err(e) => {
-                    ui.say(format!("Authentication configuration failed: {e:#}\nNo fallback was attempted.\n1. Retry receiver/authentication selection\n2. Cancel"))?;
+                    ui.say(setup_problem(&e, "The speaker connection could not be configured. Check the selected connection method and saved pairing. No fallback was attempted.\n1. Retry receiver/authentication selection\n2. Cancel", tracing::enabled!(tracing::Level::DEBUG)))?;
                     if ui.choice("Choose:", 2, None)? == 2 {
                         return Err(Cancelled.into());
                     }
@@ -147,7 +154,7 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
         drop(instance);
         let loaded = config::load(Some(loaded.path.clone()))?;
         optional_service(&loaded, &mut ui, &mut journal)?;
-        ui.say("Setup complete.\nTo run in this terminal: piair run --allow-unattended\nUse the same --config path if you supplied one.\nRe-run piair setup whenever you want to reconfigure.")?;
+        ui.say("Setup complete.\nCheck service availability with piair status. Start automatic playback explicitly with piair start when ready.\nForeground playback needs local timing-port permission; see docs/PTP_PORT_PERMISSIONS.md.\nSaving settings does not verify audible playback.\nRe-run piair setup whenever you want to reconfigure.")?;
         Ok(())
     })();
     if result.is_err() {
@@ -721,7 +728,11 @@ fn playback_feedback_details<R: FnMut() -> Result<String>, W: Write>(
             "PiAir couldn't prepare the audio test.\nCheck your settings and try again.",
             |stage| stage.message(),
         );
-        ui.say(message)?;
+        if let Some(permission) = e.downcast_ref::<super::wire::PtpPermissionDenied>() {
+            ui.say(permission.to_string())?;
+        } else {
+            ui.say(message)?;
+        }
         if detailed {
             ui.say(format!("Details: {e:#}"))?;
         } else {

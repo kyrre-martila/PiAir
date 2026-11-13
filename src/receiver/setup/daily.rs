@@ -338,14 +338,34 @@ fn receiver<R: FnMut() -> Result<String>, W: Write>(
         });
     }
 }
-fn setup_child(loaded: &Loaded, cancel: &AtomicBool) -> Result<()> {
+fn setup_command(loaded: &Loaded, verbosity: u8) -> Result<std::process::Command> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
+    match verbosity {
+        0 => (),
+        1 => {
+            command.arg("-v");
+        }
+        _ => {
+            command.arg("-vv");
+        }
+    }
     // An absent default config is valid for setup; making it explicit would
     // turn it into a missing-file error before the wizard could create it.
     if loaded.source == "file" || loaded.path.exists() {
         command.arg("--config").arg(&loaded.path);
     }
-    let mut child = command.arg("setup").spawn()?;
+    command.arg("setup");
+    Ok(command)
+}
+fn setup_child(loaded: &Loaded, cancel: &AtomicBool) -> Result<()> {
+    let verbosity = if tracing::enabled!(tracing::Level::TRACE) {
+        2
+    } else if tracing::enabled!(tracing::Level::DEBUG) {
+        1
+    } else {
+        0
+    };
+    let mut child = setup_command(loaded, verbosity)?.spawn()?;
     let mut interrupted = false;
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -876,5 +896,27 @@ mod tests {
         assert!(!String::from_utf8(ui.out)
             .unwrap()
             .contains("Start PiAir again?"));
+    }
+}
+
+#[cfg(test)]
+mod setup_command_tests {
+    use super::*;
+    #[test]
+    fn menu_setup_preserves_diagnostics_and_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        let loaded = config::load(Some(path.clone())).unwrap();
+        for verbosity in 0..=2 {
+            let command = setup_command(&loaded, verbosity).unwrap();
+            let args: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
+            let mut expected = Vec::new();
+            if verbosity > 0 {
+                expected.push(if verbosity == 1 { "-v" } else { "-vv" });
+            }
+            expected.extend(["--config", path.to_str().unwrap(), "setup"]);
+            assert_eq!(args, expected);
+        }
     }
 }

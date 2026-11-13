@@ -78,7 +78,7 @@ Leave production OwnTone/autostream services unchanged. With the operator ready
 for sound, from the repository root run exactly one bounded test:
 
 ```sh
-./target/release/piair -v stream-test device:02d899c1833f \
+./target/release/piair -v stream-test device:112233445566 \
   --audio-file tests/assets/audio/Pachelbel_Canon_audio_test.wav \
   --seconds 10 --volume-db -20
 ```

@@ -2,7 +2,7 @@
 
 This supersedes the diagnostic-only decision in PR #27. Base: fresh
 `origin/main` c4581b03c3c34b315e48df833a6f0e278ab2b148 (merged #27).
-Reported hardware evidence: Apple TV Stua, AppleTV6,2, tvOS 26.6.1 completes
+Reported hardware evidence: Apple TV Example, AppleTV6,2, tvOS 26.6.1 completes
 verified authentication, encrypted initial SETUP, early NTP, RECORD 200 with
 `Audio-Latency: 0`, and encrypted cleanup TEARDOWN. The old RECORD range check
 stopped negotiation before stream SETUP; no audio had been transmitted.

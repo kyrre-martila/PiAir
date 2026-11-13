@@ -9,7 +9,8 @@ Use `piair --help` for direct and advanced commands.
   under Settings for later changes. Explicitly named missing config files and
   invalid TOML fail with their path; correct the file or use the normal default.
 - **Service unavailable / not installed:** PiAir can still be configured and run
-  in the foreground. Use the [release installation procedure](INSTALL.md). Daily commands do not install anything.
+  in the foreground with explicit timing-port permission (see
+  [PTP permissions](PTP_PORT_PERMISSIONS.md)). Use the [release installation procedure](INSTALL.md). Daily commands do not install anything.
 - **Authorization denied:** systemctl uses normal system authorization, including
   polkit where configured. Ask the system administrator about service management
   permissions; PiAir does not change sudoers or run playback as root.

@@ -8,7 +8,7 @@ Examples use placeholders; verify the canonical ID independently.
 ## Evidence and root cause
 
 Reported hardware evidence (not a test run performed for this change): the
-explicitly authorized **Stua HomePod, 192.168.1.119, firmware 27.2** sends
+explicitly authorized **Example HomePod, 192.0.2.119, firmware 27.2** sends
 PTPv2 Delay_Req on UDP 319 after authenticated SETUP, with controlField=0
 and sequences 1–9. PiAir sends Sync/Follow_Up, but no Delay_Resp is observed
 and its state remains Synchronizing. Receiver clock adoption is unverified.
@@ -77,11 +77,11 @@ sequence/general routing only after a successful send. No packet dump, address,
 clock/port identity, secret, plist, key or media content is logged. Floods cannot
 consume the success budget. Diagnostics are silent at INFO.
 
-## Manual Stua-only verification (not performed)
+## Manual Example-only verification (not performed)
 
 1. In a separate checkout on the Pi, build this PR and read local help. Retain
-   the existing explicit selection/allowlist/authentication for Stua only.
-   Verify the selected receiver still resolves to 192.168.1.119 and is firmware
+   the existing explicit selection/allowlist/authentication for Example only.
+   Verify the selected receiver still resolves to 192.0.2.119 and is firmware
    27.2. Stop on identity, ClockID or address conflicts; do not infer a missing
    ClockID from UDP traffic or change any service/privilege configuration.
 2. Run the existing bounded initial-SETUP-only diagnostic with debug logging:

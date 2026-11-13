@@ -83,8 +83,8 @@ pairing, fallback or receiver command is introduced.
 ## Hardware verification (not performed)
 
 On the authorized Raspberry Pi installation, build the release binary, retain
-the existing allowlist/selection for Stua (`device:<canonical-id>`, RTSP
-192.168.1.119), and use only the existing initial buffered SETUP diagnostic.
+the existing allowlist/selection for Example (`device:<canonical-id>`, RTSP
+192.0.2.119), and use only the existing initial buffered SETUP diagnostic.
 Run `piair --config <config> -v buffered-test 'device:<canonical-id>' --setup-check`
 only when ready to perform that authorized hardware check. The `-v` flag enables
 the bounded debug diagnostics.

@@ -870,3 +870,31 @@ fn hidden_diagnostics_keep_their_own_help_arguments_and_aliases() {
         assert!(run(&[command, "--help"]).status.success());
     }
 }
+
+#[test]
+fn command_errors_are_readable_except_in_unattended_json_mode() {
+    for verbosity in [None, Some("-v"), Some("-vv")] {
+        for unattended in [false, true] {
+            let mut args = vec!["--config", "/nonexistent/piair.toml"];
+            if let Some(flag) = verbosity {
+                args.push(flag);
+            }
+            if unattended {
+                args.extend(["run", "--allow-unattended"]);
+            } else {
+                args.extend(["config", "check"]);
+            }
+            let output = run(&args);
+            assert_eq!(output.status.code(), Some(1));
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains("check path and read permissions"));
+            if unattended {
+                let event: serde_json::Value = serde_json::from_str(error.trim()).unwrap();
+                assert_eq!(event["level"], "ERROR");
+            } else {
+                assert!(error.contains("ERROR"));
+                assert!(!error.contains("\"fields\""));
+            }
+        }
+    }
+}

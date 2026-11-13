@@ -906,3 +906,44 @@ fn playback_feedback_honors_normal_verbose_and_trace_logging_levels() {
         });
     }
 }
+
+#[test]
+fn local_ptp_permission_failure_never_blames_speaker_or_requests_audible_confirmation() {
+    for detailed in [false, true] {
+        for port in [319, 320] {
+            let error = super::super::wire::ptp_bind_error(
+                port,
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            )
+            .context(super::super::playback_error::Stage::Playback);
+            let mut ui = Ui {
+                read: || panic!("permission failure cannot establish audible success"),
+                out: Vec::new(),
+            };
+            playback_feedback_details(Err(error), &mut ui, &AtomicBool::new(false), detailed)
+                .unwrap();
+            let text = String::from_utf8(ui.out).unwrap();
+            assert!(text.contains("foreground process"));
+            assert!(text.contains("piair start"));
+            assert!(text.contains("Do not run PiAir as root"));
+            assert!(text.contains("No successful playback test recorded"));
+            if !detailed {
+                assert!(!text.contains("Check the speaker and network"));
+            }
+            assert_eq!(text.contains(&format!("local PTP UDP {port}")), detailed);
+        }
+    }
+}
+
+#[test]
+fn setup_operation_guidance_hides_protocol_details_but_keeps_cleanup_failures() {
+    let error = anyhow::anyhow!("internal protocol rejection");
+    for detailed in [false, true] {
+        let text = setup_problem(&error, "Check the selected connection method.", detailed);
+        assert!(text.contains("Check the selected connection method."));
+        assert_eq!(text.contains("internal protocol rejection"), detailed);
+    }
+    let cleanup: anyhow::Error =
+        super::super::lifecycle::CleanupFailure(anyhow::anyhow!("cleanup failed")).into();
+    assert!(setup_problem(&cleanup, "Setup failed.", false).contains("cleanup failed"));
+}

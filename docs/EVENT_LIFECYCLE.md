@@ -2,7 +2,7 @@
 
 Base: fresh origin/main 920e710, including merged PR #28.
 
-User-supplied Apple TV Stua evidence (AppleTV6,2, tvOS 26.6.1): authentication,
+User-supplied Apple TV Example evidence (AppleTV6,2, tvOS 26.6.1): authentication,
 initial SETUP, RECORD (Audio-Latency: 0), stream SETUP and SET_PARAMETER succeeded;
 NTP was ready but no event arrived. The three-second synchronization wait failed,
 TEARDOWN succeeded, and zero audio packets were sent. This identifies an unsupported
