@@ -78,7 +78,7 @@ jobs:
           sha256sum --check SHA256SUMS
           test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.36'
           ldd ./piair
-          ./piair --version
+          test "$(./piair --version)" = "piair $(cat VERSION)"
           ./piair --help >/dev/null
           test -s audio/Pachelbel_Canon_audio_test.wav
           test -s audio/LICENSE.md

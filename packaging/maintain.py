@@ -52,7 +52,7 @@ def require(ok, message):
 
 def version(value):
     require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value) is not None,
-            "Expected a stable semantic version (for example 0.1.0)")
+            "Expected a stable semantic version (for example 1.0.0)")
     parts = value.split(".")
     require(all(p == str(int(p)) for p in parts), "Noncanonical version")
     return tuple(map(int, parts))
