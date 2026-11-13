@@ -66,6 +66,8 @@ fn valid_pairing_id(id: &str) -> bool {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
     id: String,
     advertised_pi: Option<String>,
     method: Method,
@@ -111,6 +113,7 @@ impl Selection {
             "invalid receiver endpoint"
         );
         Ok(Self {
+            display_name: Some(r.name.clone()),
             id: r.id.clone(),
             advertised_pi,
             method,

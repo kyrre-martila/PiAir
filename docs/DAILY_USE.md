@@ -1,0 +1,53 @@
+# Daily PiAir use
+
+Run `piair` over SSH with a TTY for numbered choices. Status is read-only and
+never takes the playback lock, opens audio, scans receivers or connects to them.
+The menu refreshes saved settings and service state after each action.
+Use `piair --help` for direct and advanced commands.
+
+- **Configuration incomplete:** choose Run piair setup. Setup is also available
+  under Settings for later changes. Explicitly named missing config files and
+  invalid TOML fail with their path; correct the file or use the normal default.
+- **Service unavailable / not installed:** PiAir can still be configured and run
+  in the foreground. Installation belongs to PR #74; use the existing
+  [manual procedure](SYSTEMD.md). Daily commands do not install anything.
+- **Authorization denied:** systemctl uses normal system authorization, including
+  polkit where configured. Ask the system administrator about service management
+  permissions; PiAir does not change sudoers or run playback as root.
+- **Custom template, environment or drop-ins:** review and control the service
+  manually using [SYSTEMD.md](SYSTEMD.md). Daily controls verify the stock template,
+  executable, account, environment and default config path before acting.
+- **Another automatic playback instance:** stop your foreground `piair run` or
+  automatic capture manually before setup, receiver changes or standalone tests.
+  PiAir never kills it or removes a lock file.
+- **Running - activity unknown:** systemd reports an active service with a main
+  PID. There is no reliable live playback observation. Even a successful local
+  playback transmission cannot establish that sound was audible.
+- **Receiver authentication not configured:** use `piair setup` for explicit
+  enrollment or authentication selection. A different authentication method is
+  never tried automatically. Discovery names and addresses are untrusted.
+- **Receiver update failed:** inspect the reported persistence result. Selection
+  writes are serialized with other selection writers; playback saves reject a
+  changed config snapshot. A failed save attempts to restore the old selection. An uncertain config save
+  restores the reviewed old config only if the file still matches the attempted
+  write; concurrent changes are never overwritten.
+  A crash between the two atomic files can leave different receiver IDs. Runtime
+  preparation rejects this state; run setup to review and repair before starting.
+  Approval explicitly granted before a later failure remains saved.
+- **Test recording missing:** install both WAV and LICENSE.md as described in
+  [SETUP.md](SETUP.md), or set `PIAIR_AUDIO_DATA_DIR`. Nothing is downloaded.
+- **No logs / journal access denied:** `piair logs` reads the latest 40 entries
+  for the current account's unit; `piair logs --follow` follows it until Ctrl+C.
+  Structured events show their message, errors and runtime event details;
+  `piair -v logs` includes additional safe diagnostic fields.
+  Empty output can mean no retained records or insufficient journal access.
+  Check the journal's permission message and ask the administrator about journal
+  access. For full systemd diagnostics use the commands in [SYSTEMD.md](SYSTEMD.md).
+  Entries are historical, potentially from earlier service processes; they are
+  never used to infer current playback. The service result and MainPID shown by
+  status come from systemd's current properties.
+
+Starting or stopping does not enable or disable boot startup. A stopped service
+is not automatically started after changing receivers or settings. If the menu
+stopped a running service, it offers a separate confirmed start afterward.
+No automatic fallback, multiple outputs or receiver occupancy checks are used.

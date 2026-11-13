@@ -14,13 +14,24 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 pub enum Command {
     /// Interactive first-time setup or safe reconfiguration (requires a terminal).
     Setup,
+    /// Start the installed current-account service.
+    Start,
+    /// Stop the installed current-account service.
+    Stop,
+    /// Restart the installed current-account service.
+    Restart,
+    /// Show recent service logs.
+    Logs {
+        #[arg(long)]
+        follow: bool,
+    },
     /// Foreground automatic playback without prompts; requires existing approval and selection.
     Run {
         receiver_id: Option<String>,
@@ -40,7 +51,7 @@ pub enum Command {
         #[command(subcommand)]
         command: AudioCommand,
     },
-    /// Report this invocation's local application and configuration status.
+    /// Show current service state and saved playback configuration.
     Status,
     /// Discover advertisements only; never select or connect to a receiver.
     Devices,
@@ -241,7 +252,7 @@ mod tests {
         let base = ["piair", "stream-test", "device:aabbccddeeff"];
         let cli = Cli::try_parse_from(base).unwrap();
         assert!(matches!(
-            cli.command,
+            cli.command.unwrap(),
             Command::StreamTest {
                 setup_timeout_seconds: None,
                 ..
@@ -291,7 +302,7 @@ mod tests {
             let Command::Authenticate {
                 experimental_pyatv_transient_preamble,
                 ..
-            } = cli.command
+            } = cli.command.unwrap()
             else {
                 panic!("authenticate expected")
             };
@@ -306,7 +317,10 @@ mod interactive_tests {
     #[test]
     fn pairing_and_stream_volume_syntax() {
         assert!(matches!(
-            Cli::try_parse_from(["piair", "pairing"]).unwrap().command,
+            Cli::try_parse_from(["piair", "pairing"])
+                .unwrap()
+                .command
+                .unwrap(),
             Command::Pairing
         ));
         for id in [None, Some("device:aabbccddeeff")] {
@@ -320,7 +334,7 @@ mod interactive_tests {
                     receiver_id,
                     volume_db,
                     ..
-                } = Cli::try_parse_from(args).unwrap().command
+                } = Cli::try_parse_from(args).unwrap().command.unwrap()
                 else {
                     panic!()
                 };
@@ -360,7 +374,7 @@ mod owntone_setup_tests {
         ];
         let cli = Cli::try_parse_from(base).unwrap();
         assert!(matches!(
-            cli.command,
+            cli.command.unwrap(),
             Command::StreamTest {
                 experimental_owntone_transient: true,
                 setup_check: true,
@@ -404,7 +418,7 @@ mod owntone_setup_tests {
             ],
         ] {
             assert!(matches!(
-                Cli::try_parse_from(args).unwrap().command,
+                Cli::try_parse_from(args).unwrap().command.unwrap(),
                 Command::StreamTest {
                     experimental_owntone_transient: false,
                     ..
@@ -529,7 +543,7 @@ mod stua_volume_tests {
             )
             .unwrap();
             assert!(
-                matches!(cli.command, Command::HapPlaybackCheck { volume_db, .. } if volume_db == expected)
+                matches!(cli.command.unwrap(), Command::HapPlaybackCheck { volume_db, .. } if volume_db == expected)
             );
         }
     }
@@ -614,11 +628,11 @@ mod dynamic_diagnostic_tests {
 
 impl Cli {
     pub fn validate(&self) -> Result<(), clap::Error> {
-        if let Command::StreamTest {
+        if let Some(Command::StreamTest {
             seconds,
             audio_file,
             ..
-        } = &self.command
+        }) = &self.command
         {
             if *seconds > 3 && audio_file.is_none() {
                 return Err(clap::Error::raw(
@@ -694,7 +708,7 @@ mod ptp_arguments {
     fn explicit_ptp_is_bounded_selected_and_audio_free() {
         let base = ["piair", "ptp-negotiation-check", "device:112233445566"];
         assert!(matches!(
-            Cli::try_parse_from(base).unwrap().command,
+            Cli::try_parse_from(base).unwrap().command.unwrap(),
             Command::PtpNegotiationCheck {
                 observation_seconds: 10,
                 experimental_owntone_transient: false,
@@ -738,7 +752,7 @@ mod ptp_wav_arguments {
             "input.wav",
         ];
         assert!(matches!(
-            Cli::try_parse_from(args).unwrap().command,
+            Cli::try_parse_from(args).unwrap().command.unwrap(),
             Command::PtpWavPlayback {
                 seconds: 30,
                 volume_db: None,
@@ -787,7 +801,7 @@ mod ptp_transient_arguments {
             if opt_in {
                 args.push("--experimental-owntone-transient");
             }
-            match Cli::try_parse_from(args).unwrap().command {
+            match Cli::try_parse_from(args).unwrap().command.unwrap() {
                 Command::PtpWavPlayback {
                     receiver_id,
                     seconds,
@@ -819,7 +833,7 @@ mod live_arguments {
             "plughw:CARD=USB,DEV=0",
         ];
         assert!(matches!(
-            Cli::try_parse_from(base).unwrap().command,
+            Cli::try_parse_from(base).unwrap().command.unwrap(),
             Command::ExperimentalPtpCapture {
                 seconds: None,
                 volume_db: None,

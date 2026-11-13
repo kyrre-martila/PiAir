@@ -22,7 +22,10 @@ fn run_with_discovery(
     discover: impl Fn(u64) -> Result<Vec<discovery::Receiver>>,
 ) -> Result<()> {
     let loaded = config::load(cli.config)?;
-    match cli.command {
+    let Some(command) = cli.command else {
+        return receiver::setup::daily(loaded);
+    };
+    match command {
         Command::Setup => receiver::setup::run(loaded)?,
         Command::Run {
             receiver_id,
@@ -185,22 +188,11 @@ fn run_with_discovery(
         } => receiver::hap_check(&loaded, receiver_id.as_deref(), true, volume_db)?,
         Command::Unpair { receiver_id } => receiver::unpair(&loaded, &receiver_id)?,
         Command::Audio { command } => audio::run(command, &loaded)?,
-        Command::Status => {
-            println!("PiAir {}: local CLI ready", env!("CARGO_PKG_VERSION"));
-            println!(
-                "Configuration: {} ({})",
-                loaded.path.display(),
-                loaded.source
-            );
-            println!("Validation: valid");
-            println!(
-                "Allowlisted receivers: {}",
-                loaded.config.receiver_allowlist.len()
-            );
-            println!("Audio capture: available via audio monitor; not opened by status");
-            println!("AirPlay playback: explicit stream-test available; hardware unverified; no active session");
-            println!("No service or receiver status was queried.");
-        }
+        Command::Status => receiver::setup::daily_status(&loaded)?,
+        Command::Start => receiver::setup::daily_control(&loaded, "start")?,
+        Command::Stop => receiver::setup::daily_control(&loaded, "stop")?,
+        Command::Restart => receiver::setup::daily_control(&loaded, "restart")?,
+        Command::Logs { follow } => receiver::setup::daily_logs(&loaded, follow, cli.verbose > 0)?,
         Command::Config { command } => match command {
             ConfigCommand::SetPlayback {
                 receiver_id,

@@ -23,6 +23,7 @@ fn fixture(method: Method) -> (tempfile::TempDir, Loaded, Selection) {
     let path = dir.path().join("config.toml");
     fs::write(&path, format!("receiver_allowlist=['{ID}']")).unwrap();
     let selected = Selection {
+        display_name: None,
         id: ID.into(),
         advertised_pi: None,
         method,
@@ -534,4 +535,70 @@ fn persistent_updates_preserve_private_state_and_operational_pins() {
         assert!(runtime.check().is_err());
         assert!(config::save_playback(&changed, None, PlaybackArgs::default()).is_err());
     }
+}
+
+#[test]
+fn receiver_transaction_restores_selection_on_failed_save_and_rejects_concurrent_writer() {
+    let (_dir, loaded, previous) = fixture(Method::Transient);
+    let store = Store::new(&loaded.path).unwrap();
+    let mut next = previous.clone();
+    next.id = "device:112233445566".into();
+    let original = fs::read(&loaded.path).unwrap();
+    let error = store
+        .change_with_playback(&next, &previous, || {
+            assert_eq!(store.selection().unwrap().unwrap().id, next.id);
+            anyhow::bail!("injected playback publication failure")
+        })
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("previous selection restored"));
+    assert!(store.selection().unwrap().as_ref() == Some(&previous));
+    assert_eq!(fs::read(&loaded.path).unwrap(), original);
+    store.select(&next).unwrap();
+    let mut saved = false;
+    assert!(store
+        .change_with_playback(&next, &previous, || {
+            saved = true;
+            Ok(())
+        })
+        .is_err());
+    assert!(!saved);
+}
+
+#[test]
+fn receiver_transaction_saves_both_files_and_interruption_fails_closed() {
+    let (_dir, loaded, previous) = fixture(Method::Transient);
+    let store = Store::new(&loaded.path).unwrap();
+    let mut next = previous.clone();
+    next.id = "device:112233445566".into();
+    next.display_name = Some("Synthetic room".into());
+    fs::write(
+        &loaded.path,
+        format!("receiver_allowlist=['{ID}', '{}']", next.id),
+    )
+    .unwrap();
+    let loaded = config::load(Some(loaded.path.clone())).unwrap();
+    let args = || crate::cli::PlaybackArgs {
+        capture_device: Some("synthetic-only".into()),
+        authentication: Some(Authentication::OwnToneTransient),
+        ..Default::default()
+    };
+    config::save_playback(&loaded, Some(ID.into()), args()).unwrap();
+    let loaded = config::load(Some(loaded.path.clone())).unwrap();
+    // Model process termination after selection publication, before config rename.
+    store.select(&next).unwrap();
+    assert!(Runtime::prepare(&loaded, loaded.config.playback.effective().unwrap()).is_err());
+    store.select(&previous).unwrap();
+    let baseline = crate::allowlist::snapshot(&loaded.path).unwrap();
+    store
+        .change_with_playback(&next, &previous, || {
+            config::save_playback_checked(&loaded, Some(next.id.clone()), args(), Some(&baseline))
+        })
+        .unwrap();
+    let saved = config::load(Some(loaded.path.clone())).unwrap();
+    assert_eq!(
+        saved.config.playback.receiver_id.as_deref(),
+        Some(next.id.as_str())
+    );
+    assert!(Runtime::prepare(&saved, saved.config.playback.effective().unwrap()).is_ok());
+    assert!(store.selection().unwrap().as_ref() == Some(&next));
 }

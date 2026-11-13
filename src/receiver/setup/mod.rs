@@ -1,6 +1,8 @@
 //! Thin setup orchestration. Transport, authorization and persistence stay in
 //! their existing modules; prompts never imply an authenticated receiver identity.
+mod daily;
 mod resources;
+pub(crate) use daily::{daily, daily_control, daily_logs, daily_status};
 mod service;
 mod ui;
 use super::{
@@ -291,7 +293,7 @@ fn discover_receivers_with<R: FnMut() -> Result<String>, W: Write>(
     mut discover: impl FnMut(u64, &AtomicBool) -> Result<Vec<Receiver>>,
 ) -> Result<Vec<Receiver>> {
     loop {
-        ui.say("\n3/8 AirPlay receiver\nDiscovering nearby advertisements...")?;
+        ui.say("\nAirPlay receiver\nDiscovering nearby advertisements...")?;
         match discover(timeout, cancel) {
             Ok(mut rows) => {
                 ensure!(!cancel.load(Ordering::Relaxed), Cancelled);
@@ -654,12 +656,12 @@ fn test_audio<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
-    ui.say("\n6/8 AirPlay audio playback test\nTests the AirPlay output path; ALSA input was checked separately.\n1. Play test recording (49 seconds)\n2. Skip test [default]")?;
+    ui.say("\nAirPlay audio playback test\nTests the AirPlay output path; ALSA input was checked separately.\n1. Play test recording (49 seconds)\n2. Skip test [default]")?;
     if ui.choice("Choose:", 2, Some(2))? == 2 {
         return Ok(());
     }
     let Some(path) = resources::locate() else {
-        ui.say("Test recording or LICENSE.md is missing. Continuing without playback.\nInstall both in /usr/local/share/piair/audio (future installer PR #74),\nor set PIAIR_AUDIO_DATA_DIR to their directory.\nDevelopment: tests/assets/audio. Nothing is downloaded.")?;
+        ui.say("Test recording or LICENSE.md is missing. Skipping playback.\nInstall both in /usr/local/share/piair/audio (future installer PR #74),\nor set PIAIR_AUDIO_DATA_DIR to their directory.\nDevelopment: tests/assets/audio. Nothing is downloaded.")?;
         return Ok(());
     };
     ui.say(format!("Pachelbel's Canon in D, arrangement/performance: Lee Galloway.\nRecording: CC BY-SA 3.0, separately from PiAir's Apache-2.0 code.\nAttribution: {}\nhttps://creativecommons.org/licenses/by-sa/3.0/\nReceiver volume is preserved during this test. Ctrl+C stops playback.",path.with_file_name("LICENSE.md").display()))?;
@@ -697,7 +699,7 @@ fn playback_feedback<R: FnMut() -> Result<String>, W: Write>(
     if let Err(e) = result {
         ui.say(format!("Playback test failed: {e:#}"))?;
         playback_troubleshooting(ui)?;
-        ui.say("Continuing setup without a successful playback test.")?;
+        ui.say("No successful playback test recorded.")?;
         return Ok(());
     }
     ui.say("Did you hear the audio?\n1. Yes, audio works\n2. No, show troubleshooting guidance\n3. Skip confirmation")?;
