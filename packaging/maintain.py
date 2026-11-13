@@ -166,7 +166,9 @@ class Services:
             require(sep and key in fields.split(",") and key not in properties,
                     "Malformed systemctl show output: " + unit)
             properties[key] = value
-        require(set(properties) == set(fields.split(",")), "Incomplete systemctl show output: " + unit)
+        require(set(properties) == set(fields.split(",")),
+                "Incomplete systemctl show output: " + unit + "; missing " +
+                ",".join(sorted(set(fields.split(",")) - set(properties))))
         # Some systemd versions return EXIT_FAILURE for a missing unit even with
         # explicit properties. Accept only the complete, inert not-found record.
         absent = (properties["LoadState"] == "not-found" and
