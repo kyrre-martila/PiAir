@@ -14,7 +14,7 @@ HomePod. See [validation status](docs/DEVELOPMENT.md#validation-status).
 Precompiled packages support **Raspberry Pi OS 64-bit Bookworm or newer** on ARM64
 Raspberry Pis (Pi 3/4/5 and Zero 2 W). Follow the
 [download, checksum verification and installation steps](docs/INSTALL.md#install).
-The installation guide selects version **1.0.1**; wait for its official release
+The installation guide selects version **1.0.2**; wait for its official release
 assets if they have not been published yet. No Rust, Cargo, Git, compilation or
 existing PiAir configuration is needed for release installation.
 

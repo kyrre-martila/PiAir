@@ -299,7 +299,12 @@ fn receiver<R: FnMut() -> Result<String>, W: Write>(
                 "configuration changed while stopping; retry"
             );
             let mut journal = Vec::new();
-            approve(loaded, &id, ui, &mut journal)?;
+            let name = &rows
+                .iter()
+                .find(|r| r.id == id)
+                .context("receiver missing")?
+                .name;
+            approve_named(loaded, &id, name, ui, &mut journal)?;
             for entry in journal {
                 ui.say(format!(
                     "{entry}. This approval remains saved if later steps are cancelled."

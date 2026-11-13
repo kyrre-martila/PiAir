@@ -39,8 +39,8 @@ fn fixture() -> (tempfile::TempDir, Loaded, Vec<Receiver>) {
     (dir, loaded, rows)
 }
 #[test]
-fn approval_requires_both_explicit_confirmations_and_preserves_config() {
-    for answer in ["2\n", "1\n2\n", "", "1\n"] {
+fn approval_requires_one_explicit_confirmation_and_preserves_config() {
+    for answer in ["2\n", "", "q\n"] {
         let (_d, mut loaded, _) = fixture();
         let before = std::fs::read(&loaded.path).unwrap();
         let mut journal = Vec::new();
@@ -50,7 +50,7 @@ fn approval_requires_both_explicit_confirmations_and_preserves_config() {
     }
     let (_d, mut loaded, _) = fixture();
     let mut journal = Vec::new();
-    approve(&mut loaded, ID, &mut scripted("1\n1\n"), &mut journal).unwrap();
+    approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
     assert!(loaded.config.allows(ID));
     assert_eq!(journal.len(), 1);
     let before = std::fs::read(&loaded.path).unwrap();
@@ -86,7 +86,7 @@ fn transient_requires_confirmation_and_never_enrolls_or_falls_back() {
     for input in ["", "1\n2\n", "1\n1\n2\n"] {
         let (_d, mut loaded, rows) = fixture();
         let mut journal = Vec::new();
-        approve(&mut loaded, ID, &mut scripted("1\n1\n"), &mut journal).unwrap();
+        approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
         assert!(authentication(
             &loaded,
             &rows,
@@ -102,7 +102,7 @@ fn transient_requires_confirmation_and_never_enrolls_or_falls_back() {
     }
     let (_d, mut loaded, rows) = fixture();
     let mut journal = Vec::new();
-    approve(&mut loaded, ID, &mut scripted("1\n1\n"), &mut journal).unwrap();
+    approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
     assert_eq!(
         authentication(
             &loaded,
@@ -295,7 +295,7 @@ fn names_are_printable() {
 fn unsupported_advertisement_never_selects() {
     let (_d, mut loaded, mut rows) = fixture();
     let mut journal = Vec::new();
-    approve(&mut loaded, ID, &mut scripted("1\n1\n"), &mut journal).unwrap();
+    approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
     rows[0].services[0].capabilities = BTreeMap::from([("features".into(), "0x0".into())]);
     assert!(authentication(
         &loaded,
@@ -317,7 +317,7 @@ fn unsupported_advertisement_never_selects() {
 fn stored_credentials_are_reused_without_reenrollment_or_modification() {
     let (_d, mut loaded, mut rows) = fixture();
     let mut journal = Vec::new();
-    approve(&mut loaded, ID, &mut scripted("1\n1\n"), &mut journal).unwrap();
+    approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
     rows[0].services[0]
         .capabilities
         .insert("features".into(), "0x80200,0x14200".into());
@@ -367,7 +367,7 @@ fn enrollment_requires_real_pin_or_setup_code_before_selection() {
     for method in [1, 2] {
         let (_d, mut loaded, mut rows) = fixture();
         let mut journal = Vec::new();
-        approve(&mut loaded, ID, &mut scripted("1\n1\n"), &mut journal).unwrap();
+        approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
         rows[0].services[0]
             .capabilities
             .insert("features".into(), "0x80200,0x14200".into());
@@ -535,4 +535,162 @@ fn service_activation_needs_installed_unit_and_both_affirmative_choices() {
         |_, _| panic!("must not activate missing unit"),
     )
     .unwrap();
+}
+
+#[test]
+fn normal_input_list_prefers_conversion_and_preserves_manual_selection() {
+    let devices = vec![
+        ("hw:CARD=USB,DEV=0".into(), "USB".into()),
+        ("plughw:CARD=USB,DEV=0".into(), "USB".into()),
+        ("hw:CARD=Other,DEV=0".into(), "Other".into()),
+    ];
+    let mut ui = scripted("1\n");
+    assert_eq!(
+        select_input_with(
+            &Playback::default(),
+            &mut ui,
+            &AtomicBool::new(false),
+            || Ok(devices.clone()),
+            |_| Ok(())
+        )
+        .unwrap(),
+        "plughw:CARD=USB,DEV=0"
+    );
+    assert_eq!(normal_inputs(devices).len(), 2);
+    assert_eq!(
+        select_input_with(
+            &Playback::default(),
+            &mut scripted("1\nhw:manual\n"),
+            &AtomicBool::new(false),
+            || Ok(vec![]),
+            |_| Ok(())
+        )
+        .unwrap(),
+        "hw:manual"
+    );
+}
+
+#[test]
+fn normal_receiver_screen_has_only_names_and_explicit_selection() {
+    let (_d, loaded, rows) = fixture();
+    let mut ui = scripted("1\n");
+    assert_eq!(
+        choose_receiver(&loaded, &rows, &mut ui).unwrap().as_deref(),
+        Some(ID)
+    );
+    let text = String::from_utf8(ui.out).unwrap();
+    assert!(text.contains("Room"));
+    for technical in [
+        ID,
+        "127.0.0.2",
+        "features",
+        "Endpoint",
+        "Approved:",
+        "Capabilities",
+    ] {
+        assert!(!text.contains(technical));
+    }
+}
+
+#[test]
+fn normal_defaults_and_advanced_adjustment() {
+    let mut draft = Playback::default();
+    let before = draft.clone();
+    let mut ui = scripted("\n");
+    advanced_settings(&mut draft, &mut ui, &AtomicBool::new(false)).unwrap();
+    assert_eq!(draft.threshold_dbfs, before.threshold_dbfs);
+    assert_eq!(draft.volume_db, before.volume_db);
+    let text = String::from_utf8(ui.out).unwrap();
+    assert!(!text.contains("dBFS"));
+    advanced_settings(
+        &mut draft,
+        &mut scripted("2\n2\n-50\n2000\n40000\n1\n2\n"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(draft.threshold_dbfs, -50.0);
+    assert_eq!(draft.volume_db, None);
+}
+
+#[test]
+fn playback_discovery_retries_absence_only_and_keeps_binding() {
+    let (_d, mut loaded, rows) = fixture();
+    approve(&mut loaded, ID, &mut scripted("1\n"), &mut Vec::new()).unwrap();
+    let selected = super::super::validate_selection(&loaded, ID, Method::Transient, &rows).unwrap();
+    let mut scans = 0;
+    let mut final_rows = Some(rows);
+    let result = super::super::playback_discovery(
+        &loaded,
+        &selected,
+        &AtomicBool::new(false),
+        |timeout, _| {
+            assert_eq!(timeout, 5);
+            scans += 1;
+            Ok(if scans == 1 {
+                vec![]
+            } else {
+                final_rows.take().unwrap()
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(scans, 2);
+    assert_eq!(result[0].id, ID);
+    scans = 0;
+    let error =
+        super::super::playback_discovery(&loaded, &selected, &AtomicBool::new(false), |_, _| {
+            scans += 1;
+            Ok(vec![])
+        })
+        .unwrap_err();
+    assert_eq!(scans, 3);
+    assert!(error.to_string().contains("authentication not started"));
+    super::super::playback_discovery(&loaded, &selected, &AtomicBool::new(true), |_, _| {
+        panic!("cancelled discovery must not start")
+    })
+    .unwrap_err();
+    scans = 0;
+    let cancel = AtomicBool::new(false);
+    super::super::playback_discovery(&loaded, &selected, &cancel, |_, cancel| {
+        scans += 1;
+        cancel.store(true, Ordering::Relaxed);
+        Ok(vec![])
+    })
+    .unwrap_err();
+    assert_eq!(scans, 1);
+    for change in ["capability", "conflict", "duplicate", "endpoint"] {
+        let (_, _, mut rows) = fixture();
+        match change {
+            "capability" => {
+                rows[0].services[0]
+                    .capabilities
+                    .insert("sf".into(), "0x80".into());
+            }
+            "conflict" => rows[0].id = "device:aabbccddeeff".into(),
+            "duplicate" => rows.push(Receiver {
+                id: ID.into(),
+                name: "Duplicate".into(),
+                services: vec![],
+            }),
+            _ => {
+                rows[0].services[0].port += 1;
+            }
+        }
+        let mut rows = Some(rows);
+        scans = 0;
+        assert!(
+            super::super::playback_discovery(
+                &loaded,
+                &selected,
+                &AtomicBool::new(false),
+                |_, _| {
+                    scans += 1;
+                    Ok(rows.take().unwrap())
+                }
+            )
+            .is_err(),
+            "{change}"
+        );
+        assert_eq!(scans, 1);
+    }
 }

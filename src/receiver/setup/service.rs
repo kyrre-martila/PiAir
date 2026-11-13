@@ -172,7 +172,7 @@ fn validate_properties(p: &BTreeMap<&str, &str>, user: &str) -> Result<()> {
     );
     for key in ["Environment", "EnvironmentFiles", "DropInPaths"] {
         ensure!(
-            p.get(key) == Some(&""),
+            p.get(key) == Some(&"") || (key == "EnvironmentFiles" && !p.contains_key(key)),
             "custom service environment/drop-ins require manual review: docs/SYSTEMD.md"
         );
     }
@@ -237,6 +237,27 @@ mod tests {
             ),
         ] {
             assert!(validate_properties(&properties(&text.replace(from, to)), "pi").is_err());
+        }
+    }
+    #[test]
+    fn systemctl_omits_empty_environment_files_but_requires_scalars() {
+        let text = "LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\nFragmentPath=/etc/systemd/system/piair@.service\nEnvironment=\nDropInPaths=\nUser=kyrre\nWorkingDirectory=~\nExecStart={ path=/usr/local/bin/piair ; argv[]=/usr/local/bin/piair run --allow-unattended ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }";
+        validate_properties(&properties(text), "kyrre").unwrap();
+        validate_properties(&properties(&format!("{text}\nEnvironmentFiles=")), "kyrre").unwrap();
+        assert!(validate_properties(
+            &properties(&format!(
+                "{text}\nEnvironmentFiles=/etc/override (ignore_errors=no)"
+            )),
+            "kyrre"
+        )
+        .is_err());
+        for field in [
+            "Environment=\n",
+            "DropInPaths=\n",
+            "User=kyrre\n",
+            "WorkingDirectory=~\n",
+        ] {
+            assert!(validate_properties(&properties(&text.replace(field, "")), "kyrre").is_err());
         }
     }
     #[test]
@@ -535,10 +556,7 @@ mod daily_tests {
     }
     impl Backend for Mock {
         fn inspect(&mut self) -> Result<Service> {
-            ensure!(
-                !self.missing,
-                "service not installed; PR #74; docs/SYSTEMD.md"
-            );
+            ensure!(!self.missing, "service not installed; see docs/INSTALL.md");
             Ok(Service {
                 unit: "piair@alice.service".into(),
                 user: "alice".into(),

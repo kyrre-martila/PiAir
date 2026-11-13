@@ -37,7 +37,7 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
     };
     let mut journal = Vec::new();
     let result = (|| {
-        ui.say("Welcome to PiAir setup.\nConfigure sound input and an AirPlay output.\nEnter numbered choices. q, EOF or Ctrl+C cancels.\nApproval, selection and pairing save separately.\nPlayback settings save only after your final review.\nNo packages or system settings will be installed.")?;
+        ui.say("Welcome to PiAir setup.\nChoose an input and speaker, try the sound, then save your settings.\nEnter numbered choices. q or Ctrl+C cancels.\nSpeaker approval and connection selection save when confirmed; playback settings save at the end.")?;
         ensure!(cfg!(target_os = "linux"), "PiAir requires Linux and ALSA");
         // Guard setup mutations and tests with the runtime's existing exclusion.
         let instance = runtime::InstanceLock::acquire()?;
@@ -46,13 +46,7 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
         let mut baseline = allowlist::snapshot(&loaded.path)?;
         let mut draft = loaded.config.playback.clone();
         let receiver_name;
-        loop {
-            draft.capture_device = Some(select_input(&draft, &mut ui, &cancel)?);
-            ui.say("1. Continue to AirPlay selection\n2. Back to audio input")?;
-            if ui.choice("Choose:", 2, None)? == 1 {
-                break;
-            }
-        }
+        draft.capture_device = Some(select_input(&draft, &mut ui, &cancel)?);
         loop {
             let snapshot = discover_receivers(&loaded, &mut ui, &cancel)?;
             let id = match choose_receiver(&loaded, &snapshot, &mut ui) {
@@ -73,7 +67,12 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
                 allowlist::snapshot(&loaded.path)? == baseline,
                 "configuration changed during setup; rerun to review new settings"
             );
-            approve(&mut loaded, &id, &mut ui, &mut journal)?;
+            let name = &snapshot
+                .iter()
+                .find(|r| r.id == id)
+                .context("receiver missing")?
+                .name;
+            approve_named(&mut loaded, &id, name, &mut ui, &mut journal)?;
             baseline = allowlist::snapshot(&loaded.path)?;
             match authentication(&loaded, &snapshot, &id, &mut ui, &mut journal, &cancel) {
                 Ok(auth) => {
@@ -97,27 +96,16 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
         }
         // Approval changes above are intentional. Pin the remaining configuration
         // before allowing a long monitoring/test/review interval.
-        configure_activity(&mut draft, &mut ui, &cancel)?;
-        configure_volume(&mut draft, &mut ui)?;
+        advanced_settings(&mut draft, &mut ui, &cancel)?;
         test_audio(&loaded, &draft, &mut ui, cancel.clone())?;
-        let service_before = service::inspect(&loaded);
+
         loop {
-            summary(&loaded.config.playback, &draft, &mut ui)?;
-            ui.say(format!("Advertised receiver name: {receiver_name}"))?;
-            ui.say(format!("Configuration: {}", loaded.path.display()))?;
-            ui.say(format!(
-                "Existing systemd service: {}",
-                match &service_before {
-                    Ok(s) => format!("{} ({})", s.unit, s.status),
-                    Err(e) => format!("optional/unavailable: {e}"),
-                }
-            ))?;
-            ui.say(
-                "1. Save reviewed playback settings\n2. Back to detection and volume\n3. Cancel",
-            )?;
+            ui.say(format!("\n5. Review and finish\nInput: {}\nSpeaker: {receiver_name}\nConnection: {}\nAudio detection: automatic\nVolume: {}", clean(draft.capture_device.as_deref().unwrap_or("Not configured")), authentication_label(draft.authentication), volume_label(draft.volume_db)))?;
+            ui.say("1. Save reviewed playback settings\n2. Advanced settings\n3. Cancel")?;
             match ui.choice("Choose:", 3, None)? {
                 1 => break,
                 2 => {
+                    summary(&loaded.config.playback, &draft, &mut ui)?;
                     configure_activity(&mut draft, &mut ui, &cancel)?;
                     configure_volume(&mut draft, &mut ui)?;
                 }
@@ -135,7 +123,7 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
             "Playback settings saved to {}",
             loaded.path.display()
         ));
-        ui.say("Playback settings saved. Restart PiAir explicitly to apply them.\nSecurity revocation checks remain active.")?;
+        ui.say("Settings saved.")?;
         drop(instance);
         let loaded = config::load(Some(loaded.path.clone()))?;
         optional_service(&loaded, &mut ui, &mut journal)?;
@@ -162,7 +150,7 @@ fn requirements<R: FnMut() -> Result<String>, W: Write>(
     loaded: &Loaded,
     ui: &mut Ui<R, W>,
 ) -> Result<()> {
-    ui.say("\n1/8 System requirements\nLinux: supported. ALSA is linked into this build.")?;
+    ui.say("Connect your audio input and put your speaker on the same network as this Pi.")?;
     if !std::path::Path::new("/dev/snd").is_dir() {
         ui.say("Warning: /dev/snd is missing. Connect your audio input, or check device access in your OS/container.")?;
     }
@@ -172,27 +160,7 @@ fn requirements<R: FnMut() -> Result<String>, W: Write>(
     if !network {
         ui.say("Warning: no non-loopback network interface found.")?;
     }
-    ui.say("Connect PiAir and the receiver to the same local network.\nAllow mDNS multicast UDP 5353 and the documented AirPlay/PTP ports.\nA network interface does not prove receiver reachability.")?;
-    ui.say(format!(
-        "Configuration: {} ({})\nExisting playback: {}",
-        loaded.path.display(),
-        loaded.source,
-        if loaded.config.playback.effective().is_ok() {
-            "present; values will be reused for review"
-        } else {
-            "incomplete; setup will fill required values"
-        }
-    ))?;
-    match service::inspect(loaded) {
-        Ok(service) => ui.say(format!(
-            "Installed service: {} ({})",
-            service.unit, service.status
-        ))?,
-        Err(error) => {
-            ui.say(format!("Optional systemd: {error}"))?;
-            ui.say("Manual installation: docs/SYSTEMD.md. Installer planned for PR #74.")?;
-        }
-    }
+    let _ = loaded;
     Ok(())
 }
 fn clean(text: &str) -> String {
@@ -222,9 +190,7 @@ fn select_input_with<R: FnMut() -> Result<String>, W: Write>(
     mut validate: impl FnMut(&str) -> Result<()>,
 ) -> Result<String> {
     loop {
-        ui.say(
-            "\n2/8 Audio input\nChoose explicitly; device hints do not guarantee availability.",
-        )?;
+        ui.say("\n1. Choose audio input")?;
         let devices = match discover() {
             Ok(d) => d,
             Err(e) => {
@@ -232,11 +198,16 @@ fn select_input_with<R: FnMut() -> Result<String>, W: Write>(
                 Vec::new()
             }
         };
+        let devices = normal_inputs(devices);
         if devices.is_empty() {
             ui.say("No capture devices found. Connect an input and retry,\nor enter a known ALSA identifier manually.")?;
         }
         for (i, (id, name)) in devices.iter().enumerate() {
-            ui.say(format!("{}. {}\n   {}", i + 1, clean(name), clean(id)))?;
+            ui.say(format!(
+                "{}. {}",
+                i + 1,
+                clean(if name.is_empty() { id } else { name })
+            ))?;
         }
         let manual = devices.len() + 1;
         ui.say(format!(
@@ -269,7 +240,7 @@ fn select_input_with<R: FnMut() -> Result<String>, W: Write>(
         };
         ensure!(!cancel.load(Ordering::Relaxed), Cancelled);
         match validate(&device) {
-            Ok(())=> {ui.say("Capture initialized successfully; validation handle closed.")?;return Ok(device);},
+            Ok(())=> {ui.say("Audio input is ready.")?;return Ok(device);},
             Err(e)=>ui.say(format!("Cannot record from {}: {e:#}\nUnavailable: reconnect/check identifier.\nPermission denied: check your account's /dev/snd access.\nBusy: stop the other capture application yourself.\nUnsupported format: explicitly choose a plughw PCM for conversion.\nNo alternate input was substituted. Try again.",clean(&device)))?,
         }
     }
@@ -293,7 +264,7 @@ fn discover_receivers_with<R: FnMut() -> Result<String>, W: Write>(
     mut discover: impl FnMut(u64, &AtomicBool) -> Result<Vec<Receiver>>,
 ) -> Result<Vec<Receiver>> {
     loop {
-        ui.say("\nAirPlay receiver\nDiscovering nearby advertisements...")?;
+        ui.say("\n2. Choose AirPlay speaker\nLooking for speakers...")?;
         match discover(timeout, cancel) {
             Ok(mut rows) => {
                 ensure!(!cancel.load(Ordering::Relaxed), Cancelled);
@@ -313,26 +284,15 @@ fn discover_receivers_with<R: FnMut() -> Result<String>, W: Write>(
     }
 }
 fn choose_receiver<R: FnMut() -> Result<String>, W: Write>(
-    loaded: &Loaded,
+    _loaded: &Loaded,
     rows: &[Receiver],
     ui: &mut Ui<R, W>,
 ) -> Result<Option<String>> {
-    let store = Store::new(&loaded.path)?;
-    let selected = store.selection()?;
     if rows.is_empty() {
         ui.say("No receivers discovered. Check power and the local network.")?;
     }
     for (i, r) in rows.iter().enumerate() {
-        let paired = super::exact_id(&r.id).is_ok() && store.credential(&r.id)?.is_some();
-        ui.say(format!(
-            "{}. {}\n   {}\n   Approved: {} Selected: {} Paired: {}",
-            i + 1,
-            clean(&r.name),
-            r.id,
-            loaded.config.allows(&r.id),
-            selected.as_ref().is_some_and(|s| s.id == r.id),
-            paired
-        ))?;
+        ui.say(format!("{}. {}", i + 1, clean(&r.name)))?;
     }
     ui.say(format!(
         "{}. Rescan\n{}. Cancel",
@@ -352,44 +312,31 @@ fn choose_receiver<R: FnMut() -> Result<String>, W: Write>(
         rows.iter().filter(|v| v.id == r.id).count() == 1,
         "receiver identity is ambiguous; rescan"
     );
-    ui.say(format!(
-        "Advertised name: {}\nCanonical receiver ID: {}",
-        clean(&r.name),
-        r.id
-    ))?;
-    for s in &r.services {
-        ui.say(format!(
-            "Endpoint: {} port {}\nAddresses: {:?}\nAdvertised capabilities: {:?}",
-            clean(&s.service_type),
-            s.port,
-            s.addresses,
-            s.capabilities
-        ))?;
-    }
-    ui.say("mDNS advertisements are untrusted.\nThey do not prove the receiver's identity.")?;
     Ok(Some(r.id.clone()))
 }
+#[cfg(test)]
 fn approve<R: FnMut() -> Result<String>, W: Write>(
     loaded: &mut Loaded,
     id: &str,
     ui: &mut Ui<R, W>,
     journal: &mut Vec<String>,
 ) -> Result<()> {
+    approve_named(loaded, id, "Room", ui, journal)
+}
+fn approve_named<R: FnMut() -> Result<String>, W: Write>(
+    loaded: &mut Loaded,
+    id: &str,
+    name: &str,
+    ui: &mut Ui<R, W>,
+    journal: &mut Vec<String>,
+) -> Result<()> {
+    super::exact_id(id)?;
     if loaded.config.allows(id) {
         ui.say("Receiver already approved; approval unchanged.")?;
         return Ok(());
     }
-    super::exact_id(id)?;
     let original = allowlist::snapshot(&loaded.path)?;
-    if !ui.confirm(&format!(
-        "Have you independently verified {id}\nusing its physical label or trusted local settings?"
-    ))? {
-        return Err(Cancelled.into());
-    }
-    if !ui.confirm(&format!(
-        "Approve exactly {id} in\n{}?\nApproval allows later operations; it does not authenticate.",
-        loaded.path.display()
-    ))? {
+    if !ui.confirm(&format!("Approve speaker \"{}\"?\nApproval allows PiAir to connect. The advertised name does not verify its identity.", clean(name)))? {
         return Err(Cancelled.into());
     }
     let text = allowlist::render(original.as_ref().map_or("", |s| s.text.as_str()), id, true)?;
@@ -407,7 +354,7 @@ fn authentication<R: FnMut() -> Result<String>, W: Write>(
     journal: &mut Vec<String>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<Authentication> {
-    ui.say("\n4/8 Authentication\nChoose an explicit supported method. No automatic fallback.\nNames and models never choose a method.")?;
+    ui.say("\n3. Choose connection method")?;
     let store = Store::new(&loaded.path)?;
     let previous = store.selection()?;
     let credential = store.credential(id)?;
@@ -430,7 +377,7 @@ fn authentication<R: FnMut() -> Result<String>, W: Write>(
                 operation
             })?;
             options.push((
-                "Reuse validated stored HAP credentials",
+                "Use saved pairing",
                 selected,
                 Authentication::StoredHap,
                 false,
@@ -440,14 +387,8 @@ fn authentication<R: FnMut() -> Result<String>, W: Write>(
         }
     } else {
         for (method, label) in [
-            (
-                Method::PinDisplay,
-                "PIN-display enrollment (requires actual supported PIN delivery)",
-            ),
-            (
-                Method::SetupCode,
-                "HAP setup-code enrollment (requires genuine independently obtained code)",
-            ),
+            (Method::PinDisplay, "Pair using a code shown by the speaker"),
+            (Method::SetupCode, "Pair using a setup code"),
         ] {
             match super::Selection::from_receiver(receiver, method) {
                 Ok(_) => options.push((
@@ -456,18 +397,18 @@ fn authentication<R: FnMut() -> Result<String>, W: Write>(
                     Authentication::StoredHap,
                     true,
                 )),
-                Err(e) => ui.say(format!("{method:?} unavailable: {e}"))?,
+                Err(e) => tracing::debug!(error = %e, ?method, "connection method unavailable"),
             }
         }
     }
     match super::Selection::from_receiver(receiver, Method::Transient) {
         Ok(_) => options.push((
-            "OwnTone-reference transient (session only)",
+            "Connect without saving pairing",
             super::validate_selection(loaded, id, Method::Transient, rows)?,
             Authentication::OwnToneTransient,
             false,
         )),
-        Err(e) => ui.say(format!("Transient unavailable: {e}"))?,
+        Err(e) => tracing::debug!(error = %e, "session connection unavailable"),
     }
     ensure!(
         !options.is_empty(),
@@ -476,7 +417,7 @@ fn authentication<R: FnMut() -> Result<String>, W: Write>(
     for (i, (label, _, _, _)) in options.iter().enumerate() {
         ui.say(format!("{}. {label}", i + 1))?;
     }
-    let n = ui.choice("Choose authentication (q cancels):", options.len(), None)?;
+    let n = ui.choice("Choose connection:", options.len(), None)?;
     let (_, selected, auth, enroll) = &options[n - 1];
     if *enroll {
         let prompt = if selected.method == Method::PinDisplay {
@@ -487,9 +428,9 @@ fn authentication<R: FnMut() -> Result<String>, W: Write>(
         ensure!(ui.confirm(prompt)?, Cancelled);
     }
     if *auth == Authentication::OwnToneTransient {
-        ensure!(ui.confirm("Transient authentication does not establish verified persistent receiver identity.\nNo permanent credentials are enrolled.\nExplicitly use OwnTone-reference transient authentication?")?,Cancelled);
+        ensure!(ui.confirm("This connection does not save a pairing or verify a persistent speaker identity.\nConnect for this session?")?,Cancelled);
     }
-    ensure!(ui.confirm(&format!("Save selection for exactly {id}\nwith method {:?} and the displayed endpoint?\nThis selection persists even if later setup is cancelled.",selected.method))?,Cancelled);
+    ensure!(ui.confirm("Save this speaker and connection choice?\nThis choice remains saved if setup is cancelled.")?,Cancelled);
     let current = config::load(Some(loaded.path.clone()))?;
     let observed = super::validate_selection(&current, id, selected.method, rows)?;
     ensure!(
@@ -581,14 +522,45 @@ pub(crate) fn suggested_threshold(noise: &[f64], signal: &[f64]) -> Option<f64> 
     let threshold = (quiet + 6.0).max(music - 12.0).max(-60.0);
     (threshold <= music - 6.0).then_some(threshold)
 }
+fn advanced_settings<R: FnMut() -> Result<String>, W: Write>(
+    draft: &mut Playback,
+    ui: &mut Ui<R, W>,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    ui.say("Audio detection is automatic. Speaker volume will follow your saved setting (or stay unchanged).\n1. Continue [default]\n2. Advanced audio and volume settings")?;
+    if ui.choice("Choose:", 2, Some(1))? == 2 {
+        configure_activity(draft, ui, cancel)?;
+        configure_volume(draft, ui)?;
+    }
+    Ok(())
+}
+
+/// Prefer converting hardware PCMs over duplicate raw PCMs. Manual entry keeps
+/// every ALSA identifier available, including hardware-specific advanced PCMs.
+fn normal_inputs(devices: Vec<(String, String)>) -> Vec<(String, String)> {
+    devices
+        .iter()
+        .filter(|(id, _)| {
+            if let Some(rest) = id.strip_prefix("hw:") {
+                !devices
+                    .iter()
+                    .any(|(other, _)| other == &format!("plughw:{rest}"))
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 fn configure_activity<R: FnMut() -> Result<String>, W: Write>(
     draft: &mut Playback,
     ui: &mut Ui<R, W>,
     cancel: &AtomicBool,
 ) -> Result<()> {
     loop {
-        ui.say(format!("\n5/8 Automatic audio detection\nLouder levels are closer to 0 dBFS.\nThreshold: {} dBFS\nStart after: {} ms of sustained audio\nStop after: {} ms of silence\n1. Keep current/default settings\n2. Adjust manually\n3. Measure stopped source and music; suggest threshold",draft.threshold_dbfs,draft.start_duration_ms,draft.stop_duration_ms))?;
-        match ui.choice("Choose:", 3, None)? {
+        ui.say(format!("\nAdvanced audio detection\nLouder levels are closer to 0 dBFS.\nThreshold: {} dBFS\nStart after: {} ms of sustained audio\nStop after: {} ms of silence\n1. Keep current/default settings\n2. Adjust manually\n3. Measure stopped source and music; suggest threshold",draft.threshold_dbfs,draft.start_duration_ms,draft.stop_duration_ms))?;
+        match ui.choice("Choose:", 3, Some(1))? {
             1 => return Ok(()),
             2 => {
                 let mut candidate = draft.clone();
@@ -662,7 +634,7 @@ fn test_audio<R: FnMut() -> Result<String>, W: Write>(
     play_test_audio(loaded, draft, ui, cancel)
 }
 fn test_audio_requested<R: FnMut() -> Result<String>, W: Write>(ui: &mut Ui<R, W>) -> Result<bool> {
-    ui.say("\nAirPlay audio playback test\nTests the AirPlay output path; ALSA input was checked separately.\n1. Play test recording (49 seconds)\n2. Skip test [default]")?;
+    ui.say("\n4. Test audio\nPlay a recording on your chosen speaker.\n1. Play test recording (49 seconds)\n2. Skip test [default]")?;
     Ok(ui.choice("Choose:", 2, Some(2))? == 1)
 }
 fn play_test_audio<R: FnMut() -> Result<String>, W: Write>(
@@ -672,10 +644,10 @@ fn play_test_audio<R: FnMut() -> Result<String>, W: Write>(
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
     let Some(path) = resources::locate() else {
-        ui.say("Test recording or LICENSE.md is missing. Skipping playback.\nInstall both in /usr/local/share/piair/audio (future installer PR #74),\nor set PIAIR_AUDIO_DATA_DIR to their directory.\nDevelopment: tests/assets/audio. Nothing is downloaded.")?;
+        ui.say("Test recording or LICENSE.md is missing. Skipping playback.\nInstall both in /usr/local/share/piair/audio (see docs/INSTALL.md),\nor set PIAIR_AUDIO_DATA_DIR to their directory.\nDevelopment: tests/assets/audio. Nothing is downloaded.")?;
         return Ok(());
     };
-    ui.say(format!("Pachelbel's Canon in D, arrangement/performance: Lee Galloway.\nRecording: CC BY-SA 3.0, separately from PiAir's Apache-2.0 code.\nAttribution: {}\nhttps://creativecommons.org/licenses/by-sa/3.0/\nReceiver volume is preserved during this test. Ctrl+C stops playback.",path.with_file_name("LICENSE.md").display()))?;
+    ui.say("Playing the test recording. Speaker volume is preserved. Ctrl+C stops playback.")?;
     let result = super::wav::Playback::open(&path, 49).and_then(|wav| {
         super::ptp_operation_cancellable(
             loaded,
@@ -740,8 +712,8 @@ fn playback_args(p: &Playback) -> PlaybackArgs {
 }
 fn authentication_label(authentication: Option<Authentication>) -> &'static str {
     match authentication {
-        Some(Authentication::StoredHap) => "Stored HAP credentials",
-        Some(Authentication::OwnToneTransient) => "OwnTone-reference transient (session only)",
+        Some(Authentication::StoredHap) => "Saved pairing",
+        Some(Authentication::OwnToneTransient) => "Connect without saving pairing",
         None => "Not configured",
     }
 }
@@ -756,7 +728,7 @@ fn summary<R: FnMut() -> Result<String>, W: Write>(
     new: &Playback,
     ui: &mut Ui<R, W>,
 ) -> Result<()> {
-    ui.say("\n7/8 Review playback settings (* = changed)")?;
+    ui.say("\nAdvanced playback settings (* = changed)")?;
     for (label, before, after) in [
         (
             "Audio input",
@@ -833,14 +805,15 @@ fn optional_service_with<R: FnMut() -> Result<String>, W: Write>(
     inspect: impl FnOnce(&Loaded) -> Result<service::Service>,
     activate: impl FnOnce(&Loaded, &service::Service) -> Result<()>,
 ) -> Result<()> {
-    ui.say("\n8/8 Optional background service")?;
+    ui.say("\n6. Optional automatic startup")?;
     let service = match inspect(loaded) {
         Ok(s) => s,
         Err(e) => {
-            ui.say(format!("Automatic activation unavailable: {e}\nSetup can finish successfully without a service.\nManual procedure: docs/SYSTEMD.md; installer planned for PR #74."))?;
+            ui.say(format!("Automatic activation unavailable: {e}\nSetup can finish successfully without a service.\nManual procedure: docs/SYSTEMD.md."))?;
             return Ok(());
         }
     };
+    tracing::debug!(status = %service.status, "verified installed service");
     ui.say("Start PiAir automatically when Raspberry Pi boots?\n1. Yes\n2. No [default]")?;
     if ui.choice("Choose:", 2, Some(2))? == 2 {
         return Ok(());
