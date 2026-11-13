@@ -101,14 +101,14 @@ systemctl status piair@USERNAME.service
 - **Interrupted update:** run `piair update` again. It offers to restore the
   previous application before retrying; it never starts playback without asking.
   A durable transaction keeps the old binary, stock template and resources together.
-  Until recovery completes, the affected service may be runtime-masked. If the
+  Until recovery completes, the affected service may be masked. If the
   executable/helper is unavailable after an interrupted first install/uninstall,
   an administrator can run the root-owned backup helper:
   `sudo python3 -I /usr/local/share/piair/transaction/maintain.py _commit recover`.
   If no previous helper exists (first install), repeat the verified download and
   installation block; it performs recovery first, then repeat once to install.
-  After a power loss the runtime mask disappears, so stop the service before
-  recovery if systemd started it at boot. Never delete the transaction directory
+  The maintenance mask persists across reboot until recovery finishes, preventing
+  boot startup from using a partially replaced installation. Never delete the transaction directory
   or manually replace individual files to bypass recovery.
 
 To report an error, include the exact maintenance error, `piair --version`,

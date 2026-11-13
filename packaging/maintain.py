@@ -179,8 +179,8 @@ class Services:
                 active = busy
                 require((p.get("FragmentPath") in ("", FILES["piair@.service"][0]) or
                          (recovery and p.get("FragmentPath") == "/dev/null" and
-                          os.path.islink("/run/systemd/system/" + own) and
-                          os.readlink("/run/systemd/system/" + own) == "/dev/null")) and
+                          os.path.islink("/etc/systemd/system/" + own) and
+                          os.readlink("/etc/systemd/system/" + own) == "/dev/null")) and
                         not p.get("DropInPaths") and not p.get("Environment") and
                         not p.get("EnvironmentFiles") and p.get("User", "") in ("", user),
                         "Customized PiAir service; deliberate administration required")
@@ -208,11 +208,14 @@ class Services:
                 "Service did not stop")
 
     def guard(self, unit):
-        self.ctl("mask", "--runtime", unit)
+        mask = Path("/etc/systemd/system") / unit
+        require(not mask.exists() and not mask.is_symlink(), "Existing instance file/mask requires manual review")
+        # Survives power loss; removed only after successful replacement or recovery.
+        self.ctl("mask", unit)
         self.ctl("daemon-reload")
 
     def unguard(self, unit):
-        self.ctl("unmask", "--runtime", unit)
+        self.ctl("unmask", unit)
         self.ctl("daemon-reload")
 
     def reload(self):
@@ -390,7 +393,7 @@ class Installation:
 
 
 def restart_offer(services, unit):
-    if confirm("Start PiAir now? Boot enablement has not changed."):
+    if confirm("Start PiAir now? This will not enable boot startup."):
         try:
             services.start(unit)
         except RuntimeError as error:

@@ -425,6 +425,15 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Customized"):
                 svc.inspect(1000)
 
+    def test_service_guard_survives_reboot_without_changing_boot_enablement(self):
+        service = m.Services()
+        with patch.object(service, "ctl") as ctl:
+            service.guard("piair@piair-isolated-test.service")
+            service.unguard("piair@piair-isolated-test.service")
+        self.assertEqual([call.args for call in ctl.call_args_list], [
+            ("mask", "piair@piair-isolated-test.service"), ("daemon-reload",),
+            ("unmask", "piair@piair-isolated-test.service"), ("daemon-reload",)])
+
     def test_runtime_lock_conflict_is_not_bypassed(self):
         with patch.object(m.socket, "socket") as sock:
             sock.return_value.__enter__.return_value.bind.side_effect = OSError("held")
