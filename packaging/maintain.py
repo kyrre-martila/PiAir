@@ -157,19 +157,70 @@ class Services:
         return run("/usr/bin/systemctl", "--system", "--no-pager", *args)
 
     def properties(self, unit):
-        fields = "ActiveState,User,FragmentPath,DropInPaths,Environment,EnvironmentFiles,MainPID,UnitFileState,ExecStart,WorkingDirectory"
-        return dict(line.split("=", 1) for line in self.ctl("show", unit, "--property=" + fields).splitlines()
-                    if "=" in line)
+        fields = "LoadState,ActiveState,User,FragmentPath,DropInPaths,Environment,EnvironmentFiles,MainPID,UnitFileState,ExecStart,WorkingDirectory"
+        args = ("/usr/bin/systemctl", "--system", "--no-pager", "show", unit, "--property=" + fields)
+        result = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        properties = {}
+        for line in result.stdout.splitlines():
+            key, sep, value = line.partition("=")
+            require(sep and key in fields.split(",") and key not in properties,
+                    "Malformed systemctl show output: " + unit)
+            properties[key] = value
+        require(set(properties) == set(fields.split(",")), "Incomplete systemctl show output: " + unit)
+        # Some systemd versions return EXIT_FAILURE for a missing unit even with
+        # explicit properties. Accept only the complete, inert not-found record.
+        absent = (properties["LoadState"] == "not-found" and
+                  properties["ActiveState"] == "inactive" and properties["MainPID"] == "0" and
+                  all(not properties[key] for key in fields.split(",")
+                      if key not in ("LoadState", "ActiveState", "MainPID")))
+        require(not result.stderr.strip() and (result.returncode == 0 or
+                (result.returncode == 1 and absent)),
+                "Command failed: " + " ".join(args) + "\n" + result.stderr.strip())
+        require(properties["LoadState"] in ("loaded", "masked") or absent,
+                "Unexpected systemd load state: " + unit)
+        require(properties["ActiveState"] in ("active", "reloading", "inactive", "failed",
+                "activating", "deactivating", "maintenance", "refreshing"),
+                "Unexpected systemd active state: " + unit)
+        require(properties["MainPID"].isdigit(), "Invalid systemd MainPID: " + unit)
+        return properties
+
+    def listed_units(self):
+        units = set()
+        for command in ("list-units", "list-unit-files"):
+            # systemd 257 returns 1 for a filtered unit-file inventory with zero
+            # matches. Query the complete inventory instead: errors remain errors.
+            pattern = ("piair@*.service",) if command == "list-units" else ()
+            output = self.ctl(command, *pattern, "--no-legend", "--plain")
+            for line in output.splitlines():
+                columns = line.split()
+                require(len(columns) >= (4 if command == "list-units" else 2),
+                        "Malformed systemctl inventory")
+                if command == "list-unit-files":
+                    require(len(columns) in (2, 3) and columns[1] in (
+                        "enabled", "enabled-runtime", "linked", "linked-runtime", "alias",
+                        "masked", "masked-runtime", "static", "disabled", "indirect",
+                        "generated", "transient", "bad", "not-found") and
+                        (len(columns) == 2 or columns[2] in ("enabled", "disabled", "-")),
+                        "Malformed systemctl unit-file state")
+                else:
+                    require(columns[1] in ("loaded", "not-found", "bad-setting", "error", "merged", "masked") and
+                            columns[2] in ("active", "reloading", "inactive", "failed", "activating",
+                                           "deactivating", "maintenance", "refreshing"),
+                            "Malformed systemctl unit state")
+                name = columns[0]
+                require(re.fullmatch(r"[^\s/]+\.[a-z]+", name), "Malformed systemctl unit name")
+                if name.startswith("piair@") and name.endswith(".service"):
+                    require(re.fullmatch(r"piair@[a-zA-Z0-9_-]*\.service", name),
+                            "Unexpected PiAir service instance; deliberate administration required")
+                    units.add(name)
+        return units
 
     def inspect(self, uid, removing=False, recovery=False):
         user = pwd.getpwuid(uid).pw_name
         require(uid != 0 and re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_-]*", user),
                 "Run maintenance as the intended normal Linux user")
         own = "piair@" + user + ".service"
-        units = {own}
-        for command in ("list-units", "list-unit-files"):
-            for line in self.ctl(command, "piair@*.service", "--no-legend", "--plain").splitlines():
-                units.add(line.split()[0])
+        units = self.listed_units() | {own}
         active = False
         for unit in sorted(units - {"piair@.service"}):
             p = self.properties(unit)

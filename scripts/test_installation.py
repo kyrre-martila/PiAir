@@ -715,7 +715,8 @@ class ReleaseTests(unittest.TestCase):
         own = "piair@test.service"
         def ctl(*args):
             if args[0] in ("list-units", "list-unit-files"):
-                return "piair@other.service loaded active running"
+                return ("piair@other.service loaded active running" if args[0] == "list-units"
+                        else "piair@other.service enabled enabled")
             return ""
         with patch.object(m.pwd, "getpwuid") as pw, patch.object(svc, "ctl", side_effect=ctl), \
                 patch.object(svc, "properties", return_value={"ActiveState": "active", "User": "test", "MainPID": "0"}):
