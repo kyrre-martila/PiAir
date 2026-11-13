@@ -41,7 +41,7 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
         ensure!(cfg!(target_os = "linux"), "PiAir requires Linux and ALSA");
         // Guard setup mutations and tests with the runtime's existing exclusion.
         let instance = runtime::InstanceLock::acquire()?;
-        requirements(&loaded, &mut ui)?;
+        requirements(&mut ui)?;
         let mut loaded = loaded;
         let mut baseline = allowlist::snapshot(&loaded.path)?;
         let mut draft = loaded.config.playback.clone();
@@ -146,10 +146,7 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
     }
 }
 
-fn requirements<R: FnMut() -> Result<String>, W: Write>(
-    loaded: &Loaded,
-    ui: &mut Ui<R, W>,
-) -> Result<()> {
+fn requirements<R: FnMut() -> Result<String>, W: Write>(ui: &mut Ui<R, W>) -> Result<()> {
     ui.say("Connect your audio input and put your speaker on the same network as this Pi.")?;
     if !std::path::Path::new("/dev/snd").is_dir() {
         ui.say("Warning: /dev/snd is missing. Connect your audio input, or check device access in your OS/container.")?;
@@ -160,7 +157,6 @@ fn requirements<R: FnMut() -> Result<String>, W: Write>(
     if !network {
         ui.say("Warning: no non-loopback network interface found.")?;
     }
-    let _ = loaded;
     Ok(())
 }
 fn clean(text: &str) -> String {

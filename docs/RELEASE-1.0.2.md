@@ -39,7 +39,7 @@ The wizard presents audio input, speaker, connection, audio test, final review
 and optional automatic startup. Detection and volume defaults are retained;
 manual detection, measurement and volume controls are optional advanced settings.
 When both `hw:` and the equivalent `plughw:` ALSA hint exist, the normal list
-prefers conversion. Exact manual ALSA entry and `piair capture-devices` remain
+prefers conversion. Exact manual ALSA entry and `piair audio devices` remain
 available. Speaker selection shows friendly names; `piair devices` and verbose
 diagnostics retain technical information. Approval is one explicit confirmation
 of the friendly name, never automatic and never a request to verify a canonical

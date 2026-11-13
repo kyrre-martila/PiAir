@@ -694,3 +694,72 @@ fn playback_discovery_retries_absence_only_and_keeps_binding() {
         assert_eq!(scans, 1);
     }
 }
+
+#[test]
+fn friendly_approval_is_explicit_and_invalid_canonical_id_never_prompts() {
+    let (_d, mut loaded, _) = fixture();
+    let mut ui = scripted("1\n");
+    approve_named(&mut loaded, ID, "Living room", &mut ui, &mut Vec::new()).unwrap();
+    let text = String::from_utf8(ui.out).unwrap();
+    assert!(text.contains("Approve speaker \"Living room\"?"));
+    assert!(!text.contains(ID));
+    let before = std::fs::read(&loaded.path).unwrap();
+    let mut ui = Ui {
+        read: || panic!("invalid identity must not prompt"),
+        out: Vec::new(),
+    };
+    assert!(approve_named(
+        &mut loaded,
+        "device:invalid",
+        "Room",
+        &mut ui,
+        &mut Vec::new()
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&loaded.path).unwrap(), before);
+}
+
+#[test]
+fn normal_wizard_steps_use_plain_labels_and_default_settings() {
+    let (_d, mut loaded, rows) = fixture();
+    let mut draft = Playback::default();
+    let cancel = Arc::new(AtomicBool::new(false));
+    // One affirmative input choice, speaker choice, approval, method choice,
+    // session-only warning and selection save, followed by default settings/test.
+    let mut ui = scripted("1\n1\n1\n1\n1\n1\n\n\n");
+    draft.capture_device = Some(
+        select_input_with(
+            &draft,
+            &mut ui,
+            &cancel,
+            || Ok(vec![("plughw:USB".into(), "USB input".into())]),
+            |_| Ok(()),
+        )
+        .unwrap(),
+    );
+    let id = choose_receiver(&loaded, &rows, &mut ui).unwrap().unwrap();
+    let mut journal = Vec::new();
+    approve_named(&mut loaded, &id, &rows[0].name, &mut ui, &mut journal).unwrap();
+    draft.authentication =
+        Some(authentication(&loaded, &rows, &id, &mut ui, &mut journal, &cancel).unwrap());
+    advanced_settings(&mut draft, &mut ui, &cancel).unwrap();
+    assert!(!test_audio_requested(&mut ui).unwrap());
+    assert_eq!(draft.volume_db, None);
+    assert_eq!(draft.threshold_dbfs, -45.0);
+    assert_eq!(journal.len(), 2);
+    let text = String::from_utf8(ui.out).unwrap();
+    assert!(text.contains("Connect without saving pairing"));
+    assert!(text.contains("does not save a pairing or verify a persistent speaker identity"));
+    for technical in [
+        "OwnTone",
+        "SRP",
+        "ALAC",
+        "PTP",
+        "RTP",
+        "Installer planned",
+        "127.0.0.2",
+        "dBFS",
+    ] {
+        assert!(!text.contains(technical), "{technical}");
+    }
+}
