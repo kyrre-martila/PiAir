@@ -1,6 +1,8 @@
 //! Thin setup orchestration. Transport, authorization and persistence stay in
 //! their existing modules; prompts never imply an authenticated receiver identity.
 mod daily;
+mod inputs;
+use inputs::normal_inputs;
 mod resources;
 pub(crate) use daily::{daily, daily_control, daily_logs, daily_status};
 mod service;
@@ -27,6 +29,24 @@ use std::{
     time::{Duration, Instant},
 };
 use ui::{Cancelled, Ui};
+
+/// Presentation context only: the original CleanupFailure remains in the chain.
+#[derive(Debug)]
+pub(crate) struct FatalPlayback;
+impl std::fmt::Display for FatalPlayback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PiAir couldn't safely finish the audio test. Setup stopped. Check the speaker before trying again. Run piair -v setup for details.")
+    }
+}
+impl std::error::Error for FatalPlayback {}
+
+pub(crate) fn command_error_message(error: &anyhow::Error, detailed: bool) -> String {
+    if !detailed && error.is::<FatalPlayback>() {
+        FatalPlayback.to_string()
+    } else {
+        format!("{error:#}")
+    }
+}
 
 pub(crate) fn run(loaded: Loaded) -> Result<()> {
     ui::require_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())?;
@@ -194,45 +214,32 @@ fn select_input_with<R: FnMut() -> Result<String>, W: Write>(
                 Vec::new()
             }
         };
-        let devices = normal_inputs(devices);
-        if devices.is_empty() {
+        let primary = normal_inputs(devices.clone());
+        if primary.is_empty() {
             ui.say("No capture devices found. Connect an input and retry,\nor enter a known ALSA identifier manually.")?;
         }
-        for (i, (id, name)) in devices.iter().enumerate() {
+        for (i, (id, name)) in primary.iter().enumerate() {
             ui.say(format!(
                 "{}. {}",
                 i + 1,
                 clean(if name.is_empty() { id } else { name })
             ))?;
         }
-        let manual = devices.len() + 1;
+        let advanced = primary.len() + 1;
         ui.say(format!(
-            "{manual}. Enter ALSA identifier manually\n{}. Rescan",
-            manual + 1
+            "{advanced}. Other audio devices / Advanced options\n{}. Rescan",
+            advanced + 1
         ))?;
-        if let Some(id) = &draft.capture_device {
-            ui.say(format!(
-                "{}. Reuse current input: {}",
-                manual + 2,
-                clean(id)
-            ))?;
-        }
-        let n = ui.choice(
-            "Choose input (q cancels):",
-            manual + 1 + usize::from(draft.capture_device.is_some()),
-            None,
-        )?;
-        let device = if n == manual {
-            ui.line("Enter exact ALSA identifier (for example plughw:CARD=<id>,DEV=0):")?
-        } else if n == manual + 1 {
+        let n = ui.choice("Choose input (q cancels):", advanced + 1, None)?;
+        let device = if n == advanced {
+            match advanced_input(&devices, draft, ui)? {
+                Some(id) => id,
+                None => continue,
+            }
+        } else if n == advanced + 1 {
             continue;
-        } else if n == manual + 2 {
-            draft
-                .capture_device
-                .clone()
-                .expect("menu requires current input")
         } else {
-            devices[n - 1].0.clone()
+            primary[n - 1].0.clone()
         };
         ensure!(!cancel.load(Ordering::Relaxed), Cancelled);
         match validate(&device) {
@@ -241,6 +248,43 @@ fn select_input_with<R: FnMut() -> Result<String>, W: Write>(
         }
     }
 }
+fn advanced_input<R: FnMut() -> Result<String>, W: Write>(
+    devices: &[(String, String)],
+    draft: &Playback,
+    ui: &mut Ui<R, W>,
+) -> Result<Option<String>> {
+    ui.say("Advanced audio inputs (exact ALSA identifiers):")?;
+    for (i, (id, name)) in devices.iter().enumerate() {
+        ui.say(format!("{}. {}\n   {}", i + 1, clean(name), clean(id)))?;
+    }
+    let manual = devices.len() + 1;
+    ui.say(format!(
+        "{manual}. Enter ALSA identifier manually\n{}. Back",
+        manual + 1
+    ))?;
+    if let Some(id) = &draft.capture_device {
+        ui.say(format!(
+            "{}. Reuse current input: {}",
+            manual + 2,
+            clean(id)
+        ))?;
+    }
+    let n = ui.choice(
+        "Choose:",
+        manual + 1 + usize::from(draft.capture_device.is_some()),
+        None,
+    )?;
+    Ok(if n == manual {
+        Some(ui.line("Enter exact ALSA identifier:")?)
+    } else if n == manual + 1 {
+        None
+    } else if n == manual + 2 {
+        draft.capture_device.clone()
+    } else {
+        Some(devices[n - 1].0.clone())
+    })
+}
+
 fn discover_receivers<R: FnMut() -> Result<String>, W: Write>(
     loaded: &Loaded,
     ui: &mut Ui<R, W>,
@@ -531,24 +575,6 @@ fn advanced_settings<R: FnMut() -> Result<String>, W: Write>(
     Ok(())
 }
 
-/// Prefer converting hardware PCMs over duplicate raw PCMs. Manual entry keeps
-/// every ALSA identifier available, including hardware-specific advanced PCMs.
-fn normal_inputs(devices: Vec<(String, String)>) -> Vec<(String, String)> {
-    devices
-        .iter()
-        .filter(|(id, _)| {
-            if let Some(rest) = id.strip_prefix("hw:") {
-                !devices
-                    .iter()
-                    .any(|(other, _)| other == &format!("plughw:{rest}"))
-            } else {
-                true
-            }
-        })
-        .cloned()
-        .collect()
-}
-
 fn configure_activity<R: FnMut() -> Result<String>, W: Write>(
     draft: &mut Playback,
     ui: &mut Ui<R, W>,
@@ -640,7 +666,10 @@ fn play_test_audio<R: FnMut() -> Result<String>, W: Write>(
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
     let Some(path) = resources::locate() else {
-        ui.say("Test recording or LICENSE.md is missing. Skipping playback.\nInstall both in /usr/local/share/piair/audio (see docs/INSTALL.md),\nor set PIAIR_AUDIO_DATA_DIR to their directory.\nDevelopment: tests/assets/audio. Nothing is downloaded.")?;
+        tracing::debug!("Test recording or LICENSE.md missing; install both in /usr/local/share/piair/audio, or set PIAIR_AUDIO_DATA_DIR. Development: tests/assets/audio.");
+        ui.say(
+            "The test recording is unavailable. Reinstall PiAir to restore it. Skipping the test.",
+        )?;
         return Ok(());
     };
     ui.say("Playing the test recording. Speaker volume is preserved. Ctrl+C stops playback.")?;
@@ -655,19 +684,13 @@ fn play_test_audio<R: FnMut() -> Result<String>, W: Write>(
             Some(cancel.clone()),
         )
     });
-    if result
-        .as_ref()
-        .is_err_and(|e| e.is::<super::lifecycle::CleanupFailure>())
-    {
-        return result;
-    }
     playback_feedback(result, ui, &cancel)
 }
 
 fn playback_troubleshooting<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
 ) -> Result<()> {
-    ui.say("Audio is not verified. Check receiver volume/mute and speakers.\nCheck the local network and PTP UDP 319/320 permissions.\nSee docs/PTP_PORT_PERMISSIONS.md and docs/WAV_PLAYBACK_DIAGNOSTIC.md.")
+    ui.say("PiAir couldn't confirm that sound was heard.\nCheck the speaker volume and try the test again.")
 }
 
 fn playback_feedback<R: FnMut() -> Result<String>, W: Write>(
@@ -675,15 +698,35 @@ fn playback_feedback<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
     cancel: &AtomicBool,
 ) -> Result<()> {
+    playback_feedback_details(result, ui, cancel, tracing::enabled!(tracing::Level::DEBUG))
+}
+fn playback_feedback_details<R: FnMut() -> Result<String>, W: Write>(
+    result: Result<()>,
+    ui: &mut Ui<R, W>,
+    cancel: &AtomicBool,
+    detailed: bool,
+) -> Result<()> {
+    if result
+        .as_ref()
+        .is_err_and(|e| e.is::<super::lifecycle::CleanupFailure>())
+    {
+        return result.context(FatalPlayback);
+    }
     if cancel.load(Ordering::Relaxed) {
-        return match result {
-            Err(e) if e.is::<super::lifecycle::CleanupFailure>() => Err(e),
-            _ => Err(Cancelled.into()),
-        };
+        return Err(Cancelled.into());
     }
     if let Err(e) = result {
-        ui.say(format!("Playback test failed: {e:#}"))?;
-        playback_troubleshooting(ui)?;
+        tracing::debug!(error = %format!("{e:#}"), "audio test failed");
+        let message = e.downcast_ref::<super::playback_error::Stage>().map_or(
+            "PiAir couldn't prepare the audio test.\nCheck your settings and try again.",
+            |stage| stage.message(),
+        );
+        ui.say(message)?;
+        if detailed {
+            ui.say(format!("Details: {e:#}"))?;
+        } else {
+            ui.say("For details, run piair -v setup (or -vv for more diagnostics).")?;
+        }
         ui.say("No successful playback test recorded.")?;
         return Ok(());
     }

@@ -203,8 +203,9 @@ fn failed_playback_reports_guidance_without_reading_success_confirmation() {
     )
     .unwrap();
     let text = String::from_utf8(ui.out).unwrap();
-    assert!(text.contains("Playback test failed: mock authentication or transmission failure"));
-    assert!(text.contains("Check receiver volume/mute"));
+    assert!(text.contains("couldn't prepare the audio test"));
+    assert!(!text.contains("mock authentication or transmission failure"));
+    assert!(text.contains("piair -v setup"));
     assert!(text.contains("No successful playback test recorded"));
     assert!(!text.contains("Did you hear the audio?"));
     assert!(!text.contains("Yes, audio works"));
@@ -214,7 +215,7 @@ fn failed_playback_reports_guidance_without_reading_success_confirmation() {
 fn successful_playback_still_requires_user_confirmation_of_audibility() {
     for (input, expected) in [
         ("1\n", "You confirmed audible output"),
-        ("2\n", "Audio is not verified"),
+        ("2\n", "couldn't confirm that sound was heard"),
         ("3\n", "Audible playback remains unverified"),
     ] {
         let mut ui = scripted(input);
@@ -401,7 +402,7 @@ fn mock_alsa_missing_devices_rescan_validation_failure_and_explicit_choice() {
     let mut validated = Vec::new();
     let selected = select_input_with(
         &Playback::default(),
-        &mut scripted("2\n1\nbusy\n1\nchosen\n"),
+        &mut scripted("2\n1\n1\nbusy\n1\n1\nchosen\n"),
         &AtomicBool::new(false),
         || {
             scans += 1;
@@ -560,7 +561,7 @@ fn normal_input_list_prefers_conversion_and_preserves_manual_selection() {
     assert_eq!(
         select_input_with(
             &Playback::default(),
-            &mut scripted("1\nhw:manual\n"),
+            &mut scripted("1\n1\nhw:manual\n"),
             &AtomicBool::new(false),
             || Ok(vec![]),
             |_| Ok(())
@@ -644,7 +645,7 @@ fn playback_discovery_retries_absence_only_and_keeps_binding() {
         })
         .unwrap_err();
     assert_eq!(scans, 3);
-    assert!(error.to_string().contains("authentication not started"));
+    assert!(format!("{error:#}").contains("authentication not started"));
     super::super::playback_discovery(&loaded, &selected, &AtomicBool::new(true), |_, _| {
         panic!("cancelled discovery must not start")
     })
@@ -761,5 +762,147 @@ fn normal_wizard_steps_use_plain_labels_and_default_settings() {
         "dBFS",
     ] {
         assert!(!text.contains(technical), "{technical}");
+    }
+}
+
+#[test]
+fn playback_failure_stages_keep_details_only_in_verbose_output() {
+    use super::super::playback_error::Stage;
+    for (stage, message) in [
+        (Stage::Discovery, "couldn't find or validate"),
+        (Stage::Connection, "found the speaker but couldn't connect"),
+        (
+            Stage::Playback,
+            "connected to the speaker but couldn't play",
+        ),
+    ] {
+        for detailed in [false, true] {
+            let error = anyhow::anyhow!("SRP HAP PTP ALAC RTP UDP 319/320 original diagnostic")
+                .context("full nested cause")
+                .context(stage);
+            let mut ui = Ui {
+                read: || panic!("failure must not ask if audio was heard"),
+                out: Vec::new(),
+            };
+            playback_feedback_details(Err(error), &mut ui, &AtomicBool::new(false), detailed)
+                .unwrap();
+            let text = String::from_utf8(ui.out).unwrap();
+            assert!(text.contains(message));
+            assert!(!text.contains("You confirmed audible output"));
+            for detail in [
+                "SRP",
+                "HAP",
+                "PTP",
+                "ALAC",
+                "RTP",
+                "319/320",
+                "full nested cause",
+                "original diagnostic",
+            ] {
+                assert_eq!(text.contains(detail), detailed, "{text}");
+            }
+        }
+    }
+    for cancel in [false, true] {
+        let error = super::super::lifecycle::CleanupFailure(anyhow::anyhow!(
+            "original serious cleanup error"
+        ));
+        let mut ui = scripted("");
+        let result =
+            playback_feedback_details(Err(error.into()), &mut ui, &AtomicBool::new(cancel), false)
+                .unwrap_err();
+        assert!(result.is::<super::super::lifecycle::CleanupFailure>());
+        assert!(format!("{result:#}").contains("original serious cleanup error"));
+        assert!(command_error_message(&result, false).contains("Setup stopped"));
+        assert!(!command_error_message(&result, false).contains("original serious cleanup error"));
+        assert!(command_error_message(&result, true).contains("original serious cleanup error"));
+    }
+}
+
+#[test]
+fn aliases_group_by_card_and_device_while_virtual_and_bluetooth_routes_survive() {
+    let ids = [
+        "default:CARD=CODEC",
+        "dsnoop:CARD=CODEC,DEV=0",
+        "front:CARD=CODEC,DEV=0",
+        "hw:CARD=CODEC,DEV=0",
+        "plughw:CARD=CODEC,DEV=0",
+        "sysdefault:CARD=CODEC",
+        "hw:CARD=Second,DEV=0",
+        "plughw:CARD=Second,DEV=0",
+        "plughw:CARD=Second,DEV=1",
+        "hw:CARD=Loopback,DEV=0",
+        "hw:CARD=Loopback,DEV=1",
+        "dsnoop:CARD=Loopback,DEV=1",
+        "bluealsa:DEV=11:22:33:44:55:66,PROFILE=sco",
+        "virtual-loopback",
+        "nonstandard:CARD=CODEC",
+        "hw:CARD=CODEC,DEV=0,SUBDEV=1",
+    ];
+    // Identical descriptions on two cards must not merge their inputs.
+    let devices: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            (
+                id.to_string(),
+                "USB Audio CODEC, technical PCM description".into(),
+            )
+        })
+        .collect();
+    let primary = normal_inputs(devices.clone());
+    assert_eq!(primary.len(), 9);
+    assert!(primary.contains(&("plughw:CARD=CODEC,DEV=0".into(), "USB Audio CODEC".into())));
+    for id in [
+        &ids[7], &ids[8], &ids[9], &ids[10], &ids[12], &ids[13], &ids[14], &ids[15],
+    ] {
+        assert!(primary.iter().any(|(selected, _)| selected == *id), "{id}");
+    }
+    // Every original alias can still be explicitly selected, without rewriting.
+    for (index, id) in ids.iter().enumerate() {
+        let answers = format!("{}\n", index + 1);
+        let mut choice = scripted(&answers);
+        assert_eq!(
+            advanced_input(&devices, &Playback::default(), &mut choice)
+                .unwrap()
+                .as_deref(),
+            Some(*id)
+        );
+    }
+    let mut validated = Vec::new();
+    let mut ui = scripted("1\nq\n");
+    assert!(select_input_with(
+        &Playback::default(),
+        &mut ui,
+        &AtomicBool::new(false),
+        || Ok(devices.clone()),
+        |id| {
+            validated.push(id.to_owned());
+            anyhow::bail!("device busy")
+        }
+    )
+    .is_err());
+    assert_eq!(validated, ["plughw:CARD=CODEC,DEV=0"]); // No silent hw/default retry.
+}
+
+#[test]
+fn playback_feedback_honors_normal_verbose_and_trace_logging_levels() {
+    for (level, detailed) in [
+        (tracing::Level::INFO, false),
+        (tracing::Level::DEBUG, true),
+        (tracing::Level::TRACE, true),
+    ] {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(level)
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut ui = scripted("");
+            let error = anyhow::anyhow!("original SRP diagnostic")
+                .context(super::super::playback_error::Stage::Connection);
+            playback_feedback(Err(error), &mut ui, &AtomicBool::new(false)).unwrap();
+            let text = String::from_utf8(ui.out).unwrap();
+            assert_eq!(text.contains("original SRP diagnostic"), detailed);
+            assert!(text.contains("found the speaker but couldn't connect"));
+        });
     }
 }

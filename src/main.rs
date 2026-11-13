@@ -246,11 +246,12 @@ fn main() -> std::process::ExitCode {
     if let Err(error) = cli.validate() {
         error.exit();
     }
+    let detailed = cli.verbose > 0;
     logging::init(cli.verbose);
     match run(cli) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            tracing::error!(error = %format!("{error:#}"), "command failed");
+            tracing::error!(error = %receiver::setup::command_error_message(&error, detailed), "command failed");
             std::process::ExitCode::FAILURE
         }
     }

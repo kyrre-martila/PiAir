@@ -75,3 +75,37 @@ Re-test on the Trixie Pi with HomePod Stua: complete both normal/advanced setup,
 stock inactive-service acceptance, transient playback with audible confirmation,
 code pairing where supported, cancellation/cleanup, and explicitly authorized
 boot startup. Confirm actual microphone/line-in behavior and silence detection.
+
+## Remaining UX review follow-up (PR #78)
+
+The standalone `allowlist add` command now asks once to approve the exact
+canonical ID, without requiring a physical device label or local-settings lookup.
+The command still validates IDs before prompting, never discovers or approves
+receivers automatically, defaults to denial on any unconfirmed/incomplete input,
+and uses the existing snapshot/concurrent-write protection. Approval grants
+connection eligibility, not cryptographic receiver identity verification.
+
+Playback errors carry typed discovery, connection and playback presentation
+stages. Normal setup explains what to check without dumping protocol names,
+network port numbers or the internal error chain. Verbose (`-v`/`-vv`) setup and
+logging retain the original nested diagnostics. A discovery validation rejection
+is never described as failed authentication. Successful local transmission still
+requires a separate answer about audible sound. Serious cleanup errors retain
+their original error type and details and stop setup, including on cancellation.
+
+The primary ALSA list groups only recognized, explicitly parameterized routes
+using exact CARD/DEV identifiers. It chooses an advertised `plughw` PCM (or the
+advertised `hw` PCM when no converting PCM is advertised), then validates that
+exact choice live. This is a suitable input candidate, not a claim that ALSA
+aliases are equivalent. Failure never switches to another alias. Separate card
+and device numbers stay separate; Bluetooth, virtual and nonstandard routes stay
+available. Similar friendly names never establish grouping. All original PCM
+identifiers, manual entry and saved-input reuse remain in advanced options.
+Unknown parameters such as SUBDEV are never folded into a different route.
+
+Focused regressions cover single-confirmation approval, help and cancellation,
+stale writes, normal/verbose/trace stage-specific playback output, cleanup errors,
+multiple sound cards with identical names, all six UCA202 aliases, multiple
+hardware devices, loopback, Bluetooth, nonstandard parameters, advanced/manual
+selection and validation failure without substitution. The earlier systemd,
+fresh-discovery binding, credential and wizard regressions remain in place.

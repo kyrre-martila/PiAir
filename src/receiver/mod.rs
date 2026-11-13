@@ -16,6 +16,7 @@ pub(crate) mod setup;
 mod media;
 mod pairing;
 mod playback;
+mod playback_error;
 mod profile;
 #[allow(dead_code)] // Playback timing primitives remain gated beyond the initial diagnostic.
 mod ptp;
@@ -203,6 +204,15 @@ fn validate_receiver_observation(
 /// Retry only absence, never a rejected observation. Each attempt is a new,
 /// bounded mDNS snapshot; no endpoint from an earlier attempt is reused.
 fn playback_discovery(
+    loaded: &Loaded,
+    selected: &Selection,
+    cancel: &std::sync::atomic::AtomicBool,
+    discover: impl FnMut(u64, &std::sync::atomic::AtomicBool) -> Result<Vec<Receiver>>,
+) -> Result<Vec<Receiver>> {
+    playback_discovery_inner(loaded, selected, cancel, discover)
+        .context(playback_error::Stage::Discovery)
+}
+fn playback_discovery_inner(
     loaded: &Loaded,
     selected: &Selection,
     cancel: &std::sync::atomic::AtomicBool,
@@ -1045,8 +1055,11 @@ fn ptp_operation_cancellable(
             },
             credential.as_ref(),
         )
-        .context("selected receiver PTP authentication failed; no fallback")?;
-    let mut session = authenticated.into_ptp_foundation()?;
+        .context("selected receiver PTP authentication failed; no fallback")
+        .context(playback_error::Stage::Connection)?;
+    let mut session = authenticated
+        .into_ptp_foundation()
+        .context(playback_error::Stage::Connection)?;
     let result = (|| {
         session.setup_realtime_authenticated().context(
             "authenticated receiver capabilities or initial PTP SETUP rejected; advertised PTP support alone is insufficient; no fallback",
@@ -1068,5 +1081,5 @@ fn ptp_operation_cancellable(
     } else {
         println!("PTP operation: {}", session.diagnostic());
     }
-    result
+    result.context(playback_error::Stage::Playback)
 }
