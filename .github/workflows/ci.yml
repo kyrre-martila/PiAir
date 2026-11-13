@@ -39,24 +39,7 @@ jobs:
       - name: Check committed dependency resolution
         run: git diff --exit-code -- Cargo.lock
 
-  arm64:
-    name: ARM64 release build
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: stable
-          targets: aarch64-unknown-linux-gnu
-      - name: Install native ARM64 ALSA build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
-      - name: Build for Raspberry Pi OS 64-bit architecture
-        run: cargo build --release --locked --target aarch64-unknown-linux-gnu
-      - name: Check committed dependency resolution
-        run: git diff --exit-code -- Cargo.lock
+  # Native ARM64 packaging and Bookworm runtime checks live in release.yml.
 
   systemd:
     name: Systemd service contract

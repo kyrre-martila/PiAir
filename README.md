@@ -7,6 +7,26 @@ session diagnostics and an explicit AirPlay 2 realtime UDP/ALAC/NTP audio test.
 **Real Apple TV/HomePod playback compatibility remains unverified.** Audio tools never discover or contact receivers. Existing Autostream
 and OwnTone services are never modified.
 
+## Install on Raspberry Pi
+
+Precompiled releases support Raspberry Pi OS **64-bit Bookworm or newer** on
+ARM64 Raspberry Pis (Pi 3/4/5 and Zero 2 W). Follow the short
+[download, checksum and installation procedure](docs/INSTALL.md#install).
+No Rust, Cargo, Git or compilation is needed.
+
+```sh
+piair setup       # First-time audio input and receiver configuration
+piair             # Daily menu
+piair update      # Confirmed stable-release update
+piair uninstall   # Confirmed removal; settings and pairing credentials remain
+piair --version
+```
+
+Configuration is normally `~/.config/piair/config.toml`; private receiver state
+and credentials are in the adjacent `receiver-state/`. Both survive updates and
+uninstallation. See [installation troubleshooting and interrupted-update recovery](docs/INSTALL.md#installation-troubleshooting)
+and [service status](docs/SYSTEMD.md).
+
 ## Interactive setup
 
 Run `piair setup` in a terminal (including SSH with a TTY) for first-time setup or
@@ -29,7 +49,7 @@ blocked pending receiver clock-adoption evidence. See the [lifecycle, limitation
 and manual hardware instructions](docs/BUFFERED_LIFECYCLE.md). No diagnostic runs
 automatically; no buffered audible playback is claimed.
 
-## Build on Raspberry Pi OS ARM64
+## Build from source (developers)
 
 Install a current stable Rust toolchain with rustfmt and Clippy, then build
 natively as your normal user:

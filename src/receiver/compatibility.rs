@@ -115,7 +115,7 @@ impl Capabilities {
             !(self.password == Some(false) && self.flags.is_some_and(|f| f & (1 << 7) != 0)),
             "contradictory password capabilities; inspect receiver configuration"
         );
-        ensure!(self.password!=Some(true) && !self.flags.is_some_and(|f|f&(1<<7)!=0),"password-protected AirPlay authentication is unsupported; a HAP setup PIN is not an AirPlay password");
+        ensure!(self.password!=Some(true) && self.flags.is_none_or(|f|f&(1<<7)==0),"password-protected AirPlay authentication is unsupported; a HAP setup PIN is not an AirPlay password");
         ensure!(self.access_control.is_none_or(|acl|acl==0),"nonzero receiver access-control policy is unresolved; Home membership authorization is not implemented");
         ensure!(
             self.protocol_version

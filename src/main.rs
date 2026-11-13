@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod discovery;
 mod logging;
+mod maintenance;
 mod receiver;
 
 use anyhow::Result;
@@ -21,11 +22,17 @@ fn run_with_discovery(
     cli: Cli,
     discover: impl Fn(u64) -> Result<Vec<discovery::Receiver>>,
 ) -> Result<()> {
+    if matches!(cli.command, Some(Command::Update | Command::Uninstall)) {
+        return maintenance::run(matches!(cli.command, Some(Command::Update)));
+    }
     let loaded = config::load(cli.config)?;
     let Some(command) = cli.command else {
         return receiver::setup::daily(loaded);
     };
     match command {
+        Command::Update | Command::Uninstall => {
+            unreachable!("maintenance dispatched before configuration")
+        }
         Command::Setup => receiver::setup::run(loaded)?,
         Command::Run {
             receiver_id,

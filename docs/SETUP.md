@@ -18,7 +18,7 @@ A source checkout is not an installed service.
 
 1. Connect a USB audio interface and its audio source to a Raspberry Pi running
    a supported Linux distribution with ALSA. Put the Pi and receiver on the same
-   local network. Install/build PiAir using the project's existing instructions.
+   local network. Install PiAir using the [release installation procedure](INSTALL.md).
 2. Run `piair setup` from your ordinary account. Select an actual discovered input
    by number, or enter its ALSA identifier. Friendly names and identifiers come
    from ALSA hints. Even one input requires an explicit selection. If necessary,
@@ -76,7 +76,7 @@ A source checkout is not an installed service.
    path, verifies configuration resolution and requires another confirmation.
    Normal system authorization (systemctl/polkit) applies. Declining or lacking
    service support does not prevent successful setup. See [SYSTEMD.md](SYSTEMD.md)
-   for the manual install procedure; the future installer is planned for PR #74.
+   and [release installation](INSTALL.md).
 
 ## Reconfiguration and cancellation
 
@@ -120,8 +120,7 @@ Resource resolution requires **both** `Pachelbel_Canon_audio_test.wav` and
 - The build checkout's `tests/assets/audio` directory, for development.
 
 The executable does not embed the roughly 9.6 MB recording. Installed binaries
-work independently of the current working directory. PR #74's installer should
-package the existing WAV and its unchanged attribution together in one of these
+work independently of the current working directory. The release installer packages the existing WAV and its unchanged attribution together in one of these
 shared-data locations. A missing recording or license produces guidance and lets
 setup finish without the test. Setup never downloads the recording or remote code.
 WAV parsing/sender/CLI bounds allow 1–49 seconds; the diagnostic CLI retains its

@@ -397,8 +397,7 @@ pub fn stream_test(
         .map(|path| wav::Playback::open(path, seconds))
         .transpose()?;
     let stream_diagnostic = stream_setup_check || playback_check;
-    ensure!(!stream_diagnostic || (!setup_check && !record_check
-        && !(stream_setup_check && playback_check) && experimental_owntone_transient
+    ensure!(!stream_diagnostic || (!(setup_check || record_check || (stream_setup_check && playback_check) || !experimental_owntone_transient)
         && setup_profile.is_none()
         && setup_timeout_seconds.is_none() && seconds == 1 && volume_db == -30),
         "stream diagnostics require an approved compatible receiver, OwnTone transient, fixed defaults and no conflicting modes");

@@ -616,12 +616,10 @@ impl Service {
                             self.evidence.source_port_identities = self.clock.ports.len() as u64;
                             if responses.is_empty() {
                                 self.evidence.sync_received += 1;
+                            } else if responses[0].kind == Kind::PdelayResp {
+                                self.evidence.pdelay_requests += 1;
                             } else {
-                                if responses[0].kind == Kind::PdelayResp {
-                                    self.evidence.pdelay_requests += 1;
-                                } else {
-                                    self.evidence.delay_requests += 1;
-                                }
+                                self.evidence.delay_requests += 1;
                             }
                             for p in responses {
                                 self.send(&p)?;

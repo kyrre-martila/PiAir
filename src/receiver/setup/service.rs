@@ -123,7 +123,10 @@ fn query(loaded: &Loaded, verify: bool) -> Result<Service> {
         "WorkingDirectory",
     ])?;
     let p = properties(&text);
-    ensure!(p.get("LoadState") == Some(&"loaded"), "PiAir systemd template is not installed; installer is planned for PR #74; manual procedure: docs/SYSTEMD.md");
+    ensure!(
+        p.get("LoadState") == Some(&"loaded"),
+        "PiAir systemd template is not installed; see docs/INSTALL.md for release installation"
+    );
     ensure!(
         p.get("User") == Some(&user),
         "service account differs from current user"
@@ -159,7 +162,10 @@ fn query(loaded: &Loaded, verify: bool) -> Result<Service> {
     })
 }
 fn validate_properties(p: &BTreeMap<&str, &str>, user: &str) -> Result<()> {
-    ensure!(p.get("LoadState")==Some(&"loaded"), "PiAir systemd template is not installed; installer is planned for PR #74; manual procedure: docs/SYSTEMD.md");
+    ensure!(
+        p.get("LoadState") == Some(&"loaded"),
+        "PiAir systemd template is not installed; see docs/INSTALL.md for release installation"
+    );
     ensure!(
         p.get("User") == Some(&user),
         "service account differs from current user"
