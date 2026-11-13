@@ -146,15 +146,16 @@ def confirm(message):
     return input(message + " [y/N] ").strip().lower() in ("y", "yes")
 
 
-def run(*args):
+def run(*args, reject_stderr=False):
     p = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    require(p.returncode == 0, "Command failed: " + " ".join(args) + "\n" + p.stderr.strip())
+    require(p.returncode == 0 and (not reject_stderr or not p.stderr.strip()), "Command failed: " + " ".join(args) + "\n" + p.stderr.strip())
     return p.stdout.strip()
 
 
 class Services:
     def ctl(self, *args):
-        return run("/usr/bin/systemctl", "--system", "--no-pager", *args)
+        return run("/usr/bin/systemctl", "--system", "--no-pager", *args,
+                   reject_stderr=args[0] in ("list-units", "list-unit-files"))
 
     def properties(self, unit):
         fields = "LoadState,ActiveState,User,FragmentPath,DropInPaths,Environment,EnvironmentFiles,MainPID,UnitFileState,ExecStart,WorkingDirectory"

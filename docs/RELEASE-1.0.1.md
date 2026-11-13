@@ -8,7 +8,7 @@ match. This is a legitimate empty query result, not evidence of a broken manager
 
 The installer now queries the complete unit-file inventory and selects PiAir
 units locally. A normal Debian system has other service units, so the inventory
-succeeds even before the PiAir template exists. Nonzero inventory results still
+succeeds even before the PiAir template exists. Nonzero inventory results and query diagnostics on stderr still
 fail; connection and permission errors are never converted to empty results.
 Inventory rows and service properties are validated before safety decisions.
 

@@ -106,7 +106,7 @@ class SystemctlTests(unittest.TestCase):
     def test_execution_errors_are_never_empty_results(self):
         for command in ('list-units', 'list-unit-files', 'show'):
             for code, stdout, stderr in ((1, '', 'Failed to connect to bus: No such file or directory'),
-                                         (1, '', 'Access denied'), (2, '', ''),
+                                         (1, '', 'Access denied'), (0, '', 'Unexpected systemd error'), (2, '', ''),
                                          (1, '', ''), (1, record(), 'Unexpected error')):
                 with self.subTest(command=command, code=code, stderr=stderr), self.assertRaises(RuntimeError):
                     self.inspect(failure=(command, code, stdout, stderr))
