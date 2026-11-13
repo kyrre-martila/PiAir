@@ -20,8 +20,8 @@ fn u32le(b: &[u8]) -> u32 {
 impl Playback {
     pub fn open(path: &Path, seconds: u32) -> Result<Self> {
         ensure!(
-            (1..=30).contains(&seconds),
-            "WAV duration must be 1..30 seconds"
+            (1..=49).contains(&seconds),
+            "WAV duration must be 1..49 seconds"
         );
         let mut f = File::open(path).context("open WAV")?;
         let len = f.metadata()?.len();
@@ -171,10 +171,10 @@ mod tests {
     fn asset_resamples_and_bounds_without_looping() {
         let p = Playback::open(
             Path::new("tests/assets/audio/Pachelbel_Canon_audio_test.wav"),
-            30,
+            49,
         )
         .unwrap();
-        assert_eq!(p.frames.len(), 30 * 44100);
+        assert_eq!(p.frames.len(), 49 * 44100);
         assert!(!p.eof);
         assert_eq!(p.frames[0], [0, 0]);
         assert_eq!(p.frames.last(), Some(&[0, 0]));
@@ -224,6 +224,6 @@ mod tests {
         let f = fixture(44100, 1, 16, 1, &[0; 4]);
         f.as_file().set_len(45).unwrap();
         assert!(Playback::open(f.path(), 1).is_err());
-        assert!(Playback::open(f.path(), 31).is_err());
+        assert!(Playback::open(f.path(), 50).is_err());
     }
 }

@@ -27,6 +27,7 @@ impl Settings {
 
 pub(super) struct Activity {
     settings: Settings,
+    pub level_dbfs: f64,
     threshold_power: f64,
     sum: [f64; 2],
     count: u64,
@@ -40,6 +41,7 @@ impl Activity {
         Self {
             threshold_power: 10f64.powf(settings.threshold_dbfs / 10.0),
             settings,
+            level_dbfs: f64::NEG_INFINITY,
             sum: [0.0; 2],
             count: 0,
             loud: 0,
@@ -56,6 +58,7 @@ impl Activity {
     }
     pub fn reset(&mut self) {
         self.sum = [0.0; 2];
+        self.level_dbfs = f64::NEG_INFINITY;
         self.count = 0;
         self.loud = 0;
         self.quiet = 0;
@@ -70,7 +73,9 @@ impl Activity {
         if self.count != 882 {
             return;
         }
-        let meaningful = self.sum.into_iter().fold(0.0, f64::max) / 882.0 >= self.threshold_power;
+        let power = self.sum.into_iter().fold(0.0, f64::max) / 882.0;
+        self.level_dbfs = 10.0 * power.log10();
+        let meaningful = power >= self.threshold_power;
         self.count = 0;
         self.sum = [0.0; 2];
         if meaningful {
@@ -162,5 +167,62 @@ mod tests {
         feed(&mut a, 1000, 3000);
         assert!(a.active);
         assert_eq!(a.generation, 2);
+    }
+
+    #[test]
+    fn setup_suggestions_reject_quiet_pcm_noise_and_qualify_sustained_music() {
+        use crate::receiver::setup::suggested_threshold;
+
+        // Collect 25 real detector windows, just as setup collects RMS levels.
+        let levels = |digital_silence: bool, music: bool| {
+            let mut detector = meter();
+            let mut levels = Vec::new();
+            let mut random = 1u32;
+            for frame in 0..25 * 882 {
+                random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+                let sample = if music {
+                    // 100 Hz at approximately -30 dBFS RMS.
+                    (1465.0 * (std::f64::consts::TAU * frame as f64 / 441.0).sin()) as i16
+                } else if digital_silence {
+                    0
+                } else {
+                    // Quiet broadband input noise, approximately -50 dBFS RMS.
+                    ((random >> 16) % 361) as i16 - 180
+                };
+                detector.push([sample, -sample]);
+                if (frame + 1) % 882 == 0 {
+                    levels.push(detector.level_dbfs);
+                }
+            }
+            levels
+        };
+        let music = levels(false, true);
+        for digital_silence in [true, false] {
+            let threshold = suggested_threshold(&levels(digital_silence, false), &music).unwrap();
+            let mut detector = Activity::new(Settings {
+                threshold_dbfs: threshold,
+                ..meter().settings
+            });
+            let mut random = 1u32;
+            // Realistic quiet background must not start playback even when setup
+            // measured digital zeros, and even after the full silence timeout.
+            for _ in 0..32 * 44100 {
+                random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+                let noise = ((random >> 16) % 361) as i16 - 180;
+                detector.push([noise, -noise]);
+            }
+            assert!(!detector.active);
+            assert_eq!(detector.generation, 0);
+            for frame in 0..44100 {
+                let sample = (1465.0 * (std::f64::consts::TAU * frame as f64 / 441.0).sin()) as i16;
+                detector.push([sample, -sample]);
+                if frame + 1 == 980 * 44100 / 1000 {
+                    assert!(!detector.active);
+                }
+            }
+            assert!(detector.active);
+            assert!(detector.meaningful());
+            assert_eq!(detector.generation, 1);
+        }
     }
 }

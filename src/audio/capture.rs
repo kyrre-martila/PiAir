@@ -22,14 +22,24 @@ fn normalize_s32(value: i32) -> f32 {
     (f64::from(value) / 2147483648.0) as f32
 }
 
-pub fn devices() -> Result<()> {
-    println!("ALSA capture PCM hints (availability is checked only on capture):");
+/// ALSA's own capture hints; these are candidates, not availability promises.
+pub(crate) fn discover_devices() -> Result<Vec<(String, String)>> {
+    let mut devices = Vec::new();
     for hint in HintIter::new(None, c"pcm")? {
         if hint.direction != Some(Direction::Playback) {
             if let Some(name) = hint.name {
-                println!("{:?}  {:?}", name, hint.desc.unwrap_or_default());
+                devices.push((name, hint.desc.unwrap_or_default().replace('\n', " ")));
             }
         }
+    }
+    devices.sort();
+    devices.dedup();
+    Ok(devices)
+}
+pub fn devices() -> Result<()> {
+    println!("ALSA capture PCM hints (availability is checked only on capture):");
+    for (name, description) in discover_devices()? {
+        println!("{name:?}  {description:?}");
     }
     println!(
         "Use a stable hw:CARD=<USB card ID>,DEV=0 identifier; compare arecord -l and arecord -L."

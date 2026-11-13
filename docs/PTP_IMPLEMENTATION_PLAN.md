@@ -7,7 +7,7 @@ terminal y/yes confirmation, as `stream-test` does. StoredHap is the default;
 transient authentication requires its existing explicit experimental flag.
 There is no protocol fallback. Omitting `--volume-db` preserves receiver volume;
 supplying it authorizes a persistent receiver volume change (-60 through -10 dB).
-The bounded WAV duration defaults to 30 seconds, accepts 1–30 seconds, and stops
+The bounded WAV duration defaults to 30 seconds, accepts 1–49 seconds, and stops
 at EOF. WAV parsing/resampling happens before authentication, using the existing
 reader, so file I/O never blocks the PTP worker.
 
@@ -209,3 +209,7 @@ and cleanup behavior; physical HomePod playback must be confirmed separately.
 See [PTP port permissions](PTP_PORT_PERMISSIONS.md) for the capability security
 scope, helper validation, and the required repeatable post-build step. Run PiAir
 as kyrre; only the capability installation step uses sudo.
+
+The optional `piair setup` test uses the same sender and existing recording for
+49 seconds (or earlier EOF), preserving receiver volume. See [SETUP.md](SETUP.md)
+for resource locations and the recording’s separate CC BY-SA 3.0 attribution.

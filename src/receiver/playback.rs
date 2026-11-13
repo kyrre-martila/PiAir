@@ -77,8 +77,8 @@ pub fn run(
     stats: &mut Statistics,
 ) -> Result<()> {
     ensure!(
-        !frames.is_empty() && frames.len() <= 30 * RATE as usize,
-        "WAV input must contain 1..=1323000 frames"
+        !frames.is_empty() && frames.len() <= 49 * RATE as usize,
+        "WAV input must contain 1..=2160900 frames"
     );
     let start = Instant::now();
     let result = run_at(

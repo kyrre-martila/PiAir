@@ -1,3 +1,9 @@
+For first-time setup or reconfiguration, run `piair setup` in a terminal. See
+[the interactive workflow](SETUP.md) for explicit approval, authentication, automatic
+level measurement and reviewed saving. Setup requires an idle automatic runtime;
+stop your own running instance before configuring. Saved operational changes still
+require an explicit restart; security revocation remains immediate.
+
 # Automatic playback runtime and unattended operation
 
 `receiver::runtime::Runtime` owns automatic orchestration independently of terminal

@@ -354,7 +354,23 @@ pub fn save_playback(
     id: Option<String>,
     args: crate::cli::PlaybackArgs,
 ) -> Result<()> {
+    save_playback_checked(loaded, id, args, None)
+}
+
+/// Optional setup snapshot pins the settings reviewed by the user across confirmation.
+pub(crate) fn save_playback_checked(
+    loaded: &Loaded,
+    id: Option<String>,
+    args: crate::cli::PlaybackArgs,
+    expected: Option<&Option<crate::allowlist::Snapshot>>,
+) -> Result<()> {
     let original = crate::allowlist::snapshot(&loaded.path)?;
+    if let Some(expected) = expected {
+        anyhow::ensure!(
+            &original == expected,
+            "configuration changed during setup; rerun and review before saving"
+        );
+    }
     anyhow::ensure!(
         original.is_some() || loaded.source != "file",
         "configuration disappeared; rerun command"

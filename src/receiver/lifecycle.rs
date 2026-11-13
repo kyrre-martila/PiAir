@@ -422,7 +422,7 @@ impl Session {
             );
             ensure!(
                 frames.is_none_or(
-                    |frames| !frames.is_empty() && frames.len() <= 30 * profile::RATE as usize
+                    |frames| !frames.is_empty() && frames.len() <= 49 * profile::RATE as usize
                 ),
                 "WAV duration outside bound"
             );

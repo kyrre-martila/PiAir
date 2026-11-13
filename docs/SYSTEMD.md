@@ -4,8 +4,8 @@ The optional `systemd/piair@.service` is a **system** service template for Raspb
 Pi OS 64-bit (Bookworm/systemd 252 or later). An instance names an existing Linux
 account. PiAir runs as that account, in the foreground, without a terminal. It
 survives SSH logout; optional boot enablement is an explicit operator action.
-Installing files neither starts nor enables playback. There is no installer,
-updater or setup wizard in this change.
+Installing files neither starts nor enables playback. There is no installer or updater. `piair setup` can configure playback and
+optionally activate a verified installed stock unit; see [SETUP.md](SETUP.md).
 
 ## Prepare as the PiAir user (no sudo)
 
@@ -223,3 +223,19 @@ timing. On Raspberry Pi OS, explicitly test start/stop/restart, logout, reboot
 after enablement, failure restart/rate limits, concurrent manual execution,
 credential revocation and resource release after stopping during active playback.
 Record the hardware/OS and journal outcomes; this PR claims no new hardware result.
+
+## Interactive activation
+
+`piair setup` offers boot startup only after saving and only when the system
+manager has loaded the installed stock template for the current non-root account.
+No is the default. It checks the service identity, inactive state, root-owned
+installed files, absence of drop-ins/environment overrides, and that service HOME
+resolves to the saved configuration. It probes the existing runtime lock again
+before activation. After displaying the exact unit/path and receiving explicit
+confirmation, it calls `systemctl --system enable --now piair@USERNAME.service`.
+Systemctl uses normal system authorization; setup does not invoke sudo or modify
+sudoers/helpers. It never stops another service. If authorization fails, config
+is still saved; inspect both enablement and status before retrying. Custom units,
+config paths, environments or active services require manual review using this
+document. An absent unit is optional: finish setup successfully and follow the
+manual procedure above; installer work is planned for PR #74.

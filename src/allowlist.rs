@@ -79,7 +79,7 @@ pub(crate) fn snapshot(path: &Path) -> Result<Option<Snapshot>> {
     Ok(Some(Snapshot { text, stamp }))
 }
 
-fn render(original: &str, id: &str, add: bool) -> Result<String> {
+pub(crate) fn render(original: &str, id: &str, add: bool) -> Result<String> {
     Config::parse(original)?;
     let mut doc: DocumentMut = original.parse().context("cannot edit TOML")?;
     if !doc.contains_key("receiver_allowlist") {

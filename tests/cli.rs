@@ -624,7 +624,7 @@ fn wav_diagnostic_arguments_fail_before_receiver_contact() {
         "tests/assets/audio/Pachelbel_Canon_audio_test.wav",
     ];
     for extra in [
-        vec!["--seconds", "31"],
+        vec!["--seconds", "50"],
         vec!["--volume-db", "-9"],
         vec!["--playback-check"],
         vec!["--setup-check"],

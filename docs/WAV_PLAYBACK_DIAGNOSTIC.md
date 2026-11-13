@@ -51,7 +51,7 @@ Input reads are bounded to the requested duration plus one interpolation frame.
 Conversion uses linear interpolation to 44.1 kHz and saturating 16-bit output;
 it is a diagnostic resampler, not a mastering-quality antialias filter.
 
-`--seconds` defaults to 1 and permits 1–30 for WAV. Playback stops at the
+`--seconds` defaults to 1 and permits 1–49 for WAV. Playback stops at the
 requested duration or EOF, whichever comes first, and reports which limit applies.
 The remainder of a longer file is explicitly not played. Short files are never
 looped. Both boundaries have up to 50 ms fades. Final partial packets are padded
@@ -86,3 +86,7 @@ PR #53 records two pre-existing timing-sensitive tests:
 `transient_session_negotiates_encrypted_audio_and_acknowledges_teardown`.
 Scheduler stalls under CI load must be distinguished from new failures; do not
 relax production timing guards to make loopback tests pass.
+
+The optional `piair setup` test uses the same sender and existing recording for
+49 seconds (or earlier EOF), preserving receiver volume. See [SETUP.md](SETUP.md)
+for resource locations and the recording’s separate CC BY-SA 3.0 attribution.

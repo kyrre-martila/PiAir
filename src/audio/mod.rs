@@ -4,7 +4,7 @@ pub(crate) mod activity;
 #[allow(dead_code)]
 pub(crate) mod alac;
 mod calibration;
-mod capture;
+pub(crate) mod capture;
 pub mod detector;
 pub(crate) mod live;
 
