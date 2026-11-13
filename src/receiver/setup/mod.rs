@@ -656,10 +656,21 @@ fn test_audio<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
-    ui.say("\nAirPlay audio playback test\nTests the AirPlay output path; ALSA input was checked separately.\n1. Play test recording (49 seconds)\n2. Skip test [default]")?;
-    if ui.choice("Choose:", 2, Some(2))? == 2 {
+    if !test_audio_requested(ui)? {
         return Ok(());
     }
+    play_test_audio(loaded, draft, ui, cancel)
+}
+fn test_audio_requested<R: FnMut() -> Result<String>, W: Write>(ui: &mut Ui<R, W>) -> Result<bool> {
+    ui.say("\nAirPlay audio playback test\nTests the AirPlay output path; ALSA input was checked separately.\n1. Play test recording (49 seconds)\n2. Skip test [default]")?;
+    Ok(ui.choice("Choose:", 2, Some(2))? == 1)
+}
+fn play_test_audio<R: FnMut() -> Result<String>, W: Write>(
+    loaded: &Loaded,
+    draft: &Playback,
+    ui: &mut Ui<R, W>,
+    cancel: Arc<AtomicBool>,
+) -> Result<()> {
     let Some(path) = resources::locate() else {
         ui.say("Test recording or LICENSE.md is missing. Skipping playback.\nInstall both in /usr/local/share/piair/audio (future installer PR #74),\nor set PIAIR_AUDIO_DATA_DIR to their directory.\nDevelopment: tests/assets/audio. Nothing is downloaded.")?;
         return Ok(());
@@ -676,6 +687,12 @@ fn test_audio<R: FnMut() -> Result<String>, W: Write>(
             Some(cancel.clone()),
         )
     });
+    if result
+        .as_ref()
+        .is_err_and(|e| e.is::<super::lifecycle::CleanupFailure>())
+    {
+        return result;
+    }
     playback_feedback(result, ui, &cancel)
 }
 

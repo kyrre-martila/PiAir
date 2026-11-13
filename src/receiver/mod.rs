@@ -167,6 +167,17 @@ fn validate_selection(
 ) -> Result<Selection> {
     exact_id(id)?;
     ensure!(loaded.config.allows(id), "receiver is not approved");
+    validate_receiver_observation(loaded, id, method, snapshot)
+}
+// Read-only prerequisites, including for an unapproved candidate. This grants
+// no authorization; persistence and connection still require validate_selection.
+fn validate_receiver_observation(
+    loaded: &Loaded,
+    id: &str,
+    method: Method,
+    snapshot: &[Receiver],
+) -> Result<Selection> {
+    exact_id(id)?;
     let receiver = snapshot
         .iter()
         .find(|r| r.id == id)

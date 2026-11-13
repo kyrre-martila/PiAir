@@ -435,6 +435,27 @@ fn log_arguments(unit: &str, follow: bool) -> Vec<&str> {
     }
     args
 }
+// Coreutils date uses the host's local timezone, including DST, without unsafe
+// localtime calls or another time dependency. Only validated epoch seconds are
+// passed as an argument; unavailable/invalid times never leak raw microseconds.
+fn journal_local_time(micros: Option<&str>, command: &mut Command) -> String {
+    let Some(seconds) = micros
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v / 1_000_000)
+    else {
+        return "Time unavailable".into();
+    };
+    command
+        .args(["--date", &format!("@{seconds}"), "+%Y-%m-%d %H:%M:%S %z"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|text| super::clean(text.trim()))
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "Time unavailable".into())
+}
+
 fn render_log(line: &str, detailed: bool) -> String {
     use serde_json::Value;
     let Ok(entry) = serde_json::from_str::<Value>(line) else {
@@ -443,19 +464,25 @@ fn render_log(line: &str, detailed: bool) -> String {
     let Some(message) = entry.get("MESSAGE").and_then(Value::as_str) else {
         return "Non-text journal entry; see docs/SYSTEMD.md".into();
     };
-    let timestamp = entry
-        .get("__REALTIME_TIMESTAMP")
+    let event = serde_json::from_str::<Value>(message).ok();
+    let timestamp = event
+        .as_ref()
+        .and_then(|event| event.get("timestamp"))
         .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let Ok(event) = serde_json::from_str::<Value>(message) else {
+        .filter(|value| !value.trim().is_empty())
+        .map(super::clean)
+        .unwrap_or_else(|| {
+            journal_local_time(
+                entry.get("__REALTIME_TIMESTAMP").and_then(Value::as_str),
+                &mut Command::new("date"),
+            )
+        });
+    let Some(event) = event else {
         return format!("{timestamp}: {}", super::clean(message));
     };
     let mut text = format!(
         "{} {}",
-        event
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .unwrap_or(timestamp),
+        timestamp,
         event.get("level").and_then(Value::as_str).unwrap_or("")
     );
     if let Some(fields) = event.get("fields").and_then(Value::as_object) {
@@ -636,5 +663,37 @@ mod log_tests {
         command.args(["-c", "raise SystemExit(3)"]);
         let error = stream_logs(&mut command, false, &AtomicBool::new(false)).unwrap_err();
         assert!(error.to_string().contains("journal permissions"));
+    }
+    #[test]
+    fn journal_fallback_uses_readable_local_time_including_timezone_and_dst() {
+        for (zone, expected) in [
+            ("UTC", "2023-11-14 22:13:20 +0000"),
+            ("America/New_York", "2023-11-14 17:13:20 -0500"),
+        ] {
+            let mut command = Command::new("date");
+            command.env("TZ", zone);
+            assert_eq!(
+                journal_local_time(Some("1700000000123456"), &mut command),
+                expected
+            );
+        }
+        let mut summer = Command::new("date");
+        summer.env("TZ", "America/New_York");
+        assert_eq!(
+            journal_local_time(Some("1689379200000000"), &mut summer),
+            "2023-07-14 20:00:00 -0400"
+        );
+        for timestamp in [None, Some("invalid"), Some("-1")] {
+            assert_eq!(
+                journal_local_time(timestamp, &mut Command::new("date")),
+                "Time unavailable"
+            );
+        }
+        let entry = serde_json::json!({"MESSAGE":"Service stopped", "__REALTIME_TIMESTAMP":"1700000000123456"}).to_string();
+        let rendered = render_log(&entry, false);
+        assert!(!rendered.contains("1700000000123456"));
+        assert!(rendered.contains(":00") || rendered.contains(":20"));
+        let entry = serde_json::json!({"MESSAGE":"{\"fields\":{\"message\":\"failed\"}}", "__REALTIME_TIMESTAMP":"1700000000123456"}).to_string();
+        assert!(!render_log(&entry, false).contains("1700000000123456"));
     }
 }

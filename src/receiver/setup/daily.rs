@@ -61,19 +61,15 @@ pub(crate) fn daily_logs(loaded: &Loaded, follow: bool, detailed: bool) -> Resul
     let cancel = runtime::signal_cancellation()?;
     service::logs(loaded, follow, detailed, &cancel)
 }
-fn stop_for_action<R: FnMut() -> Result<String>, W: Write>(
-    loaded: &Loaded,
-    ui: &mut Ui<R, W>,
-) -> Result<Option<bool>> {
-    let running = match service::observe(loaded) {
-        Ok(s) if s.active == "active" && s.pid != 0 => true,
-        Ok(s) if matches!(s.active.as_str(), "inactive" | "failed") && s.pid == 0 => false,
+fn service_running(loaded: &Loaded) -> Result<bool> {
+    match service::observe(loaded) {
+        Ok(s) if s.active == "active" && s.pid != 0 => Ok(true),
+        Ok(s) if matches!(s.active.as_str(), "inactive" | "failed") && s.pid == 0 => Ok(false),
         Ok(_) => anyhow::bail!("service is transitioning; wait and retry"),
-        // An unavailable or custom service is never controlled. The kernel lock
-        // below still prevents changing anything under a manual runtime.
-        Err(_) => false,
-    };
-    confirm_stop(ui, running, || service::control(loaded, "stop"))
+        // An unavailable service is never controlled. The runtime lock still
+        // prevents modifying settings underneath a manual instance.
+        Err(_) => Ok(false),
+    }
 }
 fn confirm_stop<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
@@ -88,16 +84,150 @@ fn confirm_stop<R: FnMut() -> Result<String>, W: Write>(
     }
     Ok(Some(running))
 }
-fn restart_offer<R: FnMut() -> Result<String>, W: Write>(
-    loaded: &Loaded,
+fn safe_saved_settings(path: &std::path::Path) -> Result<Loaded> {
+    let saved = config::load(Some(path.to_owned()))?;
+    complete(&saved)?;
+    // No prompt or service activation while another runtime owns the lock.
+    drop(runtime::InstanceLock::acquire()?);
+    Ok(saved)
+}
+fn stopped_guidance<R: FnMut() -> Result<String>, W: Write>(ui: &mut Ui<R, W>) -> Result<()> {
+    ui.say("PiAir remains stopped. When ready, run piair start.\nUse the same --config path if you supplied one.")
+}
+// All three daily actions use this path, after their resources/locks are dropped.
+fn finish_action<R: FnMut() -> Result<String>, W: Write, T>(
     ui: &mut Ui<R, W>,
+    was_running: bool,
+    cancel: &AtomicBool,
+    outcome: Result<()>,
+    check: impl FnOnce() -> Result<T>,
+    start: impl FnOnce(T) -> Result<()>,
 ) -> Result<()> {
-    if ui.confirm("Start PiAir now?")? {
-        service::control(loaded, "start")?;
-    } else {
-        ui.say("PiAir remains stopped. Saved settings will be used next time it starts.")?;
+    if !was_running {
+        return outcome;
     }
-    Ok(())
+    if let Err(error) = &outcome {
+        if error.is::<Cancelled>() {
+            ui.say("Action cancelled.")?;
+        } else {
+            ui.say(format!("Action failed: {error:#}"))?;
+        }
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return stopped_guidance(ui);
+    }
+    if outcome
+        .as_ref()
+        .is_err_and(|e| e.is::<super::super::lifecycle::CleanupFailure>())
+    {
+        ui.say("Cleanup could not be verified. Resolve the reported cleanup failure before starting PiAir.")?;
+        return stopped_guidance(ui);
+    }
+    let saved = match check() {
+        Ok(saved) => saved,
+        Err(error) => {
+            ui.say(format!("Cannot safely start PiAir: {error:#}\nReview saved settings with piair status and piair setup.\nA manual runtime must be stopped manually; no settings were rolled back by recovery."))?;
+            return stopped_guidance(ui);
+        }
+    };
+    // A signal during validation must not lead to a new prompt or activation.
+    if cancel.load(Ordering::Relaxed) {
+        return stopped_guidance(ui);
+    }
+    match ui.confirm("Saved settings are consistent. Start PiAir again?") {
+        Ok(true) if !cancel.load(Ordering::Relaxed) => {
+            if let Err(error) = start(saved) {
+                stopped_guidance(ui)?;
+                return Err(error);
+            }
+            Ok(())
+        }
+        Ok(_) => stopped_guidance(ui),
+        Err(error) => {
+            stopped_guidance(ui)?;
+            if error.is::<Cancelled>() {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+fn stopped_action<R: FnMut() -> Result<String>, W: Write>(
+    loaded: &mut Loaded,
+    ui: &mut Ui<R, W>,
+    cancel: &AtomicBool,
+    action: impl FnOnce(&mut Loaded, &mut Ui<R, W>) -> Result<()>,
+) -> Result<()> {
+    let was_running = service_running(loaded)?;
+    let outcome = match confirm_stop(ui, was_running, || service::control(loaded, "stop")) {
+        Ok(None) => return Ok(()),
+        Ok(Some(_)) => action(loaded, ui),
+        Err(error) => {
+            // systemctl can stop successfully and then fail the lock-release
+            // check. Recover only when the same user's unit is actually stopped.
+            let stopped = was_running
+                && !error.is::<Cancelled>()
+                && service::observe(loaded).is_ok_and(|s| {
+                    matches!(s.active.as_str(), "inactive" | "failed") && s.pid == 0
+                });
+            if !stopped {
+                return Err(error);
+            }
+            Err(error)
+        }
+    };
+    // Setup may have explicitly activated the existing service itself. Do not
+    // describe it as stopped or request a second activation in that case.
+    if was_running && service::observe(loaded).is_ok_and(|s| s.active == "active" && s.pid != 0) {
+        ui.say("PiAir is already running. No recovery start is needed.")?;
+        return outcome;
+    }
+    finish_action(
+        ui,
+        was_running,
+        cancel,
+        outcome,
+        || safe_saved_settings(&loaded.path),
+        // Confirmation may take time: reload/check again immediately before
+        // requesting activation, rather than using the pre-prompt snapshot.
+        |saved| service::control(&safe_saved_settings(&saved.path)?, "start"),
+    )
+}
+fn receiver_preflight(
+    loaded: &Loaded,
+    id: &str,
+    rows: &[Receiver],
+) -> Result<super::super::Selection> {
+    complete(loaded)?;
+    let auth = loaded
+        .config
+        .playback
+        .authentication
+        .context("Run piair setup to configure authentication")?;
+    let method = match auth {
+        Authentication::StoredHap => Method::StoredHap,
+        Authentication::OwnToneTransient => Method::Transient,
+    };
+    let mut selected = super::super::validate_receiver_observation(loaded, id, method, rows)
+        .context("Receiver is not compatible. Run piair setup; no fallback attempted.")?;
+    super::super::wav_authentication(
+        &Store::new(&loaded.path)?,
+        &selected,
+        auth == Authentication::OwnToneTransient,
+    )
+    .context(
+        "No validated authentication for this receiver. Run piair setup; no fallback attempted.",
+    )?;
+    let required = (1u64 << 9) | (1u64 << 19) | (1u64 << 41);
+    ensure!(
+        selected.capabilities.features & required == required,
+        "receiver cannot provide the required audio playback; no fallback attempted"
+    );
+    if auth == Authentication::StoredHap {
+        selected.method = Method::SetupCode;
+    }
+    Ok(selected)
 }
 fn choose_daily_receiver<R: FnMut() -> Result<String>, W: Write>(
     loaded: &Loaded,
@@ -157,78 +287,75 @@ fn receiver<R: FnMut() -> Result<String>, W: Write>(
             allowlist::snapshot(&loaded.path)? == reviewed,
             "configuration changed during receiver review; retry"
         );
-        let Some(was_running) = stop_for_action(loaded, ui)? else {
-            return Ok(());
-        };
-        let instance = runtime::InstanceLock::acquire()?;
-        complete(loaded)?;
-        ensure!(
-            allowlist::snapshot(&loaded.path)? == reviewed,
-            "configuration changed while stopping; retry"
-        );
-        let mut journal = Vec::new();
-        approve(loaded, &id, ui, &mut journal)?;
-        for entry in journal {
-            ui.say(format!(
-                "{entry}. This approval remains saved if later steps are cancelled."
-            ))?;
-        }
-        let baseline = allowlist::snapshot(&loaded.path)?;
-        // Preserve explicit authentication intent. Never infer or fall back.
-        let auth = loaded
-            .config
-            .playback
-            .authentication
-            .context("Run piair setup to configure authentication")?;
-        let method = match auth {
-            Authentication::StoredHap => Method::StoredHap,
-            Authentication::OwnToneTransient => Method::Transient,
-        };
-        let mut selected = super::super::validate_selection(loaded, &id, method, &rows)
-            .context("Receiver authentication is not configured or compatible. Run piair setup; no fallback attempted.")?;
-        if auth == Authentication::StoredHap {
-            super::super::hap_credential(&store, &selected).context(
-                "No validated saved credentials. Run piair setup to configure authentication.",
-            )?;
-            selected.method = Method::SetupCode;
-        } else {
+        receiver_preflight(loaded, &id, &rows)?;
+        if loaded.config.playback.authentication == Some(Authentication::OwnToneTransient) {
             ensure!(ui.confirm("Use the configured transient authentication for this receiver?\nThis does not establish persistent verified identity.")?, Cancelled);
         }
-        ensure!(!cancel.load(Ordering::Relaxed), Cancelled);
-        store.change_with_playback(&selected, &previous, || {
-            config::save_playback_for_selection(
-                loaded,
-                id.clone(),
-                playback_args(&loaded.config.playback),
-                &baseline,
-            )
-        })?;
-        ui.say(format!(
-            "Receiver changed to {}.",
-            clean(
-                &rows
-                    .iter()
-                    .find(|r| r.id == id)
-                    .expect("chosen receiver")
-                    .name
-            )
-        ))?;
-        drop(instance);
-        *loaded = config::load(Some(loaded.path.clone()))?;
-        if was_running {
-            restart_offer(loaded, ui)?;
-        }
-        return Ok(());
+        return stopped_action(loaded, ui, cancel, |loaded, ui| {
+            let _instance = runtime::InstanceLock::acquire()?;
+            complete(loaded)?;
+            ensure!(
+                allowlist::snapshot(&loaded.path)? == reviewed,
+                "configuration changed while stopping; retry"
+            );
+            let mut journal = Vec::new();
+            approve(loaded, &id, ui, &mut journal)?;
+            for entry in journal {
+                ui.say(format!(
+                    "{entry}. This approval remains saved if later steps are cancelled."
+                ))?;
+            }
+            let baseline = allowlist::snapshot(&loaded.path)?;
+            // Recheck credentials and endpoint authorization after stopping and
+            // any explicit approval; preflight never grants authorization.
+            let selected = receiver_preflight(loaded, &id, &rows)?;
+            super::super::validate_selection(loaded, &id, selected.method, &rows)?;
+            ensure!(!cancel.load(Ordering::Relaxed), Cancelled);
+            store.change_with_playback(&selected, &previous, || {
+                config::save_playback_for_selection(
+                    loaded,
+                    id.clone(),
+                    playback_args(&loaded.config.playback),
+                    &baseline,
+                )
+            })?;
+            ui.say(format!(
+                "Receiver changed to {}.",
+                clean(
+                    &rows
+                        .iter()
+                        .find(|r| r.id == id)
+                        .expect("chosen receiver")
+                        .name
+                )
+            ))?;
+            Ok(())
+        });
     }
 }
-fn setup_child(loaded: &Loaded) -> Result<()> {
+fn setup_child(loaded: &Loaded, cancel: &AtomicBool) -> Result<()> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
     // An absent default config is valid for setup; making it explicit would
     // turn it into a missing-file error before the wizard could create it.
     if loaded.source == "file" || loaded.path.exists() {
         command.arg("--config").arg(&loaded.path);
     }
-    let status = command.arg("setup").status()?;
+    let mut child = command.arg("setup").spawn()?;
+    let mut interrupted = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if cancel.load(Ordering::Relaxed) && !interrupted {
+            // Signal only the wizard child we spawned, never a manual runtime.
+            rustix::process::kill_process(
+                rustix::process::Pid::from_child(&child),
+                rustix::process::Signal::INT,
+            )?;
+            interrupted = true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     ensure!(
         status.success(),
         "Setup failed; inspect saved settings before starting PiAir"
@@ -272,9 +399,9 @@ pub(crate) fn daily(mut loaded: Loaded) -> Result<()> {
             if incomplete {
                 match choice {
                     1 => {
-                        if stop_for_action(&loaded, &mut ui)?.is_some() {
-                            setup_child(&loaded)?;
-                        }
+                        stopped_action(&mut loaded, &mut ui, &cancel, |loaded, _| {
+                            setup_child(loaded, &cancel)
+                        })?;
                     }
                     2 => daily_status(&loaded)?,
                     _ => service::logs(&loaded, false, false, &cancel)?,
@@ -287,34 +414,25 @@ pub(crate) fn daily(mut loaded: Loaded) -> Result<()> {
                 3 => receiver(&mut loaded, &mut ui, &cancel)?,
                 4 => {
                     complete(&loaded)?;
-                    if let Some(was_running) = stop_for_action(&loaded, &mut ui)? {
-                        let instance = runtime::InstanceLock::acquire()?;
-                        let result =
-                            test_audio(&loaded, &loaded.config.playback, &mut ui, cancel.clone());
-                        drop(instance);
-                        // q backs out of the test, but a service we stopped still
-                        // deserves a restart offer. Ctrl+C exits without prompts.
-                        if was_running
-                            && !cancel.load(Ordering::Relaxed)
-                            && (result.is_ok()
-                                || result.as_ref().is_err_and(|e| e.is::<Cancelled>()))
-                        {
-                            restart_offer(&loaded, &mut ui)?;
-                        }
-                        result?;
+                    if !test_audio_requested(&mut ui)? {
+                        return Ok(());
                     }
+                    let path = resources::locate().context("Test recording or LICENSE.md is missing. Install both in /usr/local/share/piair/audio or set PIAIR_AUDIO_DATA_DIR. PiAir was not stopped.")?;
+                    // Parse before stopping too: a missing, unreadable or invalid
+                    // WAV must not interrupt working playback.
+                    super::super::wav::Playback::open(&path, 49)?;
+                    stopped_action(&mut loaded, &mut ui, &cancel, |loaded, ui| {
+                        let _instance = runtime::InstanceLock::acquire()?;
+                        play_test_audio(loaded, &loaded.config.playback, ui, cancel.clone())
+                    })?;
                 }
                 5 => {
                     ui.say("1. Run setup\n2. View saved playback settings\nQ. Back")?;
                     match ui.choice("Choose:", 2, None)? {
                         1 => {
-                            if let Some(was_running) = stop_for_action(&loaded, &mut ui)? {
-                                setup_child(&loaded)?;
-                                let refreshed = config::load(Some(loaded.path.clone()))?;
-                                if was_running {
-                                    restart_offer(&refreshed, &mut ui)?;
-                                }
-                            }
+                            stopped_action(&mut loaded, &mut ui, &cancel, |loaded, _| {
+                                setup_child(loaded, &cancel)
+                            })?;
                         }
                         _ => ui.say(toml::to_string_pretty(&loaded.config.playback)?)?,
                     }
@@ -438,5 +556,320 @@ mod tests {
             .is_none());
         assert!(choose_daily_receiver(&loaded, &rows, &mut scripted("q\n")).is_err());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+    static RECOVERY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn working_settings() -> (tempfile::TempDir, Loaded) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "receiver_allowlist=['device:aabbccddeeff']\n[playback]\nreceiver_id='device:aabbccddeeff'\ncapture_device='synthetic-only'\nauthentication='own-tone-transient'\n").unwrap();
+        let loaded = config::load(Some(path)).unwrap();
+        let selected: super::super::super::Selection = toml::from_str("id='device:aabbccddeeff'\nmethod='transient'\naddresses=['127.0.0.1']\nport=9\n[capabilities]\nfeatures='0001420000080200'\nflags=0\n").unwrap();
+        Store::new(&loaded.path).unwrap().select(&selected).unwrap();
+        complete(&loaded).unwrap();
+        (dir, loaded)
+    }
+    #[test]
+    fn cancelled_receiver_authentication_wav_and_setup_failures_offer_confirmed_recovery() {
+        let _guard = RECOVERY_LOCK.lock().unwrap();
+        for failure in [
+            "cancelled receiver change",
+            "receiver authentication failed",
+            "WAV test failed",
+            "setup failed",
+        ] {
+            for answer in ["1\n", "2\n", "q\n", ""] {
+                let (_dir, loaded) = working_settings();
+                let before = std::fs::read(&loaded.path).unwrap();
+                let selection = Store::new(&loaded.path).unwrap().selection().unwrap();
+                let mut running = true;
+                let mut actions = Vec::new();
+                let was_running = confirm_stop(&mut scripted("1\n"), running, || {
+                    actions.push("stop");
+                    running = false;
+                    Ok(())
+                })
+                .unwrap()
+                .unwrap();
+                assert!(!running);
+                let outcome = if failure == "cancelled receiver change" {
+                    Err(Cancelled.into())
+                } else {
+                    Err(anyhow::anyhow!(failure))
+                };
+                let mut ui = scripted(answer);
+                finish_action(
+                    &mut ui,
+                    was_running,
+                    &AtomicBool::new(false),
+                    outcome,
+                    || safe_saved_settings(&loaded.path),
+                    |saved| {
+                        assert_eq!(
+                            saved.config.playback.receiver_id,
+                            loaded.config.playback.receiver_id
+                        );
+                        actions.push("start");
+                        running = true;
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(running, answer == "1\n", "{failure}: {answer:?}");
+                assert_eq!(
+                    actions,
+                    if running {
+                        vec!["stop", "start"]
+                    } else {
+                        vec!["stop"]
+                    }
+                );
+                assert_eq!(std::fs::read(&loaded.path).unwrap(), before);
+                assert!(Store::new(&loaded.path).unwrap().selection().unwrap() == selection);
+                let text = String::from_utf8(ui.out).unwrap();
+                assert!(text.contains("Start PiAir again?"));
+                if !running {
+                    assert!(text.contains("PiAir remains stopped"));
+                    assert!(text.contains("piair start"));
+                }
+            }
+        }
+    }
+    #[test]
+    fn changed_selection_blocks_recovery_without_rollback() {
+        let _guard = RECOVERY_LOCK.lock().unwrap();
+        let (_dir, loaded) = working_settings();
+        let store = Store::new(&loaded.path).unwrap();
+        let mut changed = store.selection().unwrap().unwrap();
+        changed.id = "device:112233445566".into();
+        store.select(&changed).unwrap();
+        let mut ui = scripted("1\n");
+        finish_action(
+            &mut ui,
+            true,
+            &AtomicBool::new(false),
+            Err(anyhow::anyhow!("partial save")),
+            || safe_saved_settings(&loaded.path),
+            |_| panic!("inconsistent settings must not start"),
+        )
+        .unwrap();
+        let text = String::from_utf8(ui.out).unwrap();
+        assert!(text.contains("Cannot safely start"));
+        assert!(text.contains("piair setup"));
+        assert!(!text.contains("Start PiAir again?"));
+        assert!(store.selection().unwrap().as_ref() == Some(&changed));
+    }
+    #[test]
+    fn ctrl_c_before_during_validation_or_confirmation_never_starts() {
+        for phase in ["before", "validation", "confirmation"] {
+            let cancel = AtomicBool::new(phase == "before");
+            let mut ui = Ui {
+                read: || {
+                    assert_eq!(phase, "confirmation");
+                    cancel.store(true, Ordering::Relaxed);
+                    Ok("1\n".into())
+                },
+                out: Vec::new(),
+            };
+            finish_action(
+                &mut ui,
+                true,
+                &cancel,
+                Err(Cancelled.into()),
+                || {
+                    assert_ne!(phase, "before");
+                    if phase == "validation" {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                    Ok(())
+                },
+                |_| panic!("Ctrl+C must not start"),
+            )
+            .unwrap();
+            assert!(String::from_utf8(ui.out)
+                .unwrap()
+                .contains("PiAir remains stopped"));
+        }
+    }
+    #[test]
+    fn previously_stopped_service_and_uncertain_cleanup_never_offer_start() {
+        let mut ui = scripted("1\n");
+        assert!(finish_action(
+            &mut ui,
+            false,
+            &AtomicBool::new(false),
+            Err(anyhow::anyhow!("setup failed")),
+            || -> Result<()> { panic!("previously stopped") },
+            |_| panic!("must not start")
+        )
+        .is_err());
+        assert!(ui.out.is_empty());
+        finish_action(
+            &mut ui,
+            true,
+            &AtomicBool::new(false),
+            Err(
+                super::super::super::lifecycle::CleanupFailure(anyhow::anyhow!(
+                    "uncertain teardown"
+                ))
+                .into(),
+            ),
+            || -> Result<()> { panic!("cleanup must be resolved first") },
+            |_| panic!("must not start"),
+        )
+        .unwrap();
+        assert!(String::from_utf8(ui.out)
+            .unwrap()
+            .contains("Cleanup could not be verified"));
+    }
+    #[test]
+    fn manual_runtime_lock_blocks_recovery_without_killing_or_bypassing_it() {
+        let _guard = RECOVERY_LOCK.lock().unwrap();
+        let (_dir, loaded) = working_settings();
+        let _instance = runtime::InstanceLock::acquire().unwrap();
+        let mut ui = scripted("1\n");
+        finish_action(
+            &mut ui,
+            true,
+            &AtomicBool::new(false),
+            Err(Cancelled.into()),
+            || safe_saved_settings(&loaded.path),
+            |_| panic!("manual runtime owns lock"),
+        )
+        .unwrap();
+        assert!(runtime::InstanceLock::acquire().is_err());
+        assert!(!String::from_utf8(ui.out)
+            .unwrap()
+            .contains("Start PiAir again?"));
+    }
+    #[test]
+    fn unsupported_receiver_and_missing_authentication_fail_in_read_only_preflight() {
+        let (_dir, loaded) = working_settings();
+        let before = std::fs::read(&loaded.path).unwrap();
+        let info = mdns_sd::ServiceInfo::new(
+            "_airplay._tcp.local.",
+            "New room",
+            "room.local.",
+            "127.0.0.2",
+            7000,
+            [
+                ("deviceid", "11:22:33:44:55:66"),
+                ("features", "0x80200,0x14200"),
+                ("sf", "0x0"),
+            ]
+            .as_slice(),
+        )
+        .unwrap();
+        let mut rows = vec![Receiver {
+            id: "device:112233445566".into(),
+            name: "New room".into(),
+            services: vec![discovery::Advertisement::test_from_info(&info)],
+        }];
+        let id = rows[0].id.clone();
+        // Even a compatible unapproved candidate gets no automatic approval.
+        assert!(receiver_preflight(&loaded, &id, &rows).is_ok());
+        assert!(!loaded.config.allows(&id));
+        rows[0].services[0]
+            .capabilities
+            .insert("features".into(), "0x80200,0x200".into());
+        assert!(receiver_preflight(&loaded, &id, &rows).is_err());
+        assert_eq!(std::fs::read(&loaded.path).unwrap(), before);
+        assert!(super::super::super::wav_authentication(
+            &Store::new(&loaded.path).unwrap(),
+            &Store::new(&loaded.path)
+                .unwrap()
+                .selection()
+                .unwrap()
+                .unwrap(),
+            false
+        )
+        .is_err());
+    }
+    fn stored_working_settings() -> (tempfile::TempDir, Loaded) {
+        let (dir, mut loaded) = working_settings();
+        let store = Store::new(&loaded.path).unwrap();
+        let mut selected = store.selection().unwrap().unwrap();
+        selected.method = Method::SetupCode;
+        store.select(&selected).unwrap();
+        store
+            .save(&super::super::super::store::Credential {
+                version: 2,
+                receiver_id: selected.id.clone(),
+                advertised_pi: None,
+                pairing_id: "fixture-receiver".into(),
+                controller_id: "00000000-0000-4000-8000-000000000001".into(),
+                seed: [11; 32],
+                receiver_key: ed25519_dalek::SigningKey::from_bytes(&[22; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            })
+            .unwrap();
+        loaded.config.playback.authentication = Some(Authentication::StoredHap);
+        std::fs::write(&loaded.path, toml::to_string(&loaded.config).unwrap()).unwrap();
+        let saved = config::load(Some(loaded.path)).unwrap();
+        complete(&saved).unwrap();
+        (dir, saved)
+    }
+    #[test]
+    fn missing_candidate_credentials_are_preflight_errors_and_revoked_saved_credentials_block_recovery(
+    ) {
+        let _guard = RECOVERY_LOCK.lock().unwrap();
+        let (_dir, loaded) = stored_working_settings();
+        let info = mdns_sd::ServiceInfo::new(
+            "_airplay._tcp.local.",
+            "New room",
+            "room.local.",
+            "127.0.0.2",
+            7000,
+            [
+                ("deviceid", "11:22:33:44:55:66"),
+                ("features", "0x80200,0x14200"),
+                ("sf", "0x0"),
+            ]
+            .as_slice(),
+        )
+        .unwrap();
+        let rows = vec![Receiver {
+            id: "device:112233445566".into(),
+            name: "New room".into(),
+            services: vec![discovery::Advertisement::test_from_info(&info)],
+        }];
+        let failure = receiver_preflight(&loaded, &rows[0].id, &rows)
+            .err()
+            .expect("missing credentials");
+        assert!(format!("{failure:#}").contains("no automatic pairing"));
+        let mut ui = scripted("1\n");
+        // The same validation can fail after stop if credentials were revoked
+        // during the stop operation. The previous receiver remains usable.
+        let mut started = false;
+        finish_action(
+            &mut ui,
+            true,
+            &AtomicBool::new(false),
+            Err(failure),
+            || safe_saved_settings(&loaded.path),
+            |_| {
+                started = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(started);
+        Store::new(&loaded.path)
+            .unwrap()
+            .remove("device:aabbccddeeff")
+            .unwrap();
+        let mut ui = scripted("1\n");
+        finish_action(
+            &mut ui,
+            true,
+            &AtomicBool::new(false),
+            Err(Cancelled.into()),
+            || safe_saved_settings(&loaded.path),
+            |_| panic!("saved credentials were revoked"),
+        )
+        .unwrap();
+        assert!(!String::from_utf8(ui.out)
+            .unwrap()
+            .contains("Start PiAir again?"));
     }
 }

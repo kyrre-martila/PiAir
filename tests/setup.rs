@@ -224,3 +224,34 @@ fn absent_default_configuration_can_launch_existing_setup_and_return() {
     terminal.finish(true);
     assert!(!dir.path().join(".config/piair/config.toml").exists());
 }
+
+#[test]
+fn interrupting_menu_forwards_cancellation_to_setup_child_and_releases_lock() {
+    let _setup = SETUP_PROCESS.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_piair"));
+    command
+        .env_remove("PIAIR_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
+        .env("HOME", dir.path());
+    let mut terminal = Terminal::start(command);
+    terminal.until("1. Run piair setup");
+    terminal.answer("1\n");
+    terminal.until("Choose input");
+    // Signal the menu only: it must interrupt/reap its child rather than wait
+    // indefinitely for the child's next prompt, or start any service.
+    assert!(Command::new("kill")
+        .args(["-INT", &terminal.child.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    terminal.finish(true);
+    let path = dir.path().join("check.toml");
+    fs::write(&path, "").unwrap();
+    let mut next_command = Command::new(env!("CARGO_BIN_EXE_piair"));
+    next_command.arg("--config").arg(&path).arg("setup");
+    let mut next = Terminal::start(next_command);
+    next.until("Choose input");
+    next.answer("q\n");
+    next.finish(true);
+}

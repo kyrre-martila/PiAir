@@ -51,3 +51,21 @@ Starting or stopping does not enable or disable boot startup. A stopped service
 is not automatically started after changing receivers or settings. If the menu
 stopped a running service, it offers a separate confirmed start afterward.
 No automatic fallback, multiple outputs or receiver occupancy checks are used.
+
+## Cancelled or failed menu actions
+
+Receiver compatibility, existing credentials and saved settings are checked before
+stopping playback. The audio test's play/skip choice and recording validation also
+happen first. If a receiver change, test or setup fails after a confirmed stop,
+the menu reloads the saved settings and checks selection, approval, authentication
+and the runtime lock before offering to start PiAir again. It never starts without
+your confirmation, changes boot startup, or rolls back an approved receiver as
+part of recovery. A service that was already stopped stays stopped.
+
+If settings are inconsistent, credentials are missing, cleanup is uncertain or a
+manual runtime owns the lock, recovery explains the problem and leaves playback
+stopped. Use `piair status` and `piair setup` to review/fix settings; stop manual
+runtimes yourself. Ctrl+C cancels safely without another confirmation. EOF or
+cancelling the restart offer also leaves the service stopped with guidance to run
+`piair start` later. Logs use readable local timestamps, including the timezone,
+when an application timestamp is absent.
