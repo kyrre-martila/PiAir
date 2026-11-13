@@ -747,6 +747,7 @@ fn strict_response_parser_and_handshake_deadline() {
 }
 fn selection(port: u16) -> Selection {
     Selection {
+        display_name: None,
         id: ID.into(),
         advertised_pi: Some(PI.into()),
         method: Method::PinDisplay,

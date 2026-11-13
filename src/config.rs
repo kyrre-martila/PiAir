@@ -364,6 +364,26 @@ pub(crate) fn save_playback_checked(
     args: crate::cli::PlaybackArgs,
     expected: Option<&Option<crate::allowlist::Snapshot>>,
 ) -> Result<()> {
+    save_playback_impl(loaded, id, args, expected, false)
+}
+
+/// Selection changes span two files. On an uncertain config publication, restore
+/// the reviewed previous config only if its bytes still equal our attempted write.
+pub(crate) fn save_playback_for_selection(
+    loaded: &Loaded,
+    id: String,
+    args: crate::cli::PlaybackArgs,
+    expected: &Option<crate::allowlist::Snapshot>,
+) -> Result<()> {
+    save_playback_impl(loaded, Some(id), args, Some(expected), true)
+}
+fn save_playback_impl(
+    loaded: &Loaded,
+    id: Option<String>,
+    args: crate::cli::PlaybackArgs,
+    expected: Option<&Option<crate::allowlist::Snapshot>>,
+    recover: bool,
+) -> Result<()> {
     let original = crate::allowlist::snapshot(&loaded.path)?;
     if let Some(expected) = expected {
         anyhow::ensure!(
@@ -418,12 +438,42 @@ pub(crate) fn save_playback_checked(
             }
         }
     }
-    crate::allowlist::save(&loaded.path, original.as_ref(), &doc.to_string())?;
+    let text = doc.to_string();
+    if let Err(error) = crate::allowlist::save(&loaded.path, original.as_ref(), &text) {
+        if recover {
+            if let Err(rollback) =
+                restore_failed_playback_save(&loaded.path, original.as_ref(), &text)
+            {
+                return Err(error.context(format!("{rollback:#}")));
+            }
+        }
+        return Err(error);
+    }
     println!(
         "Saved playback settings to {}; restart PiAir to apply.",
         loaded.path.display()
     );
     Ok(())
+}
+
+fn restore_failed_playback_save(
+    path: &std::path::Path,
+    previous: Option<&crate::allowlist::Snapshot>,
+    attempted: &str,
+) -> Result<()> {
+    let current = crate::allowlist::snapshot(path)
+        .context("playback save uncertain; cannot inspect current config; run piair setup")?;
+    if current.as_ref().map(|s| s.text.as_str()) == previous.map(|s| s.text.as_str()) {
+        return Ok(());
+    }
+    let previous = previous.context(
+        "playback config partially saved; no previous config to restore; run piair setup",
+    )?;
+    anyhow::ensure!(current.as_ref().is_some_and(|s| s.text == attempted),
+        "playback config changed concurrently after uncertain save; not overwritten; run piair setup");
+    crate::allowlist::save(path, current.as_ref(), &previous.text).context(
+        "playback config rollback failed; settings may be partially saved; run piair setup",
+    )
 }
 
 pub(crate) fn validate_capture_device(device: &str) -> Result<()> {
@@ -472,7 +522,9 @@ mod playback_tests {
             receiver_id,
             playback,
             ..
-        } = Cli::parse_from(["piair", "run", "--allow-unattended"]).command
+        } = Cli::parse_from(["piair", "run", "--allow-unattended"])
+            .command
+            .unwrap()
         else {
             panic!()
         };
@@ -508,6 +560,7 @@ mod playback_tests {
             "--preserve-volume",
         ])
         .command
+        .unwrap()
         else {
             panic!()
         };
@@ -581,5 +634,28 @@ mod playback_tests {
         }
         assert!(validate_capture_device(&"a".repeat(257)).is_err());
         assert!(validate_capture_device("bad\ndevice").is_err());
+    }
+}
+
+#[cfg(test)]
+mod daily_persistence_tests {
+    use super::*;
+    #[test]
+    fn uncertain_publication_restores_reviewed_config_but_preserves_concurrent_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let old = "# previous usable config\n";
+        let attempted = "# attempted new config\n";
+        fs::write(&path, old).unwrap();
+        let previous = crate::allowlist::snapshot(&path).unwrap();
+        // Model a directory-sync error after the atomic config rename.
+        crate::allowlist::save(&path, previous.as_ref(), attempted).unwrap();
+        restore_failed_playback_save(&path, previous.as_ref(), attempted).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), old);
+        restore_failed_playback_save(&path, previous.as_ref(), attempted).unwrap();
+        fs::write(&path, "# concurrent edit\n").unwrap();
+        let error = restore_failed_playback_save(&path, previous.as_ref(), attempted).unwrap_err();
+        assert!(error.to_string().contains("not overwritten"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# concurrent edit\n");
     }
 }

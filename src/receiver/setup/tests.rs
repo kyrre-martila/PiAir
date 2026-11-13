@@ -205,7 +205,7 @@ fn failed_playback_reports_guidance_without_reading_success_confirmation() {
     let text = String::from_utf8(ui.out).unwrap();
     assert!(text.contains("Playback test failed: mock authentication or transmission failure"));
     assert!(text.contains("Check receiver volume/mute"));
-    assert!(text.contains("Continuing setup"));
+    assert!(text.contains("No successful playback test recorded"));
     assert!(!text.contains("Did you hear the audio?"));
     assert!(!text.contains("Yes, audio works"));
 }
@@ -487,6 +487,10 @@ fn service_activation_needs_installed_unit_and_both_affirmative_choices() {
                     status: "inactive, disabled".into(),
                     home: "/home/pi".into(),
                     user: "pi".into(),
+                    active: "inactive".into(),
+                    boot: "disabled".into(),
+                    pid: 0,
+                    result: "success".into(),
                 })
             },
             |_, _| {
@@ -508,6 +512,10 @@ fn service_activation_needs_installed_unit_and_both_affirmative_choices() {
                 status: "inactive, disabled".into(),
                 home: "/home/pi".into(),
                 user: "pi".into(),
+                active: "inactive".into(),
+                boot: "disabled".into(),
+                pid: 0,
+                result: "success".into(),
             })
         },
         |_, s| {

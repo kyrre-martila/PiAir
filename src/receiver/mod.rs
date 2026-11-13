@@ -66,6 +66,8 @@ fn valid_pairing_id(id: &str) -> bool {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
     id: String,
     advertised_pi: Option<String>,
     method: Method,
@@ -111,6 +113,7 @@ impl Selection {
             "invalid receiver endpoint"
         );
         Ok(Self {
+            display_name: Some(r.name.clone()),
             id: r.id.clone(),
             advertised_pi,
             method,
@@ -164,6 +167,17 @@ fn validate_selection(
 ) -> Result<Selection> {
     exact_id(id)?;
     ensure!(loaded.config.allows(id), "receiver is not approved");
+    validate_receiver_observation(loaded, id, method, snapshot)
+}
+// Read-only prerequisites, including for an unapproved candidate. This grants
+// no authorization; persistence and connection still require validate_selection.
+fn validate_receiver_observation(
+    loaded: &Loaded,
+    id: &str,
+    method: Method,
+    snapshot: &[Receiver],
+) -> Result<Selection> {
+    exact_id(id)?;
     let receiver = snapshot
         .iter()
         .find(|r| r.id == id)

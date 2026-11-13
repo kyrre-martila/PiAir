@@ -25,7 +25,7 @@ fn local_commands_use_defaults_without_writing() {
     assert!(output.status.success());
     let status = String::from_utf8(output.stdout).unwrap();
     assert!(status.contains("built-in defaults; file absent"));
-    assert!(status.contains("AirPlay playback: explicit stream-test available"));
+    assert!(status.contains("activity unknown"));
     assert!(run(&["config", "check"]).status.success());
     let output = run(&["config", "show"]);
     assert!(output.status.success());
@@ -777,4 +777,26 @@ fn run_without_approval_fails_without_tty_prompt_or_device_access() {
     assert!(error.contains("receiver is not approved"));
     assert!(!error.contains("ALSA"));
     assert!(!config.parent().unwrap().join("receiver-state").exists());
+}
+
+#[test]
+fn no_arguments_rejects_noninteractive_input() {
+    let output = run(&[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires an interactive terminal"));
+}
+#[test]
+fn daily_commands_help_and_missing_service_are_actionable() {
+    for command in ["start", "stop", "restart", "logs"] {
+        assert!(run(&[command, "--help"]).status.success());
+        let output = run(&[command]);
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("systemd")
+                || error.contains("non-root")
+                || error.contains("not installed")
+        );
+    }
+    assert!(run(&["logs", "--follow", "--help"]).status.success());
 }

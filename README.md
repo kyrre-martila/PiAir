@@ -662,3 +662,54 @@ bounded and cannot guarantee preserved openings after slow setup or overflow.
 See [automatic mode tuning, buffering and hardware validation](docs/LIVE_CAPTURE.md#automatic-turntable-mode).
 
 For foreground automatic playback without prompts, see [runtime and unattended operation](docs/RUNTIME.md), including explicit opt-in, authorization, shutdown and exit codes. An optional [systemd service template](docs/SYSTEMD.md) supervises this same runtime using saved configuration, non-root execution and systemd-managed PTP capabilities. Installation and boot enablement remain explicit; no installer is provided.
+
+## Everyday use
+
+After `piair setup`, type `piair` in a terminal or SSH session with a TTY.
+The numbered menu shows the saved input and single receiver, service and boot
+state, and offers Status, one Start/Stop choice, Select AirPlay receiver,
+Test audio (49 seconds), Settings and Logs. Enter `q` to go back or exit;
+EOF and Ctrl+C cancel. Without a usable playback configuration, the menu
+prominently offers setup. No network scan or receiver connection happens just
+because the menu opens. Without a terminal, supply a command:
+
+```sh
+piair status
+piair start
+piair stop
+piair restart
+piair logs
+piair logs --follow
+piair setup
+```
+
+Start, stop and restart use the installed `piair@USERNAME.service` for the
+current non-root account, with normal system authorization. Start/stop never
+change boot enablement. Installation is separate (PR #74); if the service is
+missing, follow [manual systemd setup](docs/SYSTEMD.md). Custom service overrides
+or another configuration path require manual review and are refused by daily
+controls. `piair run --allow-unattended`, `piair devices`, `piair audio devices`
+and the advanced commands remain available.
+
+Select AirPlay receiver discovers friendly names and marks the current selection.
+There is one saved receiver, used after subsequent starts. Confirm any change.
+A newly discovered receiver still requires independently verified canonical
+identity and explicit approval. Existing validated credentials are reused;
+missing or incompatible authentication directs you through setup without trying
+another method. The daily picker preserves the configured authentication method.
+
+A running service must stop before a receiver change, setup or standalone audio
+test. The menu asks first. Declining leaves settings unchanged. A manual runtime
+must be stopped manually. After a receiver change or test that stopped the service,
+the menu asks whether to start again; a previously stopped service stays stopped.
+The optional Pachelbel test preserves receiver volume, ends after at most 49
+seconds or earlier EOF, and asks whether you heard it only after successful
+completion. Missing test assets show installation guidance.
+
+Settings offers saved playback settings and the existing setup wizard. Changes
+apply on the next start; restart only when you choose to. Service running status
+is not proof of playback or audible audio: `Running - activity unknown` is an
+honest activity report. Logs show recent history for this account's unit and
+`--follow` continues until Ctrl+C. History is never treated as current activity.
+See [daily troubleshooting](docs/DAILY_USE.md),
+[setup](docs/SETUP.md) and [advanced diagnostics](docs/WAV_PLAYBACK_DIAGNOSTIC.md).

@@ -543,6 +543,7 @@ mod persistence_tests {
             let store = Store::new(&loaded.path).unwrap();
             store
                 .select(&Selection {
+                    display_name: None,
                     id: OLD.into(),
                     advertised_pi: Some(PI.into()),
                     method: Method::SetupCode,

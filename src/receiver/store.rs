@@ -236,6 +236,35 @@ impl Store {
         }
         Ok(())
     }
+    /// Hold the selection writer lock across publication and the checked playback save.
+    /// A crash between files leaves a mismatch, which Runtime::prepare rejects.
+    pub(super) fn change_with_playback(
+        &self,
+        selected: &Selection,
+        expected: &Selection,
+        save: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let _lock = self.selection_lock()?;
+        ensure!(
+            self.selection()?.as_ref() == Some(expected),
+            "selection changed; retry"
+        );
+        let path = self.root.join("selected.toml");
+        let publish = self.write(&path, &toml::to_string(selected)?, true);
+        let result = publish.and_then(|()| save());
+        if let Err(error) = result {
+            if self.selection().is_ok_and(|s| s.as_ref() == Some(expected)) {
+                return Err(error.context(
+                    "receiver update failed before selection changed; previous selection preserved",
+                ));
+            }
+            if let Err(rollback) = self.write(&path, &toml::to_string(expected)?, true) {
+                anyhow::bail!("{error:#}; selection rollback failed: {rollback:#}; partially saved selection; playback remains blocked until setup repairs the mismatch");
+            }
+            return Err(error.context("receiver update failed; previous selection restored; playback settings may be partially persisted; run piair setup to review consistency before starting"));
+        }
+        Ok(())
+    }
     pub fn remove(&self, id: &str) -> Result<()> {
         let path = self.path(id)?;
         if self.directory(false)? {

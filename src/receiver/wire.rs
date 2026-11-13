@@ -952,6 +952,7 @@ impl Wire {
             format!("receiver_allowlist=['{}']", self.receiver_id),
         )?;
         let selected = Selection {
+            display_name: None,
             id: self.receiver_id.clone(),
             advertised_pi: None,
             // StoredHap is operation-local and deliberately not serializable.
@@ -2499,6 +2500,7 @@ mod ptp_lease_offline_tests {
         )
         .unwrap();
         let selected = Selection {
+            display_name: None,
             id: id.into(),
             advertised_pi: None,
             method: Method::Transient,
