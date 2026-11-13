@@ -355,7 +355,7 @@ SRP authentication is implemented without persistent credentials or durable
 receiver identity verification. See [transient flow, trust model and verification](TRANSIENT_AUTHENTICATION.md).
 General Apple TV/HomePod playback compatibility remains unverified; the limited
 HomePod authentication/control evidence above does not establish it. A usable
-HomePod HAP setup code is not assumed. See the [compatibility matrix and evidence ledger](PAIRING.md#compatibility-matrix).
+HomePod HAP setup code is not assumed. See the [compatibility matrix and evidence ledger](PAIRING.md#historical-baseline-compatibility-matrix-current-policy-corrections-included).
 Mock success proves the implemented protocol path, not hardware playback.
 
 Credentials live separately in `receiver-state/` next to config, with owned 0700
@@ -648,4 +648,3 @@ bounded and cannot guarantee preserved openings after slow setup or overflow.
 See [automatic mode tuning, buffering and hardware validation](LIVE_CAPTURE.md#automatic-turntable-mode).
 
 For foreground automatic playback without prompts, see [runtime and unattended operation](RUNTIME.md), including explicit opt-in, authorization, shutdown and exit codes. An optional [systemd service template](SYSTEMD.md) supervises this same runtime using saved configuration, non-root execution and systemd-managed PTP capabilities. Installation and boot enablement remain explicit; see [INSTALL.md](INSTALL.md) for the release installer.
-
