@@ -15,7 +15,16 @@ If the second bind fails, Rust drops the first socket. The existing session
 failure path attempts bounded TEARDOWN, releases event/timing resources and
 closes control; no retry or receiver fallback is added.
 
-## Explicit post-build step
+## Systemd operation
+
+The optional [system service template](SYSTEMD.md) runs as an existing non-root
+user and grants CAP_NET_BIND_SERVICE using AmbientCapabilities and
+CapabilityBoundingSet, with NoNewPrivileges enabled. Use a normal binary without
+file capabilities for that service. The grant is applied at every start and
+survives binary upgrades without setcap. Do not run the manual helper for this
+service deployment. Existing configuration and credentials stay with their owner.
+
+## Explicit post-build step for standalone CLI use
 
 On Raspberry Pi OS, install `libcap2-bin` if `setcap` or `getcap` is missing:
 
