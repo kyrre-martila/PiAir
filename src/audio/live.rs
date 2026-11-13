@@ -344,6 +344,30 @@ impl Capture {
             .automatic = Some(super::activity::Activity::new(settings.validate()?));
         Ok(())
     }
+    /// Latest completed automatic 20 ms RMS window, never manufactured silence.
+    pub(crate) fn level(&self) -> Result<f64> {
+        let b = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("capture buffer poisoned"))?;
+        b.check()?;
+        ensure!(
+            b.last_samples
+                .is_some_and(|at| at.elapsed() < Duration::from_millis(100)),
+            "capture stalled; no recent samples"
+        );
+        Ok(b.automatic
+            .as_ref()
+            .context("automatic detection absent")?
+            .level_dbfs)
+    }
+    /// Validate precisely the requested PCM using the runtime's client format.
+    /// Unlike runtime hw adaptation, setup never silently changes the identifier.
+    pub(crate) fn validate_device(device: &str) -> Result<()> {
+        crate::config::validate_capture_device(device)?;
+        drop(Alsa::open_exact(device).context("capture validation: unavailable, permission denied, busy, or unsupported 44100 Hz S16 stereo format; inspect the ALSA error below")?);
+        Ok(())
+    }
     pub fn activity(&self) -> Result<(bool, u64)> {
         let b = self
             .buffer

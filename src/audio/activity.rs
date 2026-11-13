@@ -27,6 +27,7 @@ impl Settings {
 
 pub(super) struct Activity {
     settings: Settings,
+    pub level_dbfs: f64,
     threshold_power: f64,
     sum: [f64; 2],
     count: u64,
@@ -40,6 +41,7 @@ impl Activity {
         Self {
             threshold_power: 10f64.powf(settings.threshold_dbfs / 10.0),
             settings,
+            level_dbfs: f64::NEG_INFINITY,
             sum: [0.0; 2],
             count: 0,
             loud: 0,
@@ -56,6 +58,7 @@ impl Activity {
     }
     pub fn reset(&mut self) {
         self.sum = [0.0; 2];
+        self.level_dbfs = f64::NEG_INFINITY;
         self.count = 0;
         self.loud = 0;
         self.quiet = 0;
@@ -70,7 +73,9 @@ impl Activity {
         if self.count != 882 {
             return;
         }
-        let meaningful = self.sum.into_iter().fold(0.0, f64::max) / 882.0 >= self.threshold_power;
+        let power = self.sum.into_iter().fold(0.0, f64::max) / 882.0;
+        self.level_dbfs = 10.0 * power.log10();
+        let meaningful = power >= self.threshold_power;
         self.count = 0;
         self.sum = [0.0; 2];
         if meaningful {

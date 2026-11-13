@@ -381,9 +381,9 @@ mod tests {
         assert_eq!(&third[third.len() - 8..], &2_u64.to_le_bytes());
     }
     #[test]
-    fn ten_and_thirty_second_wavs_round_trip_through_sequence_wrap() {
+    fn bounded_wavs_through_49_seconds_round_trip_through_sequence_wrap() {
         use std::collections::HashSet;
-        for (seconds, expected_packets) in [(10, 1504), (30, 4010)] {
+        for (seconds, expected_packets) in [(10, 1504), (30, 4010), (49, 6390)] {
             let wav = super::super::wav::Playback::open(
                 std::path::Path::new("tests/assets/audio/Pachelbel_Canon_audio_test.wav"),
                 seconds,
@@ -391,7 +391,7 @@ mod tests {
             .unwrap();
             assert_eq!(wav.frames.len(), seconds as usize * RATE as usize);
             let mut encoder = Encoder::from_verified_key(Zeroizing::new([42; 32])).unwrap();
-            // Force wrap inside both durations, including the old 376 packet bound.
+            // Force wrap inside all durations, including the old 376 packet bound.
             encoder.sequence = u16::MAX - 400;
             encoder.nonce = u64::from(encoder.sequence);
             let origin = encoder.timestamp;

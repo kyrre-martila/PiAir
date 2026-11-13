@@ -19,6 +19,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Interactive first-time setup or safe reconfiguration (requires a terminal).
+    Setup,
     /// Foreground automatic playback without prompts; requires existing approval and selection.
     Run {
         receiver_id: Option<String>,
@@ -81,8 +83,8 @@ pub enum Command {
         /// Receiver volume in integer dB (-60..=-10); may persist after playback.
         #[arg(long, default_value_t = -30, allow_hyphen_values = true, value_parser = clap::value_parser!(i32).range(-60..=-10))]
         volume_db: i32,
-        /// Playback duration: 1..3 seconds for tone, 1..30 for WAV (stops earlier at EOF).
-        #[arg(long, default_value_t=1, value_parser=clap::value_parser!(u32).range(1..=30))]
+        /// Playback duration: 1..3 seconds for tone, 1..49 for WAV (stops earlier at EOF).
+        #[arg(long, default_value_t=1, value_parser=clap::value_parser!(u32).range(1..=49))]
         seconds: u32,
         /// Bounded PCM WAV playback using stored HAP, or explicitly opted-in OwnTone transient.
         #[arg(long, group = "owntone_diagnostic", conflicts_with_all = ["setup_check", "record_check", "stream_setup_check", "playback_check", "setup_profile", "setup_timeout_seconds"])]
@@ -129,7 +131,7 @@ pub enum Command {
         #[arg(long)]
         audio_file: PathBuf,
         /// Maximum signal duration; stops earlier at EOF, followed by silent drain.
-        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=30))]
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=49))]
         seconds: u32,
         /// Explicit receiver volume change; omitted preserves the receiver's volume.
         #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i32).range(-60..=-10))]
@@ -621,7 +623,7 @@ impl Cli {
             if *seconds > 3 && audio_file.is_none() {
                 return Err(clap::Error::raw(
                     clap::error::ErrorKind::ArgumentConflict,
-                    "--seconds above 3 requires --audio-file (WAV maximum: 30 seconds)",
+                    "--seconds above 3 requires --audio-file (WAV maximum: 49 seconds)",
                 ));
             }
         }
@@ -645,7 +647,7 @@ mod wav_arguments {
             if transient {
                 base.push("--experimental-owntone-transient");
             }
-            for seconds in ["1", "30"] {
+            for seconds in ["1", "30", "49"] {
                 for volume in ["-60", "-20", "-10"] {
                     let c = Cli::try_parse_from(base.iter().copied().chain([
                         "--seconds",
@@ -667,7 +669,7 @@ mod wav_arguments {
             }
             for (flag, value) in [
                 ("--seconds", "0"),
-                ("--seconds", "31"),
+                ("--seconds", "50"),
                 ("--volume-db", "-61"),
                 ("--volume-db", "-9"),
                 ("--setup-profile", "a"),
@@ -745,7 +747,7 @@ mod ptp_wav_arguments {
         ));
         for extra in [
             ["--seconds", "0"],
-            ["--seconds", "31"],
+            ["--seconds", "50"],
             ["--volume-db", "-9"],
             ["--volume-db", "-61"],
         ] {

@@ -23,6 +23,7 @@ fn run_with_discovery(
 ) -> Result<()> {
     let loaded = config::load(cli.config)?;
     match cli.command {
+        Command::Setup => receiver::setup::run(loaded)?,
         Command::Run {
             receiver_id,
             allow_unattended,

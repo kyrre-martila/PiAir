@@ -374,3 +374,26 @@ fn automatic_capture_continues_during_connection_and_reader_cleanup() {
     drop(capture); // Ctrl+C outer owner joins the worker and releases the source.
     assert!(closed.load(Ordering::Acquire));
 }
+
+#[test]
+fn setup_level_uses_automatic_detector_and_releases_mock_source() {
+    let closed = Arc::new(AtomicBool::new(false));
+    let capture = mock(closed.clone(), false, None);
+    capture
+        .enable_automatic(super::super::activity::Settings {
+            threshold_dbfs: -45.0,
+            start_ms: 1000,
+            stop_ms: 30000,
+        })
+        .unwrap();
+    capture
+        .wait_ready(&AtomicBool::new(false), || Ok(()))
+        .unwrap();
+    let level = capture.level().unwrap();
+    let expected = 20.0 * (123.0f64 / 32768.0).log10();
+    assert!((level - expected).abs() < 0.001);
+    drop(capture);
+    assert!(closed.load(Ordering::Acquire));
+    assert!(Capture::validate_device("piair_missing_validation_device").is_err());
+    assert!(Capture::validate_device("").is_err());
+}

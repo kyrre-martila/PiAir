@@ -136,3 +136,7 @@ window boundaries. Calibration rejects faults rather than bridging capture epoch
 No session latency, network teardown or receiver playback tests apply until a
 session implementation exists. Hardware noise, USB recovery, shared-device access
 and quiet-music sensitivity remain target-hardware acceptance work.
+
+For automatic playback, use `piair setup` and its actual input-level measurement
+step ([SETUP.md](SETUP.md)). It uses `audio/activity.rs` and `[playback]`; the legacy
+two-threshold monitor/calibration described here does not configure automatic mode.

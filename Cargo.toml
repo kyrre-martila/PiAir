@@ -32,7 +32,7 @@ x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1", features = ["derive"] }
 rpassword = "7"
 tempfile = "3"
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["process", "event", "termios"] }
 
 [dev-dependencies]
 socket2 = "0.5" # Safe loopback socket fault injection (MIT/Apache-2.0).

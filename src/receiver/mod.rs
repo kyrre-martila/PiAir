@@ -10,6 +10,7 @@ pub(crate) mod interactive;
 pub(crate) mod lifecycle;
 pub(crate) mod planning;
 pub(crate) mod runtime;
+pub(crate) mod setup;
 // Sans-I/O components only; blocked by the documented unresolved transport profile.
 #[allow(dead_code)]
 mod media;
@@ -414,8 +415,8 @@ pub fn stream_test(
     exact_id(id)?;
     ensure!(loaded.config.allows(id), "receiver is not approved");
     ensure!(
-        (1..=if wav.is_some() { 30 } else { 3 }).contains(&seconds),
-        "test duration must be 1..3 seconds (WAV: 1..30)"
+        (1..=if wav.is_some() { 49 } else { 3 }).contains(&seconds),
+        "test duration must be 1..3 seconds (WAV: 1..49)"
     );
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
@@ -894,6 +895,19 @@ fn ptp_operation(
     playback: Option<(wav::Playback, Option<i32>)>,
     live: Option<(&str, Option<u32>, Option<i32>)>,
 ) -> Result<()> {
+    ptp_operation_cancellable(loaded, id, transient, seconds, playback, live, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ptp_operation_cancellable(
+    loaded: &Loaded,
+    id: &str,
+    transient: bool,
+    seconds: u64,
+    playback: Option<(wav::Playback, Option<i32>)>,
+    live: Option<(&str, Option<u32>, Option<i32>)>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<()> {
     exact_id(id)?;
     ensure!(
         (5..=20).contains(&seconds),
@@ -915,7 +929,13 @@ fn ptp_operation(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "PTP operation requires interactive confirmation"
     );
-    let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
+    let setup_authorized = cancel.is_some();
+    let snapshot = match &cancel {
+        Some(cancel) => {
+            discovery::discover_cancellable(loaded.config.discovery_timeout_secs, cancel)?
+        }
+        None => discovery::discover(loaded.config.discovery_timeout_secs)?,
+    };
     if transient {
         println!("Explicit OwnTone-reference transient SRP on the selected receiver: no persistent HAP credentials or verified persistent receiver identity; no credentials saved and no authentication fallback. Authenticated capabilities and PTP/type-96 negotiation must succeed before media transmission.");
     }
@@ -926,19 +946,24 @@ fn ptp_operation(
     } else {
         println!("PTP negotiation only: authenticated /info, initial SETUP, RECORD, SETPEERS, realtime type-96 UDP stream SETUP, {seconds}s bounded observation and TEARDOWN. Zero audio bytes; no volume changes. Reports operational readiness separately from unverified receiver synchronization.");
     }
-    interactive::confirm_operation(
-        loaded,
-        None,
-        &snapshot,
-        if live.is_some() {
-            "Start experimental selected receiver live PTP capture? [y/N]: "
-        } else if playback.is_some() {
-            "Start selected receiver PTP WAV playback? [y/N]: "
-        } else {
-            "Authorize selected receiver PTP negotiation only? [y/N]: "
-        },
-    )?;
-    let cancel = runtime::signal_cancellation()?;
+    if !setup_authorized {
+        interactive::confirm_operation(
+            loaded,
+            None,
+            &snapshot,
+            if live.is_some() {
+                "Start experimental selected receiver live PTP capture? [y/N]: "
+            } else if playback.is_some() {
+                "Start selected receiver PTP WAV playback? [y/N]: "
+            } else {
+                "Authorize selected receiver PTP negotiation only? [y/N]: "
+            },
+        )?;
+    }
+    let cancel = match cancel {
+        Some(cancel) => cancel,
+        None => runtime::signal_cancellation()?,
+    };
     let mut authenticated = session::Session::new();
     authenticated.cancel = cancel;
     authenticated

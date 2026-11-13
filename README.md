@@ -7,6 +7,16 @@ session diagnostics and an explicit AirPlay 2 realtime UDP/ALAC/NTP audio test.
 **Real Apple TV/HomePod playback compatibility remains unverified.** Audio tools never discover or contact receivers. Existing Autostream
 and OwnTone services are never modified.
 
+## Interactive setup
+
+Run `piair setup` in a terminal (including SSH with a TTY) for first-time setup or
+later reconfiguration. It guides explicit ALSA input, receiver approval/selection,
+authentication, automatic detection, an optional 49-second recording test, reviewed
+configuration saving and optional activation of an installed systemd service.
+Root is not required; existing settings and credentials are preserved. Enter `q`,
+EOF or Ctrl+C to cancel; separately confirmed approval/selection/enrollment remain
+saved. See the [complete setup workflow and troubleshooting](docs/SETUP.md).
+
 Buffered transient diagnostics reuse the hardware-validated OwnTone-reference RTSP
 authentication profile by default; see [evidence and remaining hardware checks](docs/BUFFERED_LIFECYCLE.md#prompt-44-transient-authentication-compatibility-2026-11-10).
 

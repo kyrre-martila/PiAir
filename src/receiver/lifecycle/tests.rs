@@ -2365,7 +2365,10 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
         ("auto-teardown-timeout", true),
         ("auto-disconnect", true),
     ] {
-        if active_signal.is_some() && !matches!(mode, "auto-cancel" | "auto-teardown-timeout") {
+        if active_signal.is_some()
+            && !(matches!(mode, "auto-cancel" | "auto-teardown-timeout")
+                || (mode == "cancel" && !live))
+        {
             continue;
         }
         let closed = Arc::new(AtomicBool::new(false));
@@ -2521,6 +2524,7 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
 
         let cancel = owner.cancel.clone();
         let (finished, playback_done) = std::sync::mpsc::channel();
+        let wav_seconds = if active_signal.is_some() { 49 } else { 4 };
         let active_signal = active_signal.clone();
         let receiver = thread::spawn(move || {
             data.set_nonblocking(false).unwrap();
@@ -2653,7 +2657,10 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
                 None,
             )
         } else {
-            owner.play_wav(&vec![[123, -456]; 4 * profile::RATE as usize], None)
+            owner.play_wav(
+                &vec![[123, -456]; wav_seconds * profile::RATE as usize],
+                None,
+            )
         };
         let _ = finished.send(());
         if matches!(mode, "teardown-timeout" | "auto-teardown-timeout") {
