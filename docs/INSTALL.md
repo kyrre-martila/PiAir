@@ -16,14 +16,16 @@ sudo apt install curl ca-certificates python3 libasound2
 ```
 
 Choose a version from [official releases](https://github.com/kyrre-martila/PiAir/releases).
-Set `version` below to that release's number (without `v`), then copy this block.
-Version 0.1.0 is an example; this PR does not publish it. If there is no release
-asset yet, wait for a versioned release from the maintainer.
+The block below selects **1.0.0** and downloads
+`piair-1.0.0-aarch64-unknown-linux-gnu.tar.gz` and `SHA256SUMS` from `v1.0.0`.
+Release preparation does not publish these assets: if they are not available yet,
+wait for the maintainer to publish v1.0.0. No existing PiAir files or configuration
+are required.
 
 ```sh
 (
   set -eu
-  version=0.1.0
+  version=1.0.0
   package="piair-${version}-aarch64-unknown-linux-gnu"
   download=$(mktemp -d /tmp/piair-install.XXXXXXXXXX)
   trap 'rm -rf -- "$download"' EXIT
@@ -74,12 +76,20 @@ Read the confirmation and enter `y` to install. Sudo asks for normal system
 installation authorization. Nothing starts or enables playback. Then run:
 
 ```sh
+piair --version   # Expected: piair 1.0.0
+piair --help
 piair setup
 piair
 ```
 
-Setup runs as your ordinary user. It guides your audio input and explicit receiver
-approval/authentication. It can offer boot startup separately. See [setup](SETUP.md)
+The executable is installed in `/usr/local/bin`, normally on the Pi user's PATH.
+Setup runs as your ordinary user using the installed executable, without source
+code or Cargo. With no existing configuration, it creates
+`~/.config/piair/config.toml` with mode 0600; receiver state and credentials use
+a private 0700 directory and 0600 files. It guides your audio input and explicit
+receiver approval/authentication, and can use the installed 49-second recording.
+The service template is installed, but playback and boot startup each require
+explicit approval in setup. See [setup](SETUP.md)
 and [daily use](DAILY_USE.md).
 
 ## Update or uninstall

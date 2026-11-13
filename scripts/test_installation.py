@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import struct
 import subprocess
@@ -58,8 +59,8 @@ class FirstInstallExtractionTests(unittest.TestCase):
     bootstrap = block.split("<<'PYTHON'\n", 1)[1].split("\nPYTHON", 1)[0]
 
     @staticmethod
-    def changed_archive(name, kind=tarfile.REGTYPE, replace=False, repeat=1):
-        original = archive(files())
+    def changed_archive(name, kind=tarfile.REGTYPE, replace=False, repeat=1, v="0.1.0"):
+        original = archive(files(v), v)
         output = io.BytesIO()
         with tarfile.open(fileobj=io.BytesIO(original), mode="r:gz") as source, \
                 tarfile.open(fileobj=output, mode="w:gz") as dest:
@@ -155,6 +156,9 @@ class FirstInstallExtractionTests(unittest.TestCase):
                 self.assertEqual({p.name for p in outside.iterdir()}, {"piair"})
 
     def test_documented_procedure_cleans_downloads_on_success_or_failure(self):
+        current = r.tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+        self.assertEqual(re.search(r"^  version=(.+)$", self.block, re.MULTILINE).group(1), current)
+        package = m.filename(current).removesuffix(".tar.gz")
         for outcome in ("success", "installer failure", "checksum mismatch", "unsafe archive", "download failure"):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
@@ -163,17 +167,17 @@ class FirstInstallExtractionTests(unittest.TestCase):
                 scratch = directory / "scratch"
                 scratch.mkdir()
                 marker = directory / "installer-started"
-                content = files()
+                content = files(current)
                 # Harmless normal-user installer stand-in; never calls sudo/systemctl.
                 content["maintain.py"] = ("import os, pathlib, sys\n"
                     "pathlib.Path(os.environ['PIAIR_TEST_STARTED']).write_text('started')\n"
                     "sys.exit(int(os.environ['PIAIR_TEST_EXIT']))\n").encode()
-                data = archive(content)
+                data = archive(content, current)
                 if outcome == "unsafe archive":
-                    data = self.changed_archive(self.package + "/../outside")
-                (directory / (self.package + ".tar.gz")).write_bytes(data)
+                    data = self.changed_archive(package + "/../outside", v=current)
+                (directory / (package + ".tar.gz")).write_bytes(data)
                 sha = "0" * 64 if outcome == "checksum mismatch" else m.digest(data)
-                (directory / "SHA256SUMS").write_text(sha + "  " + self.package + ".tar.gz\n")
+                (directory / "SHA256SUMS").write_text(sha + "  " + package + ".tar.gz\n")
                 (binaries / "mktemp").write_text("#!" + sys.executable + "\n"
                     "import os, tempfile\nprint(tempfile.mkdtemp(dir=os.environ['PIAIR_TEST_SCRATCH']))\n")
                 (binaries / "curl").write_text("#!" + sys.executable + "\n"
