@@ -232,4 +232,36 @@ fn automatic_processes_exclude_each_other_and_kernel_releases_lock_on_exit() {
             "no lock/PID artifacts"
         );
     }
+    // Execute the shipped service arguments with no TTY and a clean environment.
+    // A nonstandard home and XDG/explicit overrides must reuse the adjacent state.
+    let service = include_str!("../systemd/piair@.service");
+    let args = service
+        .lines()
+        .find_map(|line| line.strip_prefix("ExecStart=/usr/local/bin/piair "))
+        .unwrap();
+    let home = dir.path().join("nonstandard-home");
+    let home_config = fixture(&home.join(".config/piair"));
+    let xdg = dir.path().join("custom-xdg");
+    let xdg_config = fixture(&xdg.join("piair"));
+    for config in [&home_config, &xdg_config] {
+        let mut text = fs::read_to_string(config).unwrap();
+        text.push_str(&format!("\n[playback]\nreceiver_id='{ID}'\ncapture_device='null'\nauthentication='own-tone-transient'\nthreshold_dbfs=0.0\n"));
+        fs::write(config, text).unwrap();
+    }
+    for mode in ["home", "xdg", "explicit"] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_piair"));
+        command.env_clear().env("HOME", &home).current_dir(&home);
+        if mode == "xdg" {
+            command.env("XDG_CONFIG_HOME", &xdg);
+        } else if mode == "explicit" {
+            command
+                .env("PIAIR_CONFIG", &home_config)
+                .env("XDG_CONFIG_HOME", "/missing-config-root");
+        }
+        command.args(args.split_whitespace());
+        let mut service_process = Process::spawn(command, dir.path().join("service.log"));
+        service_process.ready();
+        assert!(service_process.signal("-TERM").success());
+        assert!(service_process.output().contains("\"event\":\"shutdown\""));
+    }
 }

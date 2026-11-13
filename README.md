@@ -420,7 +420,7 @@ OS scheduling can delay capture and produce reported discontinuities.
 
 Original code is Apache-2.0; existing licenses are preserved. No source from
 Autostream, OwnTone or airplay2-rs is imported or translated. No AirPlay sender
-library, web UI, database, Docker dependency or systemd installation is included.
+library, web UI, database, Docker dependency or automatic systemd installation is included.
 Encrypted control and the explicit realtime audio sender are implemented and
 mock-tested. Buffered TCP/PTP profiles remain unsupported. Current activity events
 never initiate network connections; ALSA/silence/pre-roll integration is deferred.
@@ -651,4 +651,4 @@ still requires `--experimental-owntone-transient`. The ten-second pre-roll is
 bounded and cannot guarantee preserved openings after slow setup or overflow.
 See [automatic mode tuning, buffering and hardware validation](docs/LIVE_CAPTURE.md#automatic-turntable-mode).
 
-For foreground automatic playback without prompts, see [runtime and unattended operation](docs/RUNTIME.md), including explicit opt-in, authorization, shutdown and exit codes. No systemd service or installer is provided.
+For foreground automatic playback without prompts, see [runtime and unattended operation](docs/RUNTIME.md), including explicit opt-in, authorization, shutdown and exit codes. An optional [systemd service template](docs/SYSTEMD.md) supervises this same runtime using saved configuration, non-root execution and systemd-managed PTP capabilities. Installation and boot enablement remain explicit; no installer is provided.

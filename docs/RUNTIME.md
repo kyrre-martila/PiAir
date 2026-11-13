@@ -192,10 +192,13 @@ active. Lifecycle events (`monitoring`, `authentication`, `negotiation`, `playba
 audio/session diagnostics may also appear on stdout. Logs do not establish audible
 playback or receiver clock synchronization.
 
-The process stays in the foreground. This prepares a future systemd caller;
-**no systemd service, installer, daemonization, PID file or system modification is
-provided**. Synthetic tests cover orchestration, authorization, cancellation and
-cleanup without audio hardware. Process tests use synthetic ALSA `null` capture;
+The process stays in the foreground. The optional [systemd template](SYSTEMD.md)
+supervises this same `run --allow-unattended` command and existing persistent
+configuration. Interactive approval, selection and pairing remain separate
+preparation steps. Systemd provides boot startup, journal logging, bounded restart
+policy and SIGTERM shutdown; installation never starts or enables it automatically.
+No installer, daemonization or PID file is provided. Synthetic tests cover
+orchestration, authorization, cancellation and cleanup without audio hardware. Process tests use synthetic ALSA `null` capture;
 active SIGINT/SIGTERM tests use mock PCM and loopback PTP/RTP/control sockets on
 unprivileged ports, verify packet transmission before cancellation, joined workers,
 rebindable sockets and visible bounded-teardown failures. They do not replace

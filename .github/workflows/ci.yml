@@ -57,3 +57,16 @@ jobs:
         run: cargo build --release --locked --target aarch64-unknown-linux-gnu
       - name: Check committed dependency resolution
         run: git diff --exit-code -- Cargo.lock
+
+  systemd:
+    name: Systemd service contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Validate service and standalone capability helper
+        run: |
+          command -v systemd-analyze
+          python3 -m unittest discover -s scripts -p 'test_*.py'
