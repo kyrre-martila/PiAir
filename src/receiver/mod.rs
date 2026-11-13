@@ -865,6 +865,7 @@ pub fn automatic_capture(
             volume_db: volume,
         },
     )?;
+    let instance = runtime::InstanceLock::acquire()?;
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "PTP operation requires interactive confirmation"
@@ -881,7 +882,7 @@ pub fn automatic_capture(
         "Authorize automatic sessions on this selected receiver until Ctrl+C? [y/N]: ",
     )?;
     let cancel = runtime::signal_cancellation()?;
-    runtime.run(cancel)
+    runtime.run_locked(cancel, instance)
 }
 
 #[allow(clippy::too_many_arguments)]

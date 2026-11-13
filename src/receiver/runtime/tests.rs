@@ -419,3 +419,28 @@ fn cancellation_does_not_mask_bounded_teardown_failure() {
     assert!(error.is::<crate::receiver::lifecycle::CleanupFailure>());
     assert!(format!("{error:#}").contains("TEARDOWN acknowledgement timed out"));
 }
+
+#[test]
+fn sigint_and_sigterm_during_active_airplay_join_workers_and_preserve_cleanup_failure() {
+    use std::process::{Command, Stdio};
+    for signal in ["-INT", "-TERM"] {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "receiver::lifecycle::tests::playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup", "--nocapture"])
+            .env("PIAIR_ACTIVE_PLAYBACK_SIGNAL", signal)
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit())
+            .spawn().unwrap();
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "active {signal} shutdown regression");
+                break;
+            }
+            if Instant::now() >= end {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("active {signal} shutdown exceeded bound");
+            }
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    }
+}

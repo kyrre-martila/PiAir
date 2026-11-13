@@ -16,6 +16,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod instance;
+pub(super) use instance::InstanceLock;
+
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum Authentication {
     StoredHap,
@@ -145,6 +148,10 @@ impl Runtime {
         Ok(())
     }
     pub fn run(self, cancel: Arc<AtomicBool>) -> Result<()> {
+        let instance = InstanceLock::acquire()?;
+        self.run_locked(cancel, instance)
+    }
+    pub(super) fn run_locked(self, cancel: Arc<AtomicBool>, _instance: InstanceLock) -> Result<()> {
         self.check()?;
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
@@ -217,7 +224,7 @@ impl Runtime {
 }
 
 // Cancellation may interrupt a request, but must never hide failed teardown.
-fn finish_attempt(result: Result<()>, cancelled: bool) -> Result<()> {
+pub(super) fn finish_attempt(result: Result<()>, cancelled: bool) -> Result<()> {
     if cancelled {
         if let Err(error) = result {
             if error.is::<super::lifecycle::CleanupFailure>() {

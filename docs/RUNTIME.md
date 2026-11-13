@@ -52,6 +52,27 @@ The existing TOML configuration and private receiver-state files remain compatib
 No new persistent configuration format or environment-based permission is added.
 Persistent configuration unification is deferred to PR #70.
 
+## Concurrent automatic instances
+
+Both `run` and `automatic-ptp-capture` acquire a nonblocking, kernel-managed
+process lock before opening ALSA or connecting to a receiver. Interactive automatic
+capture reserves it before discovery and confirmation. Only one automatic instance
+per effective user ID in a Linux network namespace can run, even with different
+configuration paths, capture devices or receiver selections. A second invocation
+exits with code 1 and asks the operator to stop the existing process before retrying;
+it cannot cancel, signal, unlock or otherwise interrupt the owner.
+
+The lock is an exclusively bound Linux abstract Unix socket named
+`piair.automatic.<effective-uid>`, held until capture and session cleanup finish.
+It accepts no commands or connections in application code, creates no filesystem
+objects, follows no paths, and changes no receiver-state permissions or authorization.
+Its descriptor is close-on-exec. Closing the process's descriptor releases the
+binding, including after errors, SIGINT/SIGTERM and uncatchable termination such
+as SIGKILL. There are no PID files or stale-lock removal operations. Kernel release
+after SIGKILL does not imply that remote TEARDOWN was sent; remote expiry remains
+unconfirmed. This is per-user automatic-mode exclusion, not coordination between
+different Unix accounts/network namespaces or with manual playback commands.
+
 ## Authorization and failure behavior
 
 The invocation pins the saved selection. Approval, selection and (for stored HAP)
@@ -91,7 +112,8 @@ shutdown guarantee by an in-process thread join.
 
 - **0**: orderly runtime cancellation, including SIGINT/SIGTERM. Interrupted
   authentication/control errors are logged; cleanup failures remain nonzero.
-- **1**: configuration, authorization, capture or runtime failure, signal-handler
+- **1**: another automatic instance already running, lock acquisition failure,
+  configuration, authorization, capture or runtime failure, signal-handler
   registration failure, or unsuccessful bounded teardown during cancellation.
 - **2**: CLI syntax/argument error, including missing unattended opt-in or profile.
 
@@ -104,5 +126,8 @@ playback or receiver clock synchronization.
 The process stays in the foreground. This prepares a future systemd caller;
 **no systemd service, installer, daemonization, PID file or system modification is
 provided**. Synthetic tests cover orchestration, authorization, cancellation and
-cleanup without audio hardware. They do not replace validation on the Pi and
-approved receiver.
+cleanup without audio hardware. Process tests use synthetic ALSA `null` capture;
+active SIGINT/SIGTERM tests use mock PCM and loopback PTP/RTP/control sockets on
+unprivileged ports, verify packet transmission before cancellation, joined workers,
+rebindable sockets and visible bounded-teardown failures. They do not replace
+validation on the Pi and approved receiver.
