@@ -25,18 +25,51 @@ asset yet, wait for a versioned release from the maintainer.
   set -eu
   version=0.1.0
   package="piair-${version}-aarch64-unknown-linux-gnu"
-  download=$(mktemp -d)
+  download=$(mktemp -d /tmp/piair-install.XXXXXXXXXX)
+  trap 'rm -rf -- "$download"' EXIT
+  trap 'exit 1' HUP INT TERM
   cd "$download"
   base="https://github.com/kyrre-martila/PiAir/releases/download/v${version}"
   curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 -o "$package.tar.gz" "$base/$package.tar.gz"
   curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 -o SHA256SUMS "$base/SHA256SUMS"
   sha256sum --check SHA256SUMS
-  tar -xzf "$package.tar.gz"
+  python3 -I - "$package" <<'PYTHON'
+import pathlib, re, sys, tarfile
+package = sys.argv[1]
+if not re.fullmatch(r"piair-[0-9]+\.[0-9]+\.[0-9]+-aarch64-unknown-linux-gnu", package):
+    raise SystemExit("Invalid PiAir package name")
+files = {package + "/" + name for name in (
+    "piair", "piair@.service", "maintain.py", "VERSION", "LICENSE", "SHA256SUMS",
+    "audio/Pachelbel_Canon_audio_test.wav", "audio/LICENSE.md")}
+directories = {package, package + "/audio"}
+with tarfile.open(package + ".tar.gz", "r:gz") as archive:
+    members, seen = archive.getmembers(), set()
+    for member in members:
+        regular = member.type in (tarfile.REGTYPE, tarfile.AREGTYPE)
+        allowed = (member.name in files and regular and 0 <= member.size <= 48 * 1024 * 1024
+                   or member.name in directories and member.isdir())
+        if not allowed or member.name in seen:
+            raise SystemExit("Unsafe PiAir archive: " + member.name)
+        seen.add(member.name)
+    if not files <= seen:
+        raise SystemExit("Incomplete PiAir archive")
+    pathlib.Path(package).mkdir(mode=0o700)
+    for member in members:
+        if member.name in files:
+            destination = pathlib.Path(member.name)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("xb") as output:
+                output.write(archive.extractfile(member).read())
+            destination.chmod(0o755 if destination.name == "piair" else 0o644)
+PYTHON
   cd "$package"
   python3 -I maintain.py install "$version" "../$package.tar.gz"
 )
 ```
 
+The block checks every archive path and member type before writing any extracted
+files, and removes its temporary directory on success, failure or cancellation.
+The installer then reuses its full package validation before system changes.
 Read the confirmation and enter `y` to install. Sudo asks for normal system
 installation authorization. Nothing starts or enables playback. Then run:
 

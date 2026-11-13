@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -47,6 +48,151 @@ def archive(content, v="0.1.0", extra=None):
             item.size = len(value)
             tar.addfile(item, io.BytesIO(value))
     return data.getvalue()
+
+
+class FirstInstallExtractionTests(unittest.TestCase):
+    """Execute the actual copyable documentation, without sudo or network access."""
+    package = "piair-0.1.0-aarch64-unknown-linux-gnu"
+    # The first shell block installs OS dependencies; select the download block.
+    block = (ROOT / "docs/INSTALL.md").read_text().split("```sh\n")[2].split("```")[0]
+    bootstrap = block.split("<<'PYTHON'\n", 1)[1].split("\nPYTHON", 1)[0]
+
+    @staticmethod
+    def changed_archive(name, kind=tarfile.REGTYPE, replace=False, repeat=1):
+        original = archive(files())
+        output = io.BytesIO()
+        with tarfile.open(fileobj=io.BytesIO(original), mode="r:gz") as source, \
+                tarfile.open(fileobj=output, mode="w:gz") as dest:
+            for member in source:
+                if not (replace and member.name == name):
+                    dest.addfile(member, source.extractfile(member))
+            for _ in range(repeat):
+                member = tarfile.TarInfo(name)
+                member.type = kind
+                member.linkname = "/tmp/piair-outside"
+                member.size = 0
+                dest.addfile(member, io.BytesIO())
+        return output.getvalue()
+
+    def bootstrap_in(self, directory, data):
+        (directory / (self.package + ".tar.gz")).write_bytes(data)
+        return subprocess.run([sys.executable, "-I", "-", self.package], input=self.bootstrap,
+                              cwd=directory, text=True, capture_output=True, check=False)
+
+    def test_safe_extraction_writes_only_expected_regular_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            content = files()
+            result = self.bootstrap_in(directory, archive(content))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            extracted = directory / self.package
+            actual = {p.relative_to(extracted).as_posix() for p in extracted.rglob("*") if p.is_file()}
+            self.assertEqual(actual, set(m.FILES) | {"SHA256SUMS"})
+            for name, value in content.items():
+                path = extracted / name
+                self.assertFalse(path.is_symlink())
+                self.assertEqual(path.read_bytes(), value)
+                self.assertEqual(path.stat().st_mode & 0o7777, m.FILES[name][1])
+            subprocess.run(["sha256sum", "--check", "SHA256SUMS"], cwd=extracted,
+                           check=True, capture_output=True)
+
+    def test_malicious_members_rejected_before_any_extraction(self):
+        prefix = self.package + "/"
+        attacks = [
+            ("/tmp/piair-outside", tarfile.REGTYPE, False, 1),
+            (prefix + "../outside", tarfile.REGTYPE, False, 1),
+            (prefix + "audio/../../outside", tarfile.REGTYPE, False, 1),
+            (prefix + "audio/../piair", tarfile.REGTYPE, False, 1),
+            (prefix + "unexpected", tarfile.REGTYPE, False, 1),
+            (prefix + "./piair", tarfile.REGTYPE, False, 1),
+            (prefix + "/piair", tarfile.REGTYPE, False, 1),
+            (prefix + "audio", tarfile.SYMTYPE, False, 1),
+            (self.package, tarfile.LNKTYPE, False, 1),
+            (prefix + "piair", tarfile.SYMTYPE, True, 1),
+            (prefix + "piair", tarfile.LNKTYPE, True, 1),
+            (prefix + "piair", tarfile.DIRTYPE, True, 1),
+            (prefix + "piair", tarfile.FIFOTYPE, True, 1),
+            (prefix + "piair", tarfile.CHRTYPE, True, 1),
+            (prefix + "piair", tarfile.BLKTYPE, True, 1),
+            (prefix + "piair", tarfile.CONTTYPE, True, 1),
+            (prefix + "piair", tarfile.REGTYPE, False, 1),
+            (prefix + "SHA256SUMS", tarfile.REGTYPE, False, 1),
+            (self.package, tarfile.DIRTYPE, False, 2),
+            (prefix + "audio", tarfile.DIRTYPE, False, 2),
+        ]
+        for name, kind, replace, repeat in attacks:
+            with self.subTest(name=name, kind=kind), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                data = self.changed_archive(name, kind, replace, repeat)
+                result = self.bootstrap_in(directory, data)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual({p.name for p in directory.iterdir()}, {self.package + ".tar.gz"})
+                # The installed updater/installer must enforce the same structural policy.
+                with self.assertRaises(RuntimeError):
+                    m.unpack(data, "0.1.0", m.digest(data))
+
+    def test_missing_files_and_corrupt_tar_write_nothing(self):
+        incomplete = files()
+        del incomplete["audio/LICENSE.md"]
+        for data in (archive(incomplete), b"not a tar archive"):
+            with self.subTest(data=data[:16]), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                self.assertNotEqual(self.bootstrap_in(directory, data).returncode, 0)
+                self.assertFalse((directory / self.package).exists())
+
+    def test_existing_destination_or_symlink_is_never_followed(self):
+        for symlink in (False, True):
+            with self.subTest(symlink=symlink), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                outside = directory / "personal-files"
+                outside.mkdir()
+                (outside / "piair").write_text("preserve me")
+                target = directory / self.package
+                target.symlink_to(outside, target_is_directory=True) if symlink else target.mkdir()
+                result = self.bootstrap_in(directory, archive(files()))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((outside / "piair").read_text(), "preserve me")
+                self.assertEqual({p.name for p in outside.iterdir()}, {"piair"})
+
+    def test_documented_procedure_cleans_downloads_on_success_or_failure(self):
+        for outcome in ("success", "installer failure", "checksum mismatch", "unsafe archive", "download failure"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                binaries = directory / "bin"
+                binaries.mkdir()
+                scratch = directory / "scratch"
+                scratch.mkdir()
+                marker = directory / "installer-started"
+                content = files()
+                # Harmless normal-user installer stand-in; never calls sudo/systemctl.
+                content["maintain.py"] = ("import os, pathlib, sys\n"
+                    "pathlib.Path(os.environ['PIAIR_TEST_STARTED']).write_text('started')\n"
+                    "sys.exit(int(os.environ['PIAIR_TEST_EXIT']))\n").encode()
+                data = archive(content)
+                if outcome == "unsafe archive":
+                    data = self.changed_archive(self.package + "/../outside")
+                (directory / (self.package + ".tar.gz")).write_bytes(data)
+                sha = "0" * 64 if outcome == "checksum mismatch" else m.digest(data)
+                (directory / "SHA256SUMS").write_text(sha + "  " + self.package + ".tar.gz\n")
+                (binaries / "mktemp").write_text("#!" + sys.executable + "\n"
+                    "import os, tempfile\nprint(tempfile.mkdtemp(dir=os.environ['PIAIR_TEST_SCRATCH']))\n")
+                (binaries / "curl").write_text("#!" + sys.executable + "\n"
+                    "import os, pathlib, shutil, sys\n"
+                    "if os.environ['PIAIR_TEST_DOWNLOAD_FAIL'] == '1': sys.exit(22)\n"
+                    "dest = sys.argv[sys.argv.index('-o') + 1]\n"
+                    "shutil.copyfile(pathlib.Path(os.environ['PIAIR_TEST_FIXTURE']) / dest, dest)\n")
+                for path in binaries.iterdir():
+                    path.chmod(0o755)
+                env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"],
+                           PIAIR_TEST_SCRATCH=str(scratch), PIAIR_TEST_FIXTURE=str(directory),
+                           PIAIR_TEST_STARTED=str(marker),
+                           PIAIR_TEST_EXIT="1" if outcome == "installer failure" else "0",
+                           PIAIR_TEST_DOWNLOAD_FAIL="1" if outcome == "download failure" else "0")
+                result = subprocess.run(["bash", "-c", self.block], cwd=directory, env=env,
+                                        text=True, capture_output=True, check=False)
+                self.assertEqual(result.returncode == 0, outcome == "success", result.stderr)
+                self.assertEqual(list(scratch.iterdir()), [], result.stderr)
+                self.assertEqual(marker.exists(), outcome in ("success", "installer failure"))
 
 
 class ServiceMock:

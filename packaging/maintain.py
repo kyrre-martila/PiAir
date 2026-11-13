@@ -93,10 +93,13 @@ def checksum(v):
 def unpack(data, v, expected):
     require(digest(data) == expected, "Release checksum mismatch; nothing installed")
     import io
+    version(v)
     prefix = f"piair-{v}-aarch64-unknown-linux-gnu/"
-    result = {}
+    result, seen = {}, set()
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
         for item in archive:
+            require(item.name not in seen, "Duplicate archive entry: " + item.name)
+            seen.add(item.name)
             if item.isdir() and item.name == prefix.rstrip("/"):
                 continue
             require(item.name.startswith(prefix), "Unexpected archive path")
@@ -104,7 +107,7 @@ def unpack(data, v, expected):
             if item.isdir() and name in ("", "audio"):
                 continue
             require(name in FILES or name == "SHA256SUMS", "Unexpected release file: " + name)
-            require(item.isfile() and name not in result and item.size <= 48 * 1024 * 1024,
+            require(item.type in (tarfile.REGTYPE, tarfile.AREGTYPE) and 0 <= item.size <= 48 * 1024 * 1024,
                     "Invalid, duplicate or oversized release file: " + name)
             result[name] = archive.extractfile(item).read()
     require(set(result) == set(FILES) | {"SHA256SUMS"}, "Missing release files")
