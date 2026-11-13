@@ -5,6 +5,10 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+// Wizard subprocesses intentionally share the real per-user runtime lock.
+// Serialize only tests that launch a wizard; read-only menu tests stay parallel.
+static SETUP_PROCESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct Terminal {
     child: Child,
     master: File,
@@ -79,6 +83,7 @@ fn command(path: &std::path::Path) -> Command {
 }
 #[test]
 fn terminal_start_invalid_input_cancel_eof_and_sigint_preserve_config() {
+    let _setup = SETUP_PROCESS.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
     let original = "# unchanged\n";
@@ -200,6 +205,7 @@ fn daily_existing_configuration_shows_saved_values_and_returns_from_settings() {
 
 #[test]
 fn absent_default_configuration_can_launch_existing_setup_and_return() {
+    let _setup = SETUP_PROCESS.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_piair"));
     command
