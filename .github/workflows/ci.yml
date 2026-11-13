@@ -53,3 +53,5 @@ jobs:
         run: |
           command -v systemd-analyze
           python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Exercise clean installation and rollback against the running system manager
+        run: sudo env PIAIR_SYSTEMD_INSTALL_TEST=1 SUDO_UID="$(id -u)" python3 -m unittest discover -s scripts -p test_first_install_systemd.py

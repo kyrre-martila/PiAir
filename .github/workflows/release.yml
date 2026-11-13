@@ -33,7 +33,7 @@ jobs:
       - name: Test release packaging and maintenance without root
         run: |
           useradd --create-home --uid 10001 piair-test
-          runuser -u piair-test -- sh -c 'umask 022; python3 -m unittest discover -s scripts -p test_installation.py'
+          runuser -u piair-test -- sh -c 'umask 022; python3 -m unittest discover -s scripts -p "test_installation.py" && python3 -m unittest discover -s scripts -p "test_maintenance_systemctl.py"'
       - name: Build native GNU ARM64 in Bookworm
         run: cargo build --release --locked --target aarch64-unknown-linux-gnu
       - name: Check ELF, dependencies, symbol versions and startup
