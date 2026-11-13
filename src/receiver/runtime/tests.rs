@@ -602,3 +602,229 @@ fn receiver_transaction_saves_both_files_and_interruption_fails_closed() {
     assert!(Runtime::prepare(&saved, saved.config.playback.effective().unwrap()).is_ok());
     assert!(store.selection().unwrap().as_ref() == Some(&next));
 }
+
+fn discovered(selected: &Selection) -> Vec<discovery::Receiver> {
+    let features = format!(
+        "0x{:x},0x{:x}",
+        selected.capabilities.features & 0xffff_ffff,
+        selected.capabilities.features >> 32
+    );
+    let info = mdns_sd::ServiceInfo::new(
+        "_airplay._tcp.local.",
+        "Speaker",
+        "speaker.local.",
+        "127.0.0.1",
+        selected.port,
+        [
+            ("deviceid", "AA:BB:CC:DD:EE:FF"),
+            ("features", features.as_str()),
+            ("sf", "0x0"),
+        ]
+        .as_slice(),
+    )
+    .unwrap();
+    vec![discovery::Receiver {
+        id: ID.into(),
+        name: "Speaker".into(),
+        services: vec![discovery::Advertisement::test_from_info(&info)],
+    }]
+}
+
+#[test]
+fn automatic_playback_reuses_setup_discovery_and_retries_only_missing_receiver() {
+    for (method, authentication) in [
+        (Method::Transient, Authentication::OwnToneTransient),
+        (Method::PinDisplay, Authentication::StoredHap),
+    ] {
+        let (_dir, loaded, selected) = fixture(method);
+        if method != Method::Transient {
+            Store::new(&loaded.path)
+                .unwrap()
+                .save(&credential())
+                .unwrap();
+        }
+        let runtime = Runtime::prepare(&loaded, settings(authentication)).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut scans = 0;
+        let mut starts = 0;
+        runtime
+            .attempt_with_discovery(
+                &cancel,
+                |timeout, _| {
+                    assert_eq!(timeout, 5);
+                    scans += 1;
+                    Ok(if scans == 1 {
+                        vec![]
+                    } else {
+                        discovered(&selected)
+                    })
+                },
+                |snapshot| {
+                    starts += 1;
+                    assert_eq!(snapshot.len(), 1);
+                    assert_eq!(snapshot[0].id, ID);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!((scans, starts), (2, 1));
+        scans = 0;
+        let automatic = runtime
+            .attempt_with_discovery(
+                &cancel,
+                |_, _| {
+                    scans += 1;
+                    Ok(vec![])
+                },
+                |_| panic!("authentication after missing receiver"),
+            )
+            .unwrap_err();
+        assert_eq!(scans, 3);
+        let setup =
+            super::super::playback_discovery(&loaded, &runtime.operation, &cancel, |_, _| {
+                Ok(vec![])
+            })
+            .unwrap_err();
+        assert_eq!(format!("{automatic:#}"), format!("{setup:#}"));
+        assert!(format!("{automatic:#}").contains("authentication not started"));
+    }
+}
+
+#[test]
+fn automatic_discovery_cancellation_never_starts_authentication() {
+    for phase in ["before", "missing", "valid"] {
+        let (_dir, loaded, selected) = fixture(Method::Transient);
+        let runtime =
+            Runtime::prepare(&loaded, settings(Authentication::OwnToneTransient)).unwrap();
+        let cancel = AtomicBool::new(phase == "before");
+        let mut scans = 0;
+        runtime
+            .attempt_with_discovery(
+                &cancel,
+                |_, cancel| {
+                    scans += 1;
+                    cancel.store(true, Ordering::Relaxed);
+                    Ok(if phase == "valid" {
+                        discovered(&selected)
+                    } else {
+                        vec![]
+                    })
+                },
+                |_| panic!("authentication after cancellation"),
+            )
+            .unwrap();
+        assert_eq!(scans, usize::from(phase != "before"));
+    }
+}
+
+#[test]
+fn automatic_discovery_rejections_do_not_retry_or_start_authentication() {
+    for change in [
+        "error",
+        "capabilities",
+        "endpoint",
+        "address",
+        "conflict",
+        "missing-conflict",
+        "duplicate",
+    ] {
+        let (_dir, loaded, selected) = fixture(Method::Transient);
+        let runtime =
+            Runtime::prepare(&loaded, settings(Authentication::OwnToneTransient)).unwrap();
+        let mut scans = 0;
+        let error = runtime
+            .attempt_with_discovery(
+                &AtomicBool::new(false),
+                |_, _| {
+                    scans += 1;
+                    let mut rows = discovered(&selected);
+                    match change {
+                        "error" => anyhow::bail!("mDNS query failed"),
+                        "capabilities" => {
+                            rows[0].services[0]
+                                .capabilities
+                                .insert("features".into(), "0x0".into());
+                        }
+                        "endpoint" => rows[0].services[0].port += 1,
+                        "address" => {
+                            rows[0].services[0].addresses = ["127.0.0.2".parse().unwrap()].into()
+                        }
+                        "conflict" => {
+                            let mut conflict = discovered(&selected).pop().unwrap();
+                            conflict.id = "device:112233445566".into();
+                            rows.push(conflict);
+                        }
+                        "missing-conflict" => rows[0].id = "device:112233445566".into(),
+                        "duplicate" => rows.push(discovered(&selected).pop().unwrap()),
+                        _ => unreachable!(),
+                    }
+                    Ok(rows)
+                },
+                |_| panic!("authentication after {change}"),
+            )
+            .unwrap_err();
+        assert_eq!(scans, 1, "{change}");
+        assert!(
+            error.is::<super::super::playback_error::Stage>(),
+            "{change}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn automatic_discovery_checks_revocation_selection_and_credentials_between_windows() {
+    for change in [
+        "approval",
+        "selection",
+        "credentials",
+        "corrupt-credentials",
+    ] {
+        for phase in ["before", "missing", "valid"] {
+            let (_dir, loaded, selected) = fixture(Method::PinDisplay);
+            let store = Store::new(&loaded.path).unwrap();
+            store.save(&credential()).unwrap();
+            let runtime = Runtime::prepare(&loaded, settings(Authentication::StoredHap)).unwrap();
+            let revoke = || match change {
+                "approval" => fs::write(&loaded.path, "receiver_allowlist=[]").unwrap(),
+                "selection" => {
+                    let mut changed = selected.clone();
+                    changed.port += 1;
+                    store.select(&changed).unwrap();
+                }
+                "credentials" => {
+                    store.remove(ID).unwrap();
+                }
+                "corrupt-credentials" => fs::write(
+                    loaded
+                        .path
+                        .parent()
+                        .unwrap()
+                        .join("receiver-state/aabbccddeeff.toml"),
+                    "invalid",
+                )
+                .unwrap(),
+                _ => unreachable!(),
+            };
+            if phase == "before" {
+                revoke();
+            }
+            let mut scans = 0;
+            runtime
+                .attempt_with_discovery(
+                    &AtomicBool::new(false),
+                    |_, _| {
+                        scans += 1;
+                        revoke();
+                        Ok(if phase == "valid" {
+                            discovered(&selected)
+                        } else {
+                            vec![]
+                        })
+                    },
+                    |_| panic!("authentication after {change} changed {phase} discovery"),
+                )
+                .unwrap_err();
+            assert_eq!(scans, usize::from(phase != "before"), "{change}/{phase}");
+        }
+    }
+}
