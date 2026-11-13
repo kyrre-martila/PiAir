@@ -43,6 +43,7 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
         let mut loaded = loaded;
         let mut baseline = allowlist::snapshot(&loaded.path)?;
         let mut draft = loaded.config.playback.clone();
+        let receiver_name;
         loop {
             draft.capture_device = Some(select_input(&draft, &mut ui, &cancel)?);
             ui.say("1. Continue to AirPlay selection\n2. Back to audio input")?;
@@ -74,6 +75,11 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
             baseline = allowlist::snapshot(&loaded.path)?;
             match authentication(&loaded, &snapshot, &id, &mut ui, &mut journal, &cancel) {
                 Ok(auth) => {
+                    receiver_name = snapshot
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| clean(&r.name))
+                        .unwrap_or_default();
                     draft.receiver_id = Some(id);
                     draft.authentication = Some(auth);
                     break;
@@ -95,6 +101,7 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
         let service_before = service::inspect(&loaded);
         loop {
             summary(&loaded.config.playback, &draft, &mut ui)?;
+            ui.say(format!("Advertised receiver name: {receiver_name}"))?;
             ui.say(format!("Configuration: {}", loaded.path.display()))?;
             ui.say(format!(
                 "Existing systemd service: {}",
@@ -687,6 +694,19 @@ fn playback_args(p: &Playback) -> PlaybackArgs {
         preserve_volume: p.volume_db.is_none(),
     }
 }
+fn authentication_label(authentication: Option<Authentication>) -> &'static str {
+    match authentication {
+        Some(Authentication::StoredHap) => "Stored HAP credentials",
+        Some(Authentication::OwnToneTransient) => "OwnTone-reference transient (session only)",
+        None => "Not configured",
+    }
+}
+fn volume_label(volume: Option<i32>) -> String {
+    volume.map_or_else(
+        || "Preserve current receiver volume".to_owned(),
+        |v| format!("{v} dB (may persist)"),
+    )
+}
 fn summary<R: FnMut() -> Result<String>, W: Write>(
     old: &Playback,
     new: &Playback,
@@ -696,18 +716,30 @@ fn summary<R: FnMut() -> Result<String>, W: Write>(
     for (label, before, after) in [
         (
             "Audio input",
-            format!("{:?}", old.capture_device),
-            format!("{:?}", new.capture_device),
+            old.capture_device
+                .as_deref()
+                .unwrap_or("Not configured")
+                .to_owned(),
+            new.capture_device
+                .as_deref()
+                .unwrap_or("Not configured")
+                .to_owned(),
         ),
         (
             "AirPlay receiver",
-            format!("{:?}", old.receiver_id),
-            format!("{:?}", new.receiver_id),
+            old.receiver_id
+                .as_deref()
+                .unwrap_or("Not configured")
+                .to_owned(),
+            new.receiver_id
+                .as_deref()
+                .unwrap_or("Not configured")
+                .to_owned(),
         ),
         (
             "Authentication profile",
-            format!("{:?}", old.authentication),
-            format!("{:?}", new.authentication),
+            authentication_label(old.authentication).to_owned(),
+            authentication_label(new.authentication).to_owned(),
         ),
         (
             "Detection threshold (dBFS)",
@@ -725,9 +757,9 @@ fn summary<R: FnMut() -> Result<String>, W: Write>(
             new.stop_duration_ms.to_string(),
         ),
         (
-            "Receiver volume (dB; None preserves)",
-            format!("{:?}", old.volume_db),
-            format!("{:?}", new.volume_db),
+            "Receiver volume",
+            volume_label(old.volume_db),
+            volume_label(new.volume_db),
         ),
     ] {
         ui.say(format!(
