@@ -13,7 +13,10 @@ fail; connection and permission errors are never converted to empty results.
 Inventory rows and service properties are validated before safety decisions.
 
 `systemctl show --all` explicitly includes empty properties (which systemctl
-otherwise omits). It is also allowed to return status 1 only for a complete,
+otherwise omits). The two array properties `EnvironmentFiles` and `ExecStart`
+are normalized to empty when absent: their custom systemctl printers emit no
+line for an empty array, even with `--all`. All scalar properties remain required.
+The command is also allowed to return status 1 only for a complete,
 consistent `LoadState=not-found`, inactive, PID 0 record with all service-specific
 properties empty and no diagnostic on stderr. Loaded units returning nonzero,
 missing or duplicate properties, and unexpected load states fail safely.

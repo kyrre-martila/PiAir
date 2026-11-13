@@ -166,6 +166,10 @@ class Services:
             require(sep and key in fields.split(",") and key not in properties,
                     "Malformed systemctl show output: " + unit)
             properties[key] = value
+        # systemctl's custom array printers omit empty arrays even with --all.
+        # Their absence means no entries; scalar properties must still be present.
+        for key in ("EnvironmentFiles", "ExecStart"):
+            properties.setdefault(key, "")
         require(set(properties) == set(fields.split(",")),
                 "Incomplete systemctl show output: " + unit + "; missing " +
                 ",".join(sorted(set(fields.split(",")) - set(properties))))

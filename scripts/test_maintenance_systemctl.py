@@ -19,7 +19,8 @@ def record(**changes):
     values = dict.fromkeys(FIELDS, '')
     values.update(LoadState='not-found', ActiveState='inactive', MainPID='0')
     values.update(changes)
-    return ''.join(f'{key}={value}\n' for key, value in values.items())
+    return ''.join(f'{key}={value}\n' for key, value in values.items()
+                   if value or key not in ('EnvironmentFiles', 'ExecStart'))
 
 
 def stock(active=False, **changes):
