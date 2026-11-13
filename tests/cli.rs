@@ -800,3 +800,73 @@ fn daily_commands_help_and_missing_service_are_actionable() {
     }
     assert!(run(&["logs", "--follow", "--help"]).status.success());
 }
+
+#[test]
+fn ordinary_help_focuses_on_daily_use_and_keeps_manual_tools() {
+    let output = run(&["--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("daily menu"));
+    assert!(help.contains("piair audio devices"));
+    for command in [
+        "setup",
+        "status",
+        "start",
+        "stop",
+        "restart",
+        "logs",
+        "devices",
+        "audio",
+        "config",
+        "update",
+        "uninstall",
+        "allowlist",
+        "select",
+        "pair",
+        "unpair",
+    ] {
+        assert!(
+            help.lines()
+                .any(|line| line.trim_start().starts_with(&format!("{command} "))),
+            "{help}"
+        );
+    }
+    assert!(
+        help.lines().count() <= 50,
+        "top-level help should fit a short terminal view: {help}"
+    );
+}
+
+#[test]
+fn hidden_diagnostics_keep_their_own_help_arguments_and_aliases() {
+    let ordinary = String::from_utf8(run(&["--help"]).stdout).unwrap();
+    for (command, argument) in [
+        ("run", "--allow-unattended"),
+        ("receiver-plan", "--method"),
+        ("authenticate", "--control-check"),
+        ("stream-test", "--audio-file"),
+        ("ptp-negotiation-check", "--observation-seconds"),
+        ("ptp-wav-playback", "--audio-file"),
+        ("experimental-ptp-capture", "--capture-device"),
+        ("automatic-ptp-capture", "--threshold-dbfs"),
+        ("buffered-test", "--confirm-audio"),
+        ("hap-stream-setup-check", "[RECEIVER_ID]"),
+        ("hap-playback-check", "--volume-db"),
+        ("stua-stream-setup-check", "[RECEIVER_ID]"),
+        ("stua-playback-check", "--volume-db"),
+    ] {
+        assert!(!ordinary
+            .lines()
+            .any(|line| line.trim_start().starts_with(&format!("{command} "))));
+        let output = run(&[command, "--help"]);
+        assert!(output.status.success(), "{command}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(argument),
+            "{command}"
+        );
+        assert_eq!(run(&[command, "--unknown-option"]).status.code(), Some(2));
+    }
+    for command in ["update", "uninstall"] {
+        assert!(run(&[command, "--help"]).status.success());
+    }
+}

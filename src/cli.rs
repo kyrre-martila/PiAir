@@ -4,7 +4,8 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     version,
-    about = "PiAir: ALSA audio activity, configuration and passive mDNS discovery"
+    about = "Send Raspberry Pi audio to your selected AirPlay receiver",
+    after_help = "Run piair without a command in a terminal to open the daily menu.\nStart with piair setup. List audio inputs with piair audio devices.\nAdvanced configuration: piair config --help; audio troubleshooting: piair audio --help.\nDeveloper diagnostics remain available; see docs/DEVELOPMENT.md."
 )]
 pub struct Cli {
     /// Configuration file (overrides PIAIR_CONFIG and XDG defaults).
@@ -20,23 +21,31 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     /// Check for a stable official release and update the installed application.
+    #[command(display_order = 9)]
     Update,
     /// Remove the installed application, preserving personal configuration and credentials.
+    #[command(display_order = 10)]
     Uninstall,
     /// Interactive first-time setup or safe reconfiguration (requires a terminal).
+    #[command(display_order = 0)]
     Setup,
     /// Start the installed current-account service.
+    #[command(display_order = 2)]
     Start,
     /// Stop the installed current-account service.
+    #[command(display_order = 3)]
     Stop,
     /// Restart the installed current-account service.
+    #[command(display_order = 4)]
     Restart,
     /// Show recent service logs.
+    #[command(display_order = 5)]
     Logs {
         #[arg(long)]
         follow: bool,
     },
     /// Foreground automatic playback without prompts; requires existing approval and selection.
+    #[command(hide = true)]
     Run {
         receiver_id: Option<String>,
         /// Explicit permission for this invocation only; saved settings never authorize playback.
@@ -51,17 +60,21 @@ pub enum Command {
         command: AllowlistCommand,
     },
     /// Capture-only audio tools; no receiver discovery or connections.
+    #[command(display_order = 7)]
     Audio {
         #[command(subcommand)]
         command: AudioCommand,
     },
     /// Show current service state and saved playback configuration.
+    #[command(display_order = 1)]
     Status,
     /// Discover advertisements only; never select or connect to a receiver.
+    #[command(display_order = 6)]
     Devices,
     /// Full passive receiver details: IDs, addresses, services and local approval/pairing state.
     Receivers,
     /// Passive capability/topology snapshot and transport plan; no receiver connections or state writes.
+    #[command(hide = true)]
     ReceiverPlan {
         /// Explicit authentication intent for planning only; never enrolls or authenticates.
         #[arg(long, value_enum)]
@@ -79,6 +92,7 @@ pub enum Command {
     /// Enroll persistent credentials using the selected method and its genuine PIN/setup code.
     Pair { receiver_id: String },
     /// Interactively authenticate the selected method; close without an audio session.
+    #[command(hide = true)]
     Authenticate {
         receiver_id: String,
         /// Explicitly test encrypted RTSP OPTIONS on the same verified socket.
@@ -92,6 +106,7 @@ pub enum Command {
         experimental_owntone_transient: bool,
     },
     /// Short AirPlay 2 realtime test; choose a receiver if ID omitted. Requires terminal and y/yes approval.
+    #[command(hide = true)]
     StreamTest {
         /// Omit to choose interactively; explicit IDs retain the advanced workflow.
         receiver_id: Option<String>,
@@ -131,6 +146,7 @@ pub enum Command {
         setup_profile: Option<crate::receiver::SetupProfile>,
     },
     /// Authenticate and negotiate PTP plus realtime type-96 UDP; zero audio bytes.
+    #[command(hide = true)]
     PtpNegotiationCheck {
         receiver_id: String,
         /// Explicit OwnTone transient authentication; default requires stored HAP.
@@ -141,6 +157,7 @@ pub enum Command {
         observation_seconds: u64,
     },
     /// Play a bounded WAV on the explicitly selected PTP receiver; requires terminal confirmation.
+    #[command(hide = true)]
     PtpWavPlayback {
         receiver_id: String,
         #[arg(long)]
@@ -157,6 +174,7 @@ pub enum Command {
         experimental_owntone_transient: bool,
     },
     /// Experimental live ALSA playback on the explicitly selected PTP receiver.
+    #[command(hide = true)]
     ExperimentalPtpCapture {
         receiver_id: String,
         #[arg(long)]
@@ -170,6 +188,7 @@ pub enum Command {
         experimental_owntone_transient: bool,
     },
     /// Automatically play live ALSA audio on the explicitly selected receiver until Ctrl+C.
+    #[command(hide = true)]
     AutomaticPtpCapture {
         receiver_id: String,
         #[arg(long)]
@@ -187,6 +206,7 @@ pub enum Command {
         experimental_owntone_transient: bool,
     },
     /// Buffered PTP foundation diagnostic; live audio remains blocked pending clock-adoption evidence.
+    #[command(hide = true)]
     BufferedTest {
         receiver_id: String,
         /// Opt in to initial SETUP and one second of PTP observation, with terminal confirmation.
@@ -200,10 +220,10 @@ pub enum Command {
         confirm_audio: bool,
     },
     /// Stored HAP: validate stream SETUP with zero audio/volume changes; omit ID for picker.
-    #[command(visible_alias = "stua-stream-setup-check")]
+    #[command(hide = true, visible_alias = "stua-stream-setup-check")]
     HapStreamSetupCheck { receiver_id: Option<String> },
     /// Stored HAP: one second faded tone, persistent receiver volume, two seconds silent drain.
-    #[command(visible_alias = "stua-playback-check")]
+    #[command(hide = true, visible_alias = "stua-playback-check")]
     HapPlaybackCheck {
         /// Canonical ID; omit to use the existing interactive receiver picker.
         receiver_id: Option<String>,
@@ -214,6 +234,7 @@ pub enum Command {
     /// Remove local credentials without contacting the receiver.
     Unpair { receiver_id: String },
     /// Validate or display effective configuration.
+    #[command(display_order = 8)]
     Config {
         #[command(subcommand)]
         command: ConfigCommand,

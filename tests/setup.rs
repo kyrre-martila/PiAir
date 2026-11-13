@@ -188,7 +188,19 @@ fn daily_existing_configuration_shows_saved_values_and_returns_from_settings() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_piair"));
     command.arg("--config").arg(&path);
     let mut terminal = Terminal::start(command);
-    terminal.until("2. Start PiAir");
+    terminal.until("Q. Exit");
+    for choice in [
+        "1. Status",
+        "2. Start PiAir",
+        "3. Select AirPlay receiver",
+        "4. Test audio (49 seconds)",
+        "5. Settings",
+        "6. Logs",
+        "Q. Exit",
+    ] {
+        assert!(terminal.output.contains(choice), "{}", terminal.output);
+    }
+    assert!(!terminal.output.contains("2. Stop PiAir"));
     assert!(terminal.output.contains("Synthetic Living Room"));
     assert!(terminal.output.contains("Audio input: synthetic-only"));
     assert!(terminal.output.contains("Complete"));
