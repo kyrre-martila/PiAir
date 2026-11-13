@@ -334,19 +334,49 @@ recovery and compatibility gaps](docs/PAIRING.md).
 ## Development
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets --locked -- -D warnings
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --release --locked
+git diff --exit-code -- Cargo.lock
 git diff --check
 ```
 
 Tests use synthetic PCM, local files, published HAP vectors and loopback mock
 receivers; no physical audio or real receiver is needed.
-GitHub Actions remains **manual-only** via `workflow_dispatch`. See
+GitHub Actions runs these Rust checks automatically for pull requests targeting
+`main` and pushes to `main`, and supports manual `workflow_dispatch` runs.
+Use stable Rust with the rustfmt and Clippy components; on Debian/Ubuntu install
+`libasound2-dev` and `pkg-config` first. All dependency-resolving checks use
+`--locked` and verify that the committed `Cargo.lock` stays unchanged. New commits
+cancel outdated runs for the same PR; other workflows are unaffected.
+
+CI also builds a release for `aarch64-unknown-linux-gnu` on GitHub's native
+`ubuntu-24.04-arm` runner with native ALSA development libraries. On a Raspberry
+Pi OS 64-bit development machine, run the same check with:
+
+```sh
+rustup target add aarch64-unknown-linux-gnu
+cargo build --release --locked --target aarch64-unknown-linux-gnu
+git diff --exit-code -- Cargo.lock
+```
+
+This validates ARM64 compilation/linking, not Raspberry Pi hardware playback.
+Ubuntu 24.04 uses glibc 2.39; its binaries may require newer glibc symbols than
+older Raspberry Pi OS releases (for example, Bookworm uses 2.36). CI binaries are
+not portable release artifacts. Build on the oldest supported Raspberry Pi OS
+or against its sysroot before distributing binaries. No Docker is required on
+the Pi. Cargo.lock pins dependencies, while stable Rust and runner system packages
+continue to receive updates; this is not a bit-for-bit reproducible build.
+
+Tests need no operator input or privileged PTP port bindings: interactive tests
+drive their own pipes/PTYs, ALSA tests use temporary file/null/plug fixtures, and
+network tests use loopback mock receivers and unprivileged ports. Keep security,
+authentication, playback and protocol regressions in the default test suite.
+See
 [architecture](docs/ARCHITECTURE.md), the normative
 [activity specification](docs/AUDIO_ACTIVITY.md), and
-[dependency screening](docs/DEPENDENCIES.md). ARM64, physical S16/S32 USB capture,
+[dependency screening](docs/DEPENDENCIES.md). Physical S16/S32 USB capture,
 hot unplug, overruns, long idle/quiet-music acceptance and shared-device behavior
 require hardware validation. This is not a hard real-time scheduler; stdout and
 OS scheduling can delay capture and produce reported discontinuities.
