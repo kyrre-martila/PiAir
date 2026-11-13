@@ -66,7 +66,10 @@ piair config check
 
 Start/stop/restart control the installed current-account service as a non-root
 user through normal system authorization. Start/stop do not change boot settings.
-Service state and packet transmission do not prove audible playback.
+Separate development builds can inspect the installed service but cannot control
+it; use the installed executable deliberately. Receiver technical details are
+available through `piair receivers` or `piair devices`, outside the friendly-name
+picker. Service state and packet transmission do not prove audible playback.
 See [daily use and troubleshooting](docs/DAILY_USE.md) and [systemd](docs/SYSTEMD.md).
 
 ## Update or uninstall

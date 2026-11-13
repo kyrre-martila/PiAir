@@ -796,6 +796,7 @@ fn daily_commands_help_and_missing_service_are_actionable() {
             error.contains("systemd")
                 || error.contains("non-root")
                 || error.contains("not installed")
+                || error.contains("Service control is unavailable")
         );
     }
     assert!(run(&["logs", "--follow", "--help"]).status.success());
@@ -897,4 +898,19 @@ fn command_errors_are_readable_except_in_unattended_json_mode() {
             }
         }
     }
+}
+
+#[test]
+fn development_executable_can_observe_but_cannot_control_installed_service() {
+    for action in ["start", "stop", "restart"] {
+        let output = run(&[action]);
+        assert_eq!(output.status.code(), Some(1));
+        let text = String::from_utf8(output.stderr).unwrap();
+        assert!(text.contains("Service control is unavailable"), "{text}");
+    }
+    let output = run(&["status"]);
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Invoking executable: not verified as installed PiAir"));
+    assert!(text.contains("Foreground candidate playback remains available"));
 }

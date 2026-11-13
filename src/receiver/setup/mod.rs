@@ -6,6 +6,7 @@ use inputs::normal_inputs;
 mod resources;
 pub(crate) use daily::{daily, daily_control, daily_logs, daily_status};
 mod service;
+pub(crate) use service::require_installed_executable;
 mod ui;
 use super::{
     compatibility::Method,

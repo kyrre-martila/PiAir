@@ -947,3 +947,39 @@ fn setup_operation_guidance_hides_protocol_details_but_keeps_cleanup_failures() 
         super::super::lifecycle::CleanupFailure(anyhow::anyhow!("cleanup failed")).into();
     assert!(setup_problem(&cleanup, "Setup failed.", false).contains("cleanup failed"));
 }
+
+#[test]
+fn isolated_candidate_never_offers_optional_service_activation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "").unwrap();
+    let loaded = config::load(Some(path)).unwrap();
+    let mut ui = Ui {
+        read: || panic!("candidate must not offer enable/start confirmation"),
+        out: Vec::new(),
+    };
+    optional_service_with(
+        &loaded,
+        &mut ui,
+        &mut Vec::new(),
+        service::inspect,
+        |_, _| panic!("candidate must not activate installed service"),
+    )
+    .unwrap();
+    let text = String::from_utf8(ui.out).unwrap();
+    assert!(text.contains("Automatic activation unavailable"));
+    assert!(text.contains("Service control is unavailable"));
+    assert!(!text.contains("Start PiAir automatically when"));
+    // Activation itself also guards against calling it without the initial probe.
+    let expected = service::Service {
+        unit: "piair@alice.service".into(),
+        status: "inactive".into(),
+        home: dir.path().into(),
+        user: "alice".into(),
+        active: "inactive".into(),
+        boot: "disabled".into(),
+        pid: 0,
+        result: "success".into(),
+    };
+    assert!(service::activate(&loaded, &expected).is_err());
+}

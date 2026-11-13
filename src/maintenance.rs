@@ -19,6 +19,7 @@ pub fn run(update: bool) -> Result<()> {
             "maintenance files must be root-owned and unwritable by other users"
         );
     }
+    let _installed = crate::receiver::setup::require_installed_executable()?;
     // Replace this process so maintenance itself is not mistaken for playback.
     // Python isolated mode ignores user modules and PYTHON* environment settings.
     Err(std::process::Command::new("/usr/bin/python3")

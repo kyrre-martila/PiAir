@@ -191,7 +191,7 @@ fn daily_existing_configuration_shows_saved_values_and_returns_from_settings() {
     terminal.until("Q. Exit");
     for choice in [
         "1. Status",
-        "2. Start PiAir",
+        "2. Service controls unavailable",
         "3. Select AirPlay receiver",
         "4. Test audio (49 seconds)",
         "5. Settings",
@@ -204,6 +204,10 @@ fn daily_existing_configuration_shows_saved_values_and_returns_from_settings() {
     assert!(terminal.output.contains("Synthetic Living Room"));
     assert!(terminal.output.contains("Audio input: synthetic-only"));
     assert!(terminal.output.contains("Complete"));
+    terminal.output.clear();
+    terminal.answer("2\n");
+    terminal.until("Service control is unavailable");
+    terminal.until("6. Logs");
     terminal.answer("5\n");
     terminal.until("2. View saved playback settings");
     terminal.output.clear();

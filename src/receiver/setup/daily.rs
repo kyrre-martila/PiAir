@@ -20,17 +20,20 @@ fn boot_label(state: &str) -> String {
         _ => format!("Unknown ({})", clean(state)),
     }
 }
-fn status_text(loaded: &Loaded, detailed: bool) -> String {
-    let state = match service::observe(loaded) {
+fn observed_status(observation: Result<service::Service>) -> String {
+    match observation {
         Ok(s) => format!(
-            "Service: {}\nStarts at boot: {}\nMain PID: {}\nService result: {}",
+            "Service: {} (installed systemd service)\nStarts at boot: {}\nMain PID: {}\nService result: {}",
             activity(&s),
             boot_label(&s.boot),
             s.pid,
             clean(&s.result)
         ),
         Err(e) => format!("Service: Unavailable\n{e:#}"),
-    };
+    }
+}
+fn status_text(loaded: &Loaded, detailed: bool) -> String {
+    let state = observed_status(service::observe(loaded));
     let selected = Store::new(&loaded.path).and_then(|s| s.selection());
     let receiver = match selected {
         Ok(Some(s)) => format!(
@@ -46,7 +49,8 @@ fn status_text(loaded: &Loaded, detailed: bool) -> String {
         Err(e) if detailed => format!("Incomplete: {e}\nRun piair setup to configure PiAir."),
         Err(_) => "Incomplete. Run piair setup to configure PiAir.".into(),
     };
-    format!("PiAir\n\n{state}\nReceiver: {receiver}\nAudio input: {}\nConfiguration: {} ({})\n{configuration}\nPlayback: activity unknown; audible output unverified",
+    let executable = service::executable_status();
+    format!("PiAir\n\n{state}\n{executable}\nReceiver: {receiver}\nAudio input: {}\nConfiguration: {} ({})\n{configuration}\nPlayback: activity unknown; audible output unverified",
         clean(loaded.config.playback.capture_device.as_deref().unwrap_or("Not configured")),
         loaded.path.display(), loaded.source)
 }
@@ -74,9 +78,11 @@ fn service_running(loaded: &Loaded) -> Result<bool> {
 fn confirm_stop<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
     running: bool,
+    authorize: impl FnOnce() -> Result<()>,
     stop: impl FnOnce() -> Result<()>,
 ) -> Result<Option<bool>> {
     if running {
+        authorize()?;
         if !ui.confirm("PiAir must stop before continuing.\nStop PiAir and continue?")? {
             return Ok(None);
         }
@@ -160,7 +166,12 @@ fn stopped_action<R: FnMut() -> Result<String>, W: Write>(
     action: impl FnOnce(&mut Loaded, &mut Ui<R, W>) -> Result<()>,
 ) -> Result<()> {
     let was_running = service_running(loaded)?;
-    let outcome = match confirm_stop(ui, was_running, || service::control(loaded, "stop")) {
+    let outcome = match confirm_stop(
+        ui,
+        was_running,
+        || service::require_installed_executable().map(drop),
+        || service::control(loaded, "stop"),
+    ) {
         Ok(None) => return Ok(()),
         Ok(Some(_)) => action(loaded, ui),
         Err(error) => {
@@ -388,7 +399,10 @@ fn setup_child(loaded: &Loaded, cancel: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
-fn menu_text(running: bool) -> String {
+fn menu_text(running: bool, can_control: bool) -> String {
+    if !can_control {
+        return "\n1. Status\n2. Service controls unavailable (installed executable required)\n3. Select AirPlay receiver\n4. Test audio (49 seconds)\n5. Settings\n6. Logs\n\nQ. Exit".into();
+    }
     format!("\n1. Status\n2. {} PiAir\n3. Select AirPlay receiver\n4. Test audio (49 seconds)\n5. Settings\n6. Logs\n\nQ. Exit", if running { "Stop" } else { "Start" })
 }
 pub(crate) fn daily(mut loaded: Loaded) -> Result<()> {
@@ -413,7 +427,10 @@ pub(crate) fn daily(mut loaded: Loaded) -> Result<()> {
         if incomplete {
             ui.say("\nPlayback configuration needs setup.\n1. Run piair setup\n2. Status\n3. Logs\nQ. Exit")?;
         } else {
-            ui.say(menu_text(running))?;
+            ui.say(menu_text(
+                running,
+                service::require_installed_executable().is_ok(),
+            ))?;
         }
         let choice = match ui.choice("Choose:", if incomplete { 3 } else { 6 }, None) {
             Ok(n) => n,
@@ -481,8 +498,8 @@ mod tests {
     use super::*;
     #[test]
     fn dynamic_single_toggle_and_unknown_activity() {
-        assert!(menu_text(true).contains("2. Stop PiAir"));
-        assert!(menu_text(false).contains("2. Start PiAir"));
+        assert!(menu_text(true, true).contains("2. Stop PiAir"));
+        assert!(menu_text(false, true).contains("2. Start PiAir"));
         let mut s = service::Service {
             unit: "piair@pi.service".into(),
             status: "active".into(),
@@ -522,33 +539,61 @@ mod tests {
         for answer in ["2\n", "\n"] {
             let mut stopped = false;
             assert_eq!(
-                confirm_stop(&mut scripted(answer), true, || {
-                    stopped = true;
-                    Ok(())
-                })
+                confirm_stop(
+                    &mut scripted(answer),
+                    true,
+                    || Ok(()),
+                    || {
+                        stopped = true;
+                        Ok(())
+                    }
+                )
                 .unwrap(),
                 None
             );
             assert!(!stopped);
         }
         for answer in ["q\n", "", "1"] {
-            assert!(confirm_stop(&mut scripted(answer), true, || panic!("must not stop")).is_err());
+            assert!(confirm_stop(
+                &mut scripted(answer),
+                true,
+                || Ok(()),
+                || panic!("must not stop")
+            )
+            .is_err());
         }
         assert_eq!(
-            confirm_stop(&mut scripted(""), false, || panic!("already stopped")).unwrap(),
+            confirm_stop(
+                &mut scripted(""),
+                false,
+                || Ok(()),
+                || panic!("already stopped")
+            )
+            .unwrap(),
             Some(false)
         );
         let mut stopped = false;
         assert_eq!(
-            confirm_stop(&mut scripted("1\n"), true, || {
-                stopped = true;
-                Ok(())
-            })
+            confirm_stop(
+                &mut scripted("1\n"),
+                true,
+                || Ok(()),
+                || {
+                    stopped = true;
+                    Ok(())
+                }
+            )
             .unwrap(),
             Some(true)
         );
         assert!(stopped);
-        assert!(confirm_stop(&mut scripted("1\n"), true, || anyhow::bail!("denied")).is_err());
+        assert!(confirm_stop(
+            &mut scripted("1\n"),
+            true,
+            || Ok(()),
+            || anyhow::bail!("denied")
+        )
+        .is_err());
     }
     #[test]
     fn receiver_picker_marks_selected_retries_and_rescans_without_activation() {
@@ -608,11 +653,16 @@ mod tests {
                 let selection = Store::new(&loaded.path).unwrap().selection().unwrap();
                 let mut running = true;
                 let mut actions = Vec::new();
-                let was_running = confirm_stop(&mut scripted("1\n"), running, || {
-                    actions.push("stop");
-                    running = false;
-                    Ok(())
-                })
+                let was_running = confirm_stop(
+                    &mut scripted("1\n"),
+                    running,
+                    || Ok(()),
+                    || {
+                        actions.push("stop");
+                        running = false;
+                        Ok(())
+                    },
+                )
                 .unwrap()
                 .unwrap();
                 assert!(!running);
@@ -918,5 +968,61 @@ mod setup_command_tests {
             expected.extend(["--config", path.to_str().unwrap(), "setup"]);
             assert_eq!(args, expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::*;
+
+    #[test]
+    fn candidate_cannot_offer_to_stop_installed_service_before_menu_actions() {
+        let mut ui = Ui {
+            read: || panic!("candidate must not offer to stop the installed service"),
+            out: Vec::new(),
+        };
+        assert!(confirm_stop(
+            &mut ui,
+            true,
+            || service::require_installed_executable().map(drop),
+            || panic!("candidate must not stop service")
+        )
+        .is_err());
+        assert!(ui.out.is_empty());
+        // A stopped installed service does not prevent candidate foreground QA.
+        assert_eq!(
+            confirm_stop(
+                &mut ui,
+                false,
+                || panic!("no installed service mutation needed"),
+                || panic!("already stopped")
+            )
+            .unwrap(),
+            Some(false)
+        );
+        for running in [false, true] {
+            let text = menu_text(running, false);
+            assert!(text.contains("Service controls unavailable"));
+            assert!(!text.contains("2. Start PiAir") && !text.contains("2. Stop PiAir"));
+        }
+    }
+
+    #[test]
+    fn candidate_read_only_status_distinguishes_installed_service_state() {
+        let observed = service::Service {
+            unit: "piair@alice.service".into(),
+            status: "active".into(),
+            home: "/home/alice".into(),
+            user: "alice".into(),
+            active: "active".into(),
+            boot: "disabled".into(),
+            pid: 123,
+            result: "success".into(),
+        };
+        let text = observed_status(Ok(observed));
+        assert!(text.contains("installed systemd service"));
+        assert!(text.contains("Running - activity unknown"));
+        assert!(text.contains("Main PID: 123"));
+        assert!(service::executable_status().contains("not verified as installed PiAir"));
     }
 }

@@ -38,6 +38,13 @@ linker, target ALSA development library and pkg-config sysroot matching the Pi's
 glibc; installing only the Rust target is insufficient. Native ARM64 builds are
 the recommended path. No Docker, systemd installation or root execution is needed.
 
+A source/development executable can inspect the installed service's status and
+logs, but cannot control that service. Only the trusted installed executable (or
+a symlink to the same file identity) may do so. For isolated foreground tests,
+follow [candidate QA](PRE_RELEASE_QA.md). The simplified receiver picker lists
+friendly names, rescan and cancellation; `piair receivers` and `piair devices`
+provide technical details separately.
+
 ## Manage receiver approval locally
 
 ```sh

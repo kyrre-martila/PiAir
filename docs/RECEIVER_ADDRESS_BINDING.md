@@ -32,7 +32,7 @@ If PiAir reports that the selected speaker changed:
 1. Stop your current playback explicitly. Confirm the intended speaker and network
    using trusted device/router settings; do not approve a guessed friendly name.
 2. Run `piair setup` with the same account/config path, rescan, review the speaker
-   and Advanced details, and explicitly save its connection choice. Reuse saved
+   and diagnostic details from `piair receivers` or `piair devices`, and explicitly save its connection choice. Reuse saved
    pairing when offered. Existing credentials are retained.
 3. Save the reviewed playback settings, then explicitly start when ready. Confirm
    audible sound. For an advanced existing allowlisted selection, `piair select

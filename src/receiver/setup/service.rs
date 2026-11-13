@@ -4,6 +4,8 @@ use crate::config::Loaded;
 use anyhow::{ensure, Context, Result};
 use std::{
     collections::BTreeMap,
+    fs::{File, OpenOptions},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -45,7 +47,44 @@ fn trusted_file(path: &Path) -> Result<()> {
     );
     Ok(())
 }
+// /proc/self/exe opens the executable actually running, even if its pathname
+// was replaced or unlinked. current_exe()/canonicalize() alone could instead
+// identify the new file at the old path. Retain the installed fd through mutation.
+fn matching_executable(installed: &Path, running: &Path) -> Result<File> {
+    let installed = OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(installed)
+        .context("Installed PiAir executable is missing or cannot be verified. Service control is unavailable; use the trusted /usr/local/bin/piair installation. Foreground candidate playback remains available.")?;
+    let running = File::open(running)
+        .context("Cannot verify the running executable; service control is unavailable")?;
+    let expected = installed.metadata()?;
+    let actual = running.metadata()?;
+    ensure!(expected.is_file() && actual.is_file()
+        && expected.dev() == actual.dev() && expected.ino() == actual.ino(),
+        "This executable is a separate development/test build, or the installed executable was replaced. Service control is unavailable. Use /usr/local/bin/piair to deliberately control the installed service. Foreground candidate playback remains available.");
+    Ok(installed)
+}
+pub(crate) fn require_installed_executable() -> Result<File> {
+    let installed = matching_executable(
+        Path::new("/usr/local/bin/piair"),
+        Path::new("/proc/self/exe"),
+    )?;
+    let m = installed.metadata()?;
+    ensure!(m.uid() == 0 && m.mode() & 0o022 == 0,
+        "installed executable must be root-owned and unwritable by other users; service control is unavailable");
+    Ok(installed)
+}
+fn executable_note(identity: Result<File>) -> String {
+    match identity {
+        Ok(_) => "Invoking executable: installed PiAir".into(),
+        Err(error) => format!("Invoking executable: not verified as installed PiAir\n{error}"),
+    }
+}
+pub(super) fn executable_status() -> String {
+    executable_note(require_installed_executable())
+}
 pub(super) fn inspect(loaded: &Loaded) -> Result<Service> {
+    let _installed = require_installed_executable()?;
     let service = inspect_current(loaded)?;
     ensure!(
         matches!(service.active.as_str(), "inactive" | "failed"),
@@ -207,6 +246,7 @@ pub(super) fn activate(loaded: &Loaded, expected: &Service) -> Result<()> {
     super::super::runtime::Runtime::prepare(loaded, loaded.config.playback.effective()?)?;
     // Release immediately before systemd starts the runtime, which acquires the same lock.
     drop(super::super::runtime::InstanceLock::acquire()?);
+    let _installed = require_installed_executable()?;
     let status = Command::new("systemctl")
         .args(["--system", "enable", "--now", &current.unit])
         .status()
@@ -283,6 +323,7 @@ trait Backend {
 struct System<'a>(&'a Loaded);
 impl Backend for System<'_> {
     fn inspect(&mut self) -> Result<Service> {
+        let _installed = require_installed_executable()?;
         inspect_current(self.0)
     }
     fn prepare(&mut self) -> Result<()> {
@@ -294,6 +335,7 @@ impl Backend for System<'_> {
         Ok(())
     }
     fn invoke(&mut self, action: &str, unit: &str) -> Result<()> {
+        let _installed = require_installed_executable()?;
         let status = Command::new("systemctl")
             .args(["--system", action, unit])
             .status()
@@ -553,10 +595,15 @@ mod daily_tests {
         denied: bool,
         locked: bool,
         calls: Vec<String>,
+        executables: Option<(PathBuf, PathBuf)>,
+        replacement: Option<PathBuf>,
     }
     impl Backend for Mock {
         fn inspect(&mut self) -> Result<Service> {
             ensure!(!self.missing, "service not installed; see docs/INSTALL.md");
+            if let Some((installed, running)) = &self.executables {
+                matching_executable(installed, running)?;
+            }
             Ok(Service {
                 unit: "piair@alice.service".into(),
                 user: "alice".into(),
@@ -577,6 +624,12 @@ mod daily_tests {
             Ok(())
         }
         fn invoke(&mut self, action: &str, unit: &str) -> Result<()> {
+            if let Some(replacement) = &self.replacement {
+                std::fs::rename(replacement, &self.executables.as_ref().unwrap().0)?;
+            }
+            if let Some((installed, running)) = &self.executables {
+                matching_executable(installed, running)?;
+            }
             self.calls.push(format!("{action} {unit}"));
             ensure!(!self.denied, "authorization denied");
             self.active = action != "stop";
@@ -590,6 +643,35 @@ mod daily_tests {
             denied: false,
             locked: false,
             calls: Vec::new(),
+            executables: None,
+            replacement: None,
+        }
+    }
+    #[test]
+    fn candidate_and_replacement_cannot_start_stop_or_restart() {
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        for action in ["start", "stop", "restart"] {
+            let installed = dir.path().join("installed");
+            let candidate = dir.path().join("candidate");
+            std::fs::write(&installed, b"installed").unwrap();
+            std::fs::write(&candidate, b"candidate").unwrap();
+            let mut m = mock(action != "start");
+            m.executables = Some((installed.clone(), candidate.clone()));
+            assert!(control_with(&mut m, action)
+                .unwrap_err()
+                .to_string()
+                .contains("Service control is unavailable"));
+            assert!(m.calls.is_empty());
+            // Even replacement after inspection and before invocation is blocked.
+            let executing = File::open(&installed).unwrap();
+            m.executables = Some((
+                installed,
+                PathBuf::from(format!("/proc/self/fd/{}", executing.as_raw_fd())),
+            ));
+            m.replacement = Some(candidate);
+            assert!(control_with(&mut m, action).is_err());
+            assert!(!m.calls.iter().any(|call| call.starts_with(action)));
         }
     }
     #[test]
@@ -719,5 +801,55 @@ mod log_tests {
         assert!(rendered.contains(":00") || rendered.contains(":20"));
         let entry = serde_json::json!({"MESSAGE":"{\"fields\":{\"message\":\"failed\"}}", "__REALTIME_TIMESTAMP":"1700000000123456"}).to_string();
         assert!(!render_log(&entry, false).contains("1700000000123456"));
+    }
+}
+
+#[cfg(test)]
+mod executable_identity_tests {
+    use super::*;
+    use std::os::{fd::AsRawFd, unix::fs::symlink};
+
+    #[test]
+    fn installed_identity_accepts_same_inode_and_invocation_symlink_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("piair");
+        std::fs::write(&installed, b"installed fixture").unwrap();
+        let executing = File::open(&installed).unwrap();
+        let actual = PathBuf::from(format!("/proc/self/fd/{}", executing.as_raw_fd()));
+        matching_executable(&installed, &actual).unwrap();
+        let link = dir.path().join("invocation-link");
+        symlink(&installed, &link).unwrap();
+        matching_executable(&installed, &link).unwrap();
+        // A symlink at the trusted installation path is still forbidden.
+        assert!(matching_executable(&link, &actual).is_err());
+        let candidate = dir.path().join("candidate");
+        std::fs::copy(&installed, &candidate).unwrap();
+        let error = matching_executable(&installed, &candidate).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("separate development/test build"));
+        assert!(
+            executable_note(Err(error)).contains("Foreground candidate playback remains available")
+        );
+        // Same textual installation path, different inode: the old running
+        // executable must not control a newly replaced installation.
+        std::fs::rename(&candidate, &installed).unwrap();
+        assert!(matching_executable(&installed, &actual).is_err());
+        std::fs::remove_file(&installed).unwrap();
+        assert!(matching_executable(&installed, &actual)
+            .unwrap_err()
+            .to_string()
+            .contains("missing"));
+    }
+
+    #[test]
+    fn live_process_identity_uses_the_running_inode() {
+        let running = File::open("/proc/self/exe").unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let installed = matching_executable(&executable, Path::new("/proc/self/exe")).unwrap();
+        assert_eq!(
+            installed.metadata().unwrap().ino(),
+            running.metadata().unwrap().ino()
+        );
     }
 }

@@ -59,6 +59,48 @@ unpublished candidate on an existing 1.0.1 Trixie/UCA202/HomePod installation.
 USB automatic playback, silence stop/restart, cancellation/resource cleanup and
 configuration/credential preservation on the final candidate. Installed-candidate
 stock service detection must also be rechecked after supported official installation;
-an isolated executable correctly refuses to control a unit with another path.
+an isolated executable must refuse to control the installed service unless its
+actual executing file identity matches the trusted installed executable.
 Do not claim production readiness from synthetic protocol success. Version stays
 1.0.2; this work does not tag, publish or merge.
+
+## Final review blockers corrected on PR #79
+
+- **High operational safety:** `setup/service.rs` previously checked the stock
+  unit and installed binary without checking the executable invoking control.
+  An isolated candidate could therefore control the older installed service.
+  Mutation now compares device/inode from an opened `/proc/self/exe` with an
+  `O_NOFOLLOW` opened trusted `/usr/local/bin/piair`, retaining its descriptor
+  through invocation. Symlink invocations of that same inode work; copies,
+  replaced/deleted executables, missing/untrusted installations and unverifiable
+  process identity fail closed. Existing unit, owner, environment, config and
+  authorization checks remain. Gates cover direct start/stop/restart, menu stops
+  and recovery starts, setup enable/start, and maintenance handoff. Read-only
+  status/logs remain available and label installed service versus invoker.
+  Tests cover same inode, symlink invocation, separate copy, replacement before
+  and after inspection, missing executable, direct controls, menu actions and
+  stop prompts, setup activation, and read-only candidate status. Foreground
+  candidate capture/recording paths do not require installed-executable identity.
+- **Medium QA correctness:** the original combined state checksum could be empty
+  or confuse client identity with HAP credentials. The documented shell now uses
+  independent credential/client/selection baselines, accepts a genuinely empty
+  HAP baseline, and fails for missing baselines/state or deleted/modified saved
+  credentials. Existing client identity is verified; initially absent identity
+  may initialize; reviewed selection changes require private comparison. Private
+  backups are made while stopped, and installed binary/unit/integrity-manifest
+  hashes are checked separately. `scripts/test_manual_qa.py` executes the actual
+  shell blocks from `/` on transient, saved-HAP, multi-receiver, identity,
+  selection-change and missing/modified-file fixtures without exposing secrets.
+- **Low documentation correctness:** the simplified receiver picker has friendly
+  names, rescan and cancellation, with no technical-details menu. SETUP, candidate
+  QA and address-reselection guidance now point to separate `receivers`/`devices`
+  diagnostics; README, DAILY_USE and ADVANCED_USAGE state the same distinction.
+
+No AirPlay authentication, packet encoding or transport timing changes are made.
+File identity checks cannot authorize concurrent privileged replacement of the
+installation; maintenance and administrative changes must remain serialized as
+already documented. Final-commit CI results are recorded in the PR description.
+Real Trixie/Pi/UCA202/HomePod listening, automatic playback, silence cycling and
+cleanup/preservation checks remain manual release blockers. The isolated build
+cannot verify successful installed-candidate systemd activation/capability grants;
+recheck those only after supported official installation.

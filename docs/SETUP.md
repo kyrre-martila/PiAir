@@ -28,8 +28,9 @@ A source checkout is not an installed service.
    16-bit stereo client requirements, then closes it. If a raw `hw:` device
    cannot provide that format, explicitly select its `plughw:` conversion PCM.
    Setup does not silently replace the identifier or choose another card.
-4. Select your AirPlay speaker by its advertised name. Advanced details are
-   available from the picker. A new speaker needs one explicit approval prompt;
+4. Select your AirPlay speaker by its advertised name. The simplified picker
+   offers friendly names, rescan and cancellation. Technical details are available
+   separately with `piair receivers` or `piair devices`, not from the picker. A new speaker needs one explicit approval prompt;
    its advertised name and device ID do not verify its identity. The connection
    choice is saved separately after confirmation. See
    [receiver address binding](RECEIVER_ADDRESS_BINDING.md) if discovery changes.
