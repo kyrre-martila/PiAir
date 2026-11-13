@@ -444,3 +444,94 @@ fn sigint_and_sigterm_during_active_airplay_join_workers_and_preserve_cleanup_fa
         }
     }
 }
+
+#[test]
+fn persistent_updates_preserve_private_state_and_operational_pins() {
+    use crate::cli::PlaybackArgs;
+    for (method, authentication) in [
+        (Method::Transient, Authentication::OwnToneTransient),
+        (Method::PinDisplay, Authentication::StoredHap),
+    ] {
+        let (_dir, loaded, selected) = fixture(method);
+        let store = Store::new(&loaded.path).unwrap();
+        store.save(&credential()).unwrap();
+        let state = loaded.path.parent().unwrap().join("receiver-state");
+        let private_before: Vec<_> = fs::read_dir(&state)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        fs::write(&loaded.path, format!("# keep header\nreceiver_allowlist=['{ID}'] # approval\n[audio]\ndevice='legacy' # device\n")).unwrap();
+        let args = PlaybackArgs {
+            capture_device: Some("synthetic".into()),
+            authentication: Some(authentication),
+            volume_db: Some(-20),
+            ..Default::default()
+        };
+        config::save_playback(&loaded, Some(ID.into()), args).unwrap();
+        let saved = config::load(Some(loaded.path.clone())).unwrap();
+        let runtime = Runtime::prepare(&saved, saved.config.playback.effective().unwrap()).unwrap();
+        assert_eq!(runtime.settings.volume_db, Some(-20));
+        let text = fs::read_to_string(&loaded.path)
+            .unwrap()
+            .replace("volume_db = -20", "volume_db = -20 # volume comment");
+        fs::write(&loaded.path, text).unwrap();
+        config::save_playback(
+            &saved,
+            None,
+            PlaybackArgs {
+                threshold_dbfs: Some(-48.0),
+                preserve_volume: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let changed = config::load(Some(loaded.path.clone())).unwrap();
+        assert_eq!(changed.config.playback.volume_db, None);
+        assert_eq!(changed.config.playback.threshold_dbfs, -48.0);
+        // The running invocation keeps its operational settings, but not trust.
+        runtime.check().unwrap();
+        assert_eq!(runtime.settings.detection.threshold_dbfs, -45.0);
+        assert_eq!(runtime.settings.volume_db, Some(-20));
+        let text = fs::read_to_string(&loaded.path).unwrap();
+        for comment in [
+            "# keep header",
+            "# approval",
+            "# device",
+            "# volume comment",
+        ] {
+            assert!(text.contains(comment));
+        }
+        for (path, bytes) in private_before {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+        assert!(store.selection().unwrap() == Some(selected));
+        let before = fs::read(&loaded.path).unwrap();
+        assert!(config::save_playback(
+            &changed,
+            Some("device:112233445566".into()),
+            PlaybackArgs::default()
+        )
+        .is_err());
+        assert!(config::save_playback(
+            &changed,
+            None,
+            PlaybackArgs {
+                authentication: Some(if authentication == Authentication::StoredHap {
+                    Authentication::OwnToneTransient
+                } else {
+                    Authentication::StoredHap
+                }),
+                ..Default::default()
+            }
+        )
+        .is_err());
+        assert_eq!(fs::read(&loaded.path).unwrap(), before);
+        fs::write(&loaded.path, "receiver_allowlist=[]").unwrap();
+        assert!(runtime.check().is_err());
+        assert!(config::save_playback(&changed, None, PlaybackArgs::default()).is_err());
+    }
+}

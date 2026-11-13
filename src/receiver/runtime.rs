@@ -19,7 +19,10 @@ use std::{
 mod instance;
 pub(super) use instance::InstanceLock;
 
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub enum Authentication {
     StoredHap,
     OwnToneTransient,
@@ -33,15 +36,10 @@ pub struct Settings {
     pub volume_db: Option<i32>,
 }
 impl Settings {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         super::exact_id(&self.receiver_id)?;
         self.detection.validate()?;
-        ensure!(
-            !self.capture_device.trim().is_empty()
-                && self.capture_device.len() <= 256
-                && !self.capture_device.chars().any(char::is_control),
-            "invalid ALSA device"
-        );
+        config::validate_capture_device(&self.capture_device)?;
         ensure!(
             self.volume_db.is_none_or(|v| (-60..=-10).contains(&v)),
             "volume must be -60..=-10 dB"

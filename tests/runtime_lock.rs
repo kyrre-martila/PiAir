@@ -177,6 +177,53 @@ fn automatic_processes_exclude_each_other_and_kernel_releases_lock_on_exit() {
     );
     successor.ready();
     assert!(successor.signal("-TERM").success());
+    // The same process/authorization path works with persisted settings alone.
+    let output = Command::new(env!("CARGO_BIN_EXE_piair"))
+        .arg("--config")
+        .arg(&first_config)
+        .args([
+            "config",
+            "set-playback",
+            ID,
+            "--capture-device",
+            "null",
+            "--authentication",
+            "own-tone-transient",
+            "--threshold-dbfs",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let missing_opt_in = Command::new(env!("CARGO_BIN_EXE_piair"))
+        .arg("--config")
+        .arg(&first_config)
+        .arg("run")
+        .output()
+        .unwrap();
+    assert_eq!(missing_opt_in.status.code(), Some(2));
+    let mut saved_command = Command::new(env!("CARGO_BIN_EXE_piair"));
+    saved_command
+        .arg("--config")
+        .arg(&first_config)
+        .args(["run", "--allow-unattended"]);
+    let mut saved = Process::spawn(saved_command, dir.path().join("saved.log"));
+    saved.ready();
+    let text = fs::read_to_string(&first_config).unwrap();
+    fs::write(
+        &first_config,
+        text.replace("threshold_dbfs = 0.0", "threshold_dbfs = -48.0"),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(saved.child.try_wait().unwrap().is_none());
+    fs::write(&first_config, "receiver_allowlist=[]").unwrap();
+    assert_eq!(saved.wait().code(), Some(1));
+    assert!(saved.output().contains("approval revoked"));
     for root in ["first", "other"] {
         let state = dir.path().join(root).join("receiver-state");
         assert_eq!(

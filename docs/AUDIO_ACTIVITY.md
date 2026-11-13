@@ -1,3 +1,10 @@
+> Scope: this specification describes the legacy `[audio]` monitor/calibration
+> detector in `audio/detector.rs`. Automatic AirPlay uses the existing independent
+> single-threshold detector in `audio/activity.rs` and `[playback]` settings for
+> `run`; see [RUNTIME.md](RUNTIME.md#persistent-playback-configuration). Calibration
+> only changes `[audio]` thresholds and is not converted into automatic settings.
+> Historical future-session requirements below are not a description of that runtime.
+
 # Audio activity detector: binding specification
 
 This document is normative for detector and future session work. Capture,

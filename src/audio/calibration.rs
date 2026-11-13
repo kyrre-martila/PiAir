@@ -1,10 +1,8 @@
 use super::{capture, detector::Meter};
 use crate::config::{Config, Loaded};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::{
-    fs::{self, OpenOptions},
     io::{self, Write},
-    path::Path,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -84,54 +82,19 @@ fn render(original: &str, proposal: &Proposal) -> Result<String> {
     Ok(text)
 }
 
-fn read_optional(path: &Path) -> Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).context("cannot read calibration config"),
-    }
-}
-
-fn save(path: &Path, expected: Option<&str>, rendered: &str) -> Result<()> {
-    if read_optional(path)?.as_deref() != expected {
+#[cfg(test)]
+fn save(path: &std::path::Path, expected: Option<&str>, rendered: &str) -> Result<()> {
+    let snapshot = crate::allowlist::snapshot(path)?;
+    if snapshot.as_ref().map(|s| s.text.as_str()) != expected {
         bail!("configuration changed during calibration; refusing to overwrite");
     }
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)?;
-    }
-    // Same-directory temp file, never truncate the original on a failed write.
-    let temporary = path.with_extension(format!("toml.calibration-{}.tmp", std::process::id()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
-    let result = (|| -> Result<()> {
-        if expected.is_some() {
-            file.set_permissions(fs::metadata(path)?.permissions())?;
-        }
-        file.write_all(rendered.as_bytes())?;
-        file.sync_all()?;
-        if read_optional(path)?.as_deref() != expected {
-            bail!("configuration changed; refusing to overwrite");
-        }
-        if expected.is_none() {
-            // Atomic create-if-absent: a concurrent newly created config is safe.
-            fs::hard_link(&temporary, path)?;
-            fs::remove_file(&temporary)?;
-        } else {
-            fs::rename(&temporary, path)?;
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    crate::allowlist::save(path, snapshot.as_ref(), rendered)
 }
 
 pub fn run(loaded: &Loaded, duration: Option<u64>, running: &AtomicBool) -> Result<()> {
+    println!("Calibration updates [audio] monitor thresholds only; automatic playback uses [playback] and is unchanged.");
     let settings = &loaded.config.audio;
-    let original = read_optional(&loaded.path)?;
+    let original = crate::allowlist::snapshot(&loaded.path)?;
     if !confirm("Stop the music source and keep hardware gain at its normal setting. Is the source stopped?")? {
         println!("Calibration cancelled; nothing saved.");
         return Ok(());
@@ -191,11 +154,11 @@ pub fn run(loaded: &Loaded, duration: Option<u64>, running: &AtomicBool) -> Resu
         loaded.path.display()
     );
     println!("Before accepting calibration, test your quietest intended music: it must exceed start for the start duration, and quiet passages must not satisfy stop for the stop duration. Values remain provisional until tested. Stationary music/noise cannot always be distinguished.");
-    let rendered = render(original.as_deref().unwrap_or(""), &proposal)?;
+    let rendered = render(original.as_ref().map_or("", |s| s.text.as_str()), &proposal)?;
     if confirm("Save these two thresholds to the displayed configuration file?")?
         && running.load(Ordering::Relaxed)
     {
-        save(&loaded.path, original.as_deref(), &rendered)?;
+        crate::allowlist::save(&loaded.path, original.as_ref(), &rendered)?;
         println!("Saved. Run audio monitor with quiet music and a long stopped-source recording.");
     } else {
         println!("Calibration not saved.");
@@ -206,6 +169,7 @@ pub fn run(loaded: &Loaded, duration: Option<u64>, running: &AtomicBool) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn statistics_margins_and_rejections() {

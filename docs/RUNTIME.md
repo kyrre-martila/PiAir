@@ -19,7 +19,7 @@ First explicitly approve and persistently select the intended receiver through
 PiAir's existing allowlist and selection workflows. Review its stable ID, endpoint,
 capabilities and access policy. Persistent HAP requires existing valid enrolled
 credentials. OwnTone transient requires an explicit saved `--method transient`
-selection and the explicit authentication argument below. It provides no verified
+selection and an explicit authentication profile from CLI or `[playback]`. It provides no verified
 persistent receiver identity and is never a fallback for failed HAP authentication.
 
 For the verified UCA202 configuration, substitute the exact approved receiver ID:
@@ -35,10 +35,10 @@ piair --config /path/to/config.toml run device:0123456789ab \
 ```
 
 Optionally add `--volume-db -20`; this changes the receiver's volume and may persist
-when PiAir exits. Omitting volume preserves it. Use `--authentication stored-hap`
+when PiAir exits. Omitting volume preserves it when no volume is stored; `--preserve-volume` overrides a stored volume. Use `--authentication stored-hap`
 for an already paired receiver selected with a persistent method. There is no
 inferred authentication profile. The threshold and duration values above are
-also the run command's defaults; capture device and receiver remain explicit.
+also the retained runtime numeric defaults, not universal recommendations; device, receiver and authentication must be supplied explicitly in CLI or TOML.
 
 `--allow-unattended` is required on each `run` invocation, applies only to its
 receiver/settings, and bypasses no other command's terminal confirmation. It is
@@ -48,9 +48,78 @@ settings. Neither a TTY nor root is required. Existing Linux PTP port permission
 still apply; see [PTP_PORT_PERMISSIONS.md](PTP_PORT_PERMISSIONS.md). This command
 does not grant capabilities or change system permissions.
 
-The existing TOML configuration and private receiver-state files remain compatible.
-No new persistent configuration format or environment-based permission is added.
-Persistent configuration unification is deferred to PR #70.
+## Persistent playback configuration
+
+`[playback]` is additive; existing `[audio]`, approval and private receiver-state
+files remain compatible without migration or re-enrollment. No secrets, endpoint
+pins or credentials belong in this table. The ID references the approved,
+persistently selected receiver; it never establishes trust.
+
+| Key | Default / requirement | Validation |
+| --- | --- | --- |
+| `capture_device` | Required explicitly | Nonblank ALSA identifier, <=256 bytes, no controls |
+| `receiver_id` | Required explicitly | Canonical `device:<12 lowercase hex digits>`, no zero/broadcast |
+| `authentication` | Required explicitly | `stored-hap` or `own-tone-transient`, matching selected profile |
+| `threshold_dbfs` | -45.0 | Finite -120..=0 dBFS |
+| `start_duration_ms` | 1000 | 20..=9000 ms |
+| `stop_duration_ms` | 30000 | 20..=120000 ms |
+| `volume_db` | Absent: preserve receiver volume | Integer -60..=-10 dB |
+
+See `config.example.toml` for a Behringer UCA202 / approved HomePod example.
+These are proven values for one setup, not general hardware recommendations.
+Automatic RMS windows and qualification semantics remain unchanged (20 ms windows;
+start and stop are observed at window boundaries).
+
+Save using the existing config command hierarchy:
+
+```sh
+piair config set-playback device:0123456789ab \
+  --capture-device 'plughw:CARD=CODEC,DEV=0' \
+  --authentication own-tone-transient
+piair config set-playback --threshold-dbfs -48 --volume-db -20
+piair config set-playback --preserve-volume
+piair config check
+piair config show
+piair run --allow-unattended
+```
+
+Replace the placeholder ID; approve and select it first using existing workflows.
+The scriptable setter patches omitted values from the current file and validates
+all effective settings and local authorization before saving, with no receiver
+contact, discovery, audio, pairing, approval or selection writes. Unknown/invalid
+settings cause refusal with the original file intact. TOML comments, unrelated
+values and allowlist entries are retained. `config show` displays effective values
+without writing; absent required fields remain absent.
+
+Explicit `run` CLI values override stored `[playback]` values, which override the
+numeric defaults above. `--preserve-volume` overrides stored volume for one run.
+An explicitly provided positional receiver ID overrides the stored ID but must
+still match current approval and persistent selection. Missing required settings
+fail before capture or discovery. Authentication never falls back.
+
+All configuration writers (setter, allowlist and calibration) share a nonblocking
+lock on the parent directory inode, held through snapshot comparison and atomic
+publication. A same-directory private temporary file is flushed and renamed, then
+the directory is synced. Existing owner/group and permissions are preserved;
+incompatible ownership, read-only files, hard links, symlink files/ancestors and
+unsafe writable parent directories are rejected. Missing directories are created
+privately. Writers detect changed content and inode/metadata and ask the operator
+to rerun. External editors must honor this directory lock to serialize the final
+check/rename boundary; arbitrary noncooperating same-user edits cannot be made
+transactional. A directory sync error can mean the file was saved but durability
+was not confirmed. Receiver-state files are never rewritten by configuration saves.
+
+`[audio]` remains authoritative only for legacy `audio monitor` and `audio calibrate`.
+It has separate start/stop thresholds and different hysteresis semantics;
+calibration does not configure automatic playback. No implicit conversion is made.
+Choose and test automatic thresholds explicitly on your hardware.
+
+Operational settings are fixed at invocation startup. Restart explicitly to apply
+changes to device, threshold, durations, volume or playback profile/ID. This does
+not cache authorization: removal of approval, selection changes and stored HAP
+credential revocation still terminate via existing runtime and wire/media checks.
+Invalid configuration during execution also fails closed. Saving cannot authorize
+unattended playback; `--allow-unattended` is mandatory every time.
 
 ## Concurrent automatic instances
 
@@ -115,7 +184,7 @@ shutdown guarantee by an in-process thread join.
 - **1**: another automatic instance already running, lock acquisition failure,
   configuration, authorization, capture or runtime failure, signal-handler
   registration failure, or unsuccessful bounded teardown during cancellation.
-- **2**: CLI syntax/argument error, including missing unattended opt-in or profile.
+- **2**: CLI syntax/argument error, including missing unattended opt-in or invalid profile syntax. A missing profile in both CLI and config is a configuration error (1).
 
 Recoverable session failures are logged and retried while the runtime remains
 active. Lifecycle events (`monitoring`, `authentication`, `negotiation`, `playback`,
