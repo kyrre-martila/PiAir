@@ -12,7 +12,8 @@ succeeds even before the PiAir template exists. Nonzero inventory results still
 fail; connection and permission errors are never converted to empty results.
 Inventory rows and service properties are validated before safety decisions.
 
-`systemctl show` is also allowed to return status 1 only for a complete,
+`systemctl show --all` explicitly includes empty properties (which systemctl
+otherwise omits). It is also allowed to return status 1 only for a complete,
 consistent `LoadState=not-found`, inactive, PID 0 record with all service-specific
 properties empty and no diagnostic on stderr. Loaded units returning nonzero,
 missing or duplicate properties, and unexpected load states fail safely.

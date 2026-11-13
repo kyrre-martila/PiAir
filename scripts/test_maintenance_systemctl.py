@@ -47,6 +47,7 @@ class SystemctlTests(unittest.TestCase):
             if command == 'list-units':
                 return subprocess.CompletedProcess(args, 0, loaded, '')
             if command == 'show':
+                self.assertIn('--all', args)
                 return subprocess.CompletedProcess(args, code, output, '')
             return subprocess.CompletedProcess(args, 0, '', '')
         return execute, calls

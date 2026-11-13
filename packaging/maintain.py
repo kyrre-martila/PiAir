@@ -158,7 +158,7 @@ class Services:
 
     def properties(self, unit):
         fields = "LoadState,ActiveState,User,FragmentPath,DropInPaths,Environment,EnvironmentFiles,MainPID,UnitFileState,ExecStart,WorkingDirectory"
-        args = ("/usr/bin/systemctl", "--system", "--no-pager", "show", unit, "--property=" + fields)
+        args = ("/usr/bin/systemctl", "--system", "--no-pager", "show", unit, "--all", "--property=" + fields)
         result = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         properties = {}
         for line in result.stdout.splitlines():
