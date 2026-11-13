@@ -224,8 +224,23 @@ class Services:
     def reload(self):
         self.ctl("daemon-reload")
 
+    def boot_state(self, unit):
+        boot = self.properties(unit).get("UnitFileState")
+        require(boot in ("enabled", "disabled"),
+                "Custom/unknown service boot state requires manual review: " + unit)
+        return boot
+
     def disable(self, unit):
         self.ctl("disable", unit)
+
+    def restore_boot(self, uid, unit, boot):
+        # Recheck the caller's stock service after unmask/reload. Never use --now.
+        own, active = self.inspect(uid)
+        require(own == unit and not active, "Cannot restore boot state for a different or active service")
+        require(boot in ("enabled", "disabled"), "Invalid saved boot state")
+        if self.boot_state(unit) != boot:
+            self.ctl("enable" if boot == "enabled" else "disable", unit)
+        require(self.boot_state(unit) == boot, "Original boot state was not restored: " + unit)
 
     def start(self, unit):
         self.ctl("start", unit)
@@ -320,7 +335,9 @@ class Installation:
             shutil.rmtree(journal)
             return None
         state = json.loads(state_path.read_text())
-        require(set(state) == {"unit", "old", "masked"}, "Invalid recovery journal")
+        require(set(state) in ({"unit", "old", "masked"}, {"unit", "old", "masked", "boot"}),
+                "Invalid recovery journal")
+        require("boot" not in state or state["boot"] in ("enabled", "disabled"), "Invalid saved boot state")
         for name, (dest, mode) in FILES.items():
             p = self.path(dest)
             if state["old"]:
@@ -354,7 +371,7 @@ class Installation:
         except OSError as error:
             print(f"Application files committed; backup cleanup pending: {error}")
 
-    def prepare(self, old, unit):
+    def prepare(self, old, unit, boot=None):
         journal = self.path(JOURNAL)
         require(not journal.exists(), "Interrupted transaction; run piair update to recover first")
         journal.mkdir(mode=0o700, parents=True)
@@ -362,7 +379,12 @@ class Installation:
             for name, (dest, mode) in FILES.items():
                 self.atomic(journal / name, self.path(dest).read_bytes(), mode)
             self.atomic(journal / "installation.json", self.path(MANIFEST).read_bytes(), 0o644)
-        self.atomic(journal / "state.json", json.dumps({"unit": unit, "old": bool(old), "masked": True}).encode(), 0o600)
+        state = {"unit": unit, "old": bool(old), "masked": True}
+        if boot is not None:
+            require(boot in ("enabled", "disabled"), "Invalid saved boot state")
+            state["boot"] = boot
+        self.atomic(journal / "state.json", json.dumps(state).encode(), 0o600)
+        self.sync(journal.parent)  # Persist the journal directory before changing boot links.
 
     def replace(self, files, v):
         # Every file is replaced by rename; a crash is recovered from durable backups.
@@ -393,6 +415,22 @@ class Installation:
                 self.path(path).rmdir()
             except OSError:
                 pass
+
+
+def restore_services(services, uid, unit, state):
+    require(state is None or state["unit"] == unit, "Recovery service differs from the current account")
+    try:
+        services.reload()
+        if state:
+            services.unguard(unit)
+            if "boot" in state:
+                services.restore_boot(uid, unit, state["boot"])
+    except Exception as error:
+        boot = state.get("boot") if state else None
+        boot_warning = (f"Original boot state {boot!r} could not be verified/restored. "
+                        if boot is not None else "")
+        raise RuntimeError(f"Service recovery failed for {unit}; {boot_warning}"
+                           f"Recovery journal retained: {error}") from error
 
 
 def restart_offer(services, unit):
@@ -426,10 +464,12 @@ def commit(action, archive=None, v=None, services=None, installation=None):
                 require(json.loads(state_path.read_text()).get("unit") == unit,
                         "Interrupted maintenance belongs to another account; recover as that account")
             with runtime_locks():
-                state = install.recover()
-                services.reload()
-                if state:
-                    services.unguard(state["unit"])
+                try:
+                    state = install.recover()
+                except Exception as error:
+                    raise RuntimeError("Application recovery incomplete; boot startup has not been restored. "
+                                       f"Recovery journal retained: {error}") from error
+                restore_services(services, uid, unit, state)
                 install.clear_journal() if install.path(JOURNAL).exists() else None
             print("Previous installation restored. Run piair update again to retry.")
             if state and state["old"]:
@@ -439,7 +479,7 @@ def commit(action, archive=None, v=None, services=None, installation=None):
         require(action in ("install", "uninstall"), "No interrupted transaction to recover")
         old = install.read_manifest()
         unit, active = services.inspect(uid, removing=action == "uninstall")
-        files = None
+        files, boot = None, None
         if action == "install":
             version(v)
             if old:
@@ -456,6 +496,7 @@ def commit(action, archive=None, v=None, services=None, installation=None):
         else:
             require(old is not None, "No managed PiAir installation found")
             install.validate_removal()
+            boot = services.boot_state(unit)
             print("Remove these known PiAir-owned files:")
             for destination, _ in FILES.values():
                 print("  " + destination)
@@ -465,11 +506,11 @@ def commit(action, archive=None, v=None, services=None, installation=None):
         if active:
             require(confirm(f"{unit} is running. Stop it for {action}?"), "Service stop declined; nothing changed")
             services.quiesce(unit)
-        if action == "uninstall":
-            services.disable(unit)
-        # Guard before touching files; persist the guard information for crash recovery.
+        # Journal the original boot state before disabling or touching installed files.
         try:
-            install.prepare(old, unit)
+            install.prepare(old, unit, boot)
+            if action == "uninstall":
+                services.disable(unit)
             services.guard(unit)
             with runtime_locks():
                 services.inspect(uid, removing=action == "uninstall", recovery=True)
@@ -485,13 +526,14 @@ def commit(action, archive=None, v=None, services=None, installation=None):
             try:
                 with runtime_locks():
                     state = install.recover()
-                    services.reload()
-                    services.unguard(unit)
+                    restore_services(services, uid, unit, state)
                     if state:
                         install.clear_journal()
             except BaseException as rollback_error:
+                boot_warning = "Original boot startup has not been verified/restored. " if boot is not None else ""
                 raise RuntimeError(f"{original}; rollback incomplete: {rollback_error}. "
-                                   "Leave playback stopped and run piair update for recovery; see docs/INSTALL.md") from original
+                                   f"{boot_warning}Leave playback stopped and run piair update for recovery; "
+                                   "see docs/INSTALL.md") from original
             print("Installation failed; previous application files restored. User data unchanged." if state else
                   "Maintenance finalization failed; inspect installed version and service status. User data unchanged.")
             if old and active:

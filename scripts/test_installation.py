@@ -222,9 +222,18 @@ class ServiceMock:
             error, self.fail = self.fail, None
             raise error
 
+    def boot_state(self, unit):
+        self.events.append("boot_state")
+        return "enabled" if self.enabled else "disabled"
+
     def disable(self, unit):
         self.events.append("disable")
         self.enabled = False
+
+    def restore_boot(self, uid, unit, boot):
+        assert unit == "piair@test.service"
+        self.events.append("restore_boot:" + boot)
+        self.enabled = boot == "enabled"
 
     def start(self, unit):
         self.events.append("start")
@@ -380,6 +389,149 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(self.i.path("/usr/local/bin/piair").exists())
         self.assertEqual(self.snapshot(), self.before)
         self.assertIn("disable", self.service.events)
+
+    def test_uninstall_failure_points_restore_original_boot_state(self):
+        for enabled in (True, False):
+            for point in ("prepare", "disable", "guard", "remove", "reload"):
+                with self.subTest(enabled=enabled, point=point):
+                    old = self.seed()
+                    self.service = ServiceMock(active=True)
+                    self.service.enabled = enabled
+                    disabled = False
+                    real_disable = self.service.disable
+                    def disable(unit):
+                        nonlocal disabled
+                        saved = json.loads(self.i.path(m.JOURNAL / "state.json").read_text())
+                        self.assertEqual(saved["boot"], "enabled" if enabled else "disabled")
+                        self.assertEqual(saved["unit"], unit)
+                        real_disable(unit)
+                        disabled = True
+                        if point == "disable":
+                            raise RuntimeError("disable failed after changing boot state")
+                    with contextlib.ExitStack() as stack:
+                        stack.enter_context(patch.object(self.service, "disable", side_effect=disable))
+                        if point == "prepare":
+                            stack.enter_context(patch.object(self.i, "prepare", side_effect=OSError("prepare failed")))
+                        elif point == "guard":
+                            stack.enter_context(patch.object(self.service, "guard", side_effect=RuntimeError("guard failed")))
+                        elif point == "remove":
+                            def partial_remove():
+                                self.i.path("/usr/local/bin/piair").unlink()
+                                raise OSError("remove failed")
+                            stack.enter_context(patch.object(self.i, "remove", side_effect=partial_remove))
+                        elif point == "reload":
+                            self.service.fail = RuntimeError("reload failed")
+                        with self.assertRaisesRegex((OSError, RuntimeError), point + " failed"):
+                            self.commit("uninstall", answers=(True, True, False))
+                    self.assertEqual(disabled, point != "prepare")
+                    self.assertEqual(self.service.enabled, enabled)
+                    self.assertFalse(self.service.active)
+                    self.assertNotIn("start", self.service.events)
+                    self.assertEqual(self.i.read_manifest(), old)
+                    self.assertFalse(self.i.path(m.JOURNAL).exists())
+                    self.assertEqual(self.snapshot(), self.before)
+
+    def test_partial_preparation_failure_does_not_disable_boot(self):
+        old = self.seed()
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                self.service = ServiceMock()
+                self.service.enabled = enabled
+                real_atomic = self.i.atomic
+                def atomic(path, data, mode):
+                    if path == self.i.path(m.JOURNAL / "state.json"):
+                        raise OSError("journal preparation failed")
+                    return real_atomic(path, data, mode)
+                with patch.object(self.i, "atomic", side_effect=atomic):
+                    with self.assertRaisesRegex(OSError, "journal preparation failed"):
+                        self.commit("uninstall", answers=(True,))
+                self.assertEqual(self.service.enabled, enabled)
+                self.assertNotIn("disable", self.service.events)
+                self.assertEqual(self.i.read_manifest(), old)
+                self.assertFalse(self.i.path(m.JOURNAL).exists())
+
+    def test_interrupted_uninstall_recovery_restores_durable_boot_state(self):
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                old = self.seed()
+                self.service = ServiceMock()
+                self.service.enabled = enabled
+                self.i.prepare(old, "piair@test.service", "enabled" if enabled else "disabled")
+                self.service.disable("piair@test.service")
+                self.i.path("/usr/local/bin/piair").unlink()
+                # New invocation uses only the persisted record, not the old local variable.
+                self.commit("recover", answers=(True, False))
+                self.assertEqual(self.service.enabled, enabled)
+                self.assertNotIn("start", self.service.events)
+                self.assertEqual(self.i.read_manifest(), old)
+                self.assertFalse(self.i.path(m.JOURNAL).exists())
+                self.assertEqual(self.snapshot(), self.before)
+
+    def test_boot_restore_failure_keeps_journal_for_retry(self):
+        old = self.seed()
+        self.service.fail = RuntimeError("reload failed")
+        with patch.object(self.service, "restore_boot", side_effect=RuntimeError("enable authorization failed")):
+            with self.assertRaisesRegex(RuntimeError, "boot state.*could not be verified/restored.*enable authorization failed"):
+                self.commit("uninstall", answers=(True,))
+        self.assertFalse(self.service.enabled)
+        self.assertEqual(self.i.read_manifest(), old)
+        self.assertTrue(self.i.path(m.JOURNAL / "state.json").exists())
+        self.assertNotIn("start", self.service.events)
+        self.commit("recover", answers=(True, False))
+        self.assertTrue(self.service.enabled)
+        self.assertFalse(self.i.path(m.JOURNAL).exists())
+
+    def test_failed_rollback_reload_reports_boot_restore_pending(self):
+        self.seed()
+        with patch.object(self.service, "reload", side_effect=RuntimeError("reload unavailable")):
+            with self.assertRaisesRegex(RuntimeError, "Original boot startup has not been verified/restored"):
+                self.commit("uninstall", answers=(True,))
+        self.assertFalse(self.service.enabled)
+        self.assertTrue(self.i.path(m.JOURNAL).exists())
+        self.commit("recover", answers=(True, False))
+        self.assertTrue(self.service.enabled)
+        self.assertNotIn("start", self.service.events)
+
+    def test_interrupted_uninstall_failed_boot_recovery_retains_journal(self):
+        old = self.seed()
+        self.i.prepare(old, "piair@test.service", "enabled")
+        self.service.enabled = False
+        self.i.path("/usr/local/bin/piair").unlink()
+        with patch.object(self.service, "restore_boot", side_effect=RuntimeError("systemd authorization denied")):
+            with self.assertRaisesRegex(RuntimeError, "boot state.*could not be verified/restored.*authorization denied"):
+                self.commit("recover", answers=(True,))
+        self.assertTrue(self.i.path(m.JOURNAL).exists())
+        self.assertEqual(self.i.read_manifest(), old)
+        self.assertFalse(self.service.enabled)
+        self.assertNotIn("start", self.service.events)
+        self.commit("recover", answers=(True, False))
+        self.assertTrue(self.service.enabled)
+        self.assertFalse(self.i.path(m.JOURNAL).exists())
+
+    def test_recovery_refuses_other_accounts_boot_record(self):
+        old = self.seed()
+        self.i.prepare(old, "piair@other.service", "enabled")
+        self.service.enabled = False
+        with self.assertRaisesRegex(RuntimeError, "another account"):
+            self.commit("recover", answers=(True,))
+        self.assertFalse(self.service.enabled)
+        self.assertNotIn("restore_boot:enabled", self.service.events)
+        self.assertTrue(self.i.path(m.JOURNAL).exists())
+
+    def test_successful_uninstall_disables_enabled_or_disabled_service(self):
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                self.seed()
+                self.service = ServiceMock()
+                self.service.enabled = enabled
+                self.commit("uninstall", answers=(True,))
+                self.assertFalse(self.service.enabled)
+                self.assertIn("disable", self.service.events)
+                self.assertNotIn("restore_boot:enabled", self.service.events)
+                self.assertNotIn("start", self.service.events)
+                self.assertFalse(self.i.path("/usr/local/bin/piair").exists())
+                self.assertFalse(self.i.path(m.JOURNAL).exists())
+                self.assertEqual(self.snapshot(), self.before)
 
     def test_uninstall_refuses_unexpected_files(self):
         self.seed()
@@ -571,6 +723,36 @@ class ReleaseTests(unittest.TestCase):
             pw.return_value.pw_name = "test"
             with self.assertRaisesRegex(RuntimeError, "Customized"):
                 svc.inspect(1000)
+
+    def test_boot_restore_checks_identity_and_never_starts_service(self):
+        svc = m.Services()
+        for boot in ("enabled", "disabled"):
+            with self.subTest(boot=boot), patch.object(svc, "inspect", return_value=("piair@test.service", False)), \
+                    patch.object(svc, "boot_state", side_effect=["disabled" if boot == "enabled" else "enabled", boot]), \
+                    patch.object(svc, "ctl") as ctl:
+                svc.restore_boot(1000, "piair@test.service", boot)
+                self.assertEqual([call.args for call in ctl.call_args_list],
+                                 [("enable" if boot == "enabled" else "disable", "piair@test.service")])
+        for unit, active in (("piair@other.service", False), ("piair@test.service", True)):
+            with self.subTest(unit=unit, active=active), patch.object(svc, "inspect", return_value=(unit, active)), \
+                    patch.object(svc, "ctl") as ctl:
+                with self.assertRaisesRegex(RuntimeError, "different or active service"):
+                    svc.restore_boot(1000, "piair@test.service", "enabled")
+                ctl.assert_not_called()
+
+    def test_boot_restore_checks_systemd_result_after_enable(self):
+        svc = m.Services()
+        with patch.object(svc, "inspect", return_value=("piair@test.service", False)), \
+                patch.object(svc, "boot_state", return_value="disabled"), patch.object(svc, "ctl"):
+            with self.assertRaisesRegex(RuntimeError, "Original boot state was not restored"):
+                svc.restore_boot(1000, "piair@test.service", "enabled")
+
+    def test_boot_state_refuses_custom_or_unknown_enablement(self):
+        svc = m.Services()
+        for boot in (None, "masked", "enabled-runtime", "linked", "static"):
+            with self.subTest(boot=boot), patch.object(svc, "properties", return_value={"UnitFileState": boot}):
+                with self.assertRaisesRegex(RuntimeError, "boot state requires manual review"):
+                    svc.boot_state("piair@test.service")
 
     def test_service_guard_survives_reboot_without_changing_boot_enablement(self):
         service = m.Services()

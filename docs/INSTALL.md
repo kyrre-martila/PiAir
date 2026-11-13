@@ -134,6 +134,10 @@ systemctl status piair@USERNAME.service
 - **Interrupted update:** run `piair update` again. It offers to restore the
   previous application before retrying; it never starts playback without asking.
   A durable transaction keeps the old binary, stock template and resources together.
+  A failed or interrupted uninstall also restores your service's original boot
+  enablement during recovery, without starting playback. If boot-state restoration
+  fails, the journal is retained and the error is reported; retry recovery after
+  fixing the systemd/authorization problem. Custom boot states need manual review.
   Until recovery completes, the affected service may be masked. If the
   executable/helper is unavailable after an interrupted first install/uninstall,
   an administrator can run the root-owned backup helper:
