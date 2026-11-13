@@ -292,8 +292,9 @@ class ReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "piair"
             binary.write_bytes(fake_elf())
-            package = r.package(binary, Path(tmp) / "dist", "v0.1.0")
-            content = m.unpack(package.read_bytes(), "0.1.0", m.digest(package.read_bytes()))
+            current = r.tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+            package = r.package(binary, Path(tmp) / "dist", "v" + current)
+            content = m.unpack(package.read_bytes(), current, m.digest(package.read_bytes()))
             self.assertEqual(set(content), set(m.FILES))
             for name in [m.WAV, "LICENSE.md"]:
                 self.assertEqual(content["audio/" + name], (ROOT / "tests/assets/audio" / name).read_bytes())
