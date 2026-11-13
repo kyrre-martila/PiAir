@@ -93,7 +93,7 @@ class SystemctlTests(unittest.TestCase):
                     self.inspect(failure=(command, code, stdout, stderr))
         with patch.object(m.subprocess, 'run', side_effect=OSError('execution failed')):
             with self.assertRaises(OSError):
-                m.Services().inspect(1000)
+                m.Services().properties('piair@test.service')
 
     def test_malformed_or_inconsistent_properties_and_inventory(self):
         for output in ('', 'garbage', record() + 'MainPID=0\n', record(LoadState='error'),
