@@ -682,12 +682,7 @@ mod tests {
                     was_running,
                     &AtomicBool::new(false),
                     outcome,
-                    || {
-                        // A failed stop or a concurrent service transition must not let a
-                        // candidate offer a recovery start of the installed service.
-                        drop(service::require_installed_executable()?);
-                        safe_saved_settings(&loaded.path)
-                    },
+                    || safe_saved_settings(&loaded.path),
                     |saved| {
                         assert_eq!(
                             saved.config.playback.receiver_id,
@@ -733,12 +728,7 @@ mod tests {
             true,
             &AtomicBool::new(false),
             Err(anyhow::anyhow!("partial save")),
-            || {
-                // A failed stop or a concurrent service transition must not let a
-                // candidate offer a recovery start of the installed service.
-                drop(service::require_installed_executable()?);
-                safe_saved_settings(&loaded.path)
-            },
+            || safe_saved_settings(&loaded.path),
             |_| panic!("inconsistent settings must not start"),
         )
         .unwrap();
@@ -822,12 +812,7 @@ mod tests {
             true,
             &AtomicBool::new(false),
             Err(Cancelled.into()),
-            || {
-                // A failed stop or a concurrent service transition must not let a
-                // candidate offer a recovery start of the installed service.
-                drop(service::require_installed_executable()?);
-                safe_saved_settings(&loaded.path)
-            },
+            || safe_saved_settings(&loaded.path),
             |_| panic!("manual runtime owns lock"),
         )
         .unwrap();
@@ -941,12 +926,7 @@ mod tests {
             true,
             &AtomicBool::new(false),
             Err(failure),
-            || {
-                // A failed stop or a concurrent service transition must not let a
-                // candidate offer a recovery start of the installed service.
-                drop(service::require_installed_executable()?);
-                safe_saved_settings(&loaded.path)
-            },
+            || safe_saved_settings(&loaded.path),
             |_| {
                 started = true;
                 Ok(())
@@ -964,12 +944,7 @@ mod tests {
             true,
             &AtomicBool::new(false),
             Err(Cancelled.into()),
-            || {
-                // A failed stop or a concurrent service transition must not let a
-                // candidate offer a recovery start of the installed service.
-                drop(service::require_installed_executable()?);
-                safe_saved_settings(&loaded.path)
-            },
+            || safe_saved_settings(&loaded.path),
             |_| panic!("saved credentials were revoked"),
         )
         .unwrap();
