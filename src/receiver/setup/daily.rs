@@ -199,7 +199,12 @@ fn stopped_action<R: FnMut() -> Result<String>, W: Write>(
         was_running,
         cancel,
         outcome,
-        || safe_saved_settings(&loaded.path),
+        || {
+            // A failed stop or a concurrent service transition must not let a
+            // candidate offer a recovery start of the installed service.
+            drop(service::require_installed_executable()?);
+            safe_saved_settings(&loaded.path)
+        },
         // Confirmation may take time: reload/check again immediately before
         // requesting activation, rather than using the pre-prompt snapshot.
         |saved| service::control(&safe_saved_settings(&saved.path)?, "start"),
@@ -677,7 +682,12 @@ mod tests {
                     was_running,
                     &AtomicBool::new(false),
                     outcome,
-                    || safe_saved_settings(&loaded.path),
+                    || {
+                        // A failed stop or a concurrent service transition must not let a
+                        // candidate offer a recovery start of the installed service.
+                        drop(service::require_installed_executable()?);
+                        safe_saved_settings(&loaded.path)
+                    },
                     |saved| {
                         assert_eq!(
                             saved.config.playback.receiver_id,
@@ -723,7 +733,12 @@ mod tests {
             true,
             &AtomicBool::new(false),
             Err(anyhow::anyhow!("partial save")),
-            || safe_saved_settings(&loaded.path),
+            || {
+                // A failed stop or a concurrent service transition must not let a
+                // candidate offer a recovery start of the installed service.
+                drop(service::require_installed_executable()?);
+                safe_saved_settings(&loaded.path)
+            },
             |_| panic!("inconsistent settings must not start"),
         )
         .unwrap();
@@ -807,7 +822,12 @@ mod tests {
             true,
             &AtomicBool::new(false),
             Err(Cancelled.into()),
-            || safe_saved_settings(&loaded.path),
+            || {
+                // A failed stop or a concurrent service transition must not let a
+                // candidate offer a recovery start of the installed service.
+                drop(service::require_installed_executable()?);
+                safe_saved_settings(&loaded.path)
+            },
             |_| panic!("manual runtime owns lock"),
         )
         .unwrap();
@@ -921,7 +941,12 @@ mod tests {
             true,
             &AtomicBool::new(false),
             Err(failure),
-            || safe_saved_settings(&loaded.path),
+            || {
+                // A failed stop or a concurrent service transition must not let a
+                // candidate offer a recovery start of the installed service.
+                drop(service::require_installed_executable()?);
+                safe_saved_settings(&loaded.path)
+            },
             |_| {
                 started = true;
                 Ok(())
@@ -939,7 +964,12 @@ mod tests {
             true,
             &AtomicBool::new(false),
             Err(Cancelled.into()),
-            || safe_saved_settings(&loaded.path),
+            || {
+                // A failed stop or a concurrent service transition must not let a
+                // candidate offer a recovery start of the installed service.
+                drop(service::require_installed_executable()?);
+                safe_saved_settings(&loaded.path)
+            },
             |_| panic!("saved credentials were revoked"),
         )
         .unwrap();
@@ -989,6 +1019,18 @@ mod candidate_tests {
         )
         .is_err());
         assert!(ui.out.is_empty());
+        finish_action(
+            &mut ui,
+            true,
+            &AtomicBool::new(false),
+            Err(anyhow::anyhow!("stop failed")),
+            || service::require_installed_executable().map(drop),
+            |_| panic!("candidate must not offer recovery start"),
+        )
+        .unwrap();
+        let output = String::from_utf8(ui.out.clone()).unwrap();
+        assert!(output.contains("Service control is unavailable"));
+        assert!(!output.contains("Saved settings are consistent. Start PiAir again?"));
         // A stopped installed service does not prevent candidate foreground QA.
         assert_eq!(
             confirm_stop(
