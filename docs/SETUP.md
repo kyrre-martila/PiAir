@@ -46,8 +46,14 @@ A source checkout is not an installed service.
    measurement step shows actual input levels using the automatic detector. Stop
    the source for five seconds, then play representative music for five seconds.
    Only sufficiently separated measurements yield a provisional suggestion
-   (six dB above the measured background's 95th percentile, with at least twelve
-   dB measured signal/noise separation). Confirm before applying it to the draft.
+   using the background's 95th percentile and quieter music's 25th percentile.
+   The suggestion is at least six dB above background, preferably twelve dB below
+   quiet music, and never below -60 dBFS. It requires at least six dB of headroom
+   below quiet music; overlapping or very weak measurements get no suggestion.
+   Digital silence does not justify an extremely sensitive threshold. These are
+   conservative suggestion limits only; manual configuration retains its full
+   supported range. Confirm before applying a suggestion to the draft and again
+   before saving the reviewed configuration.
    Repeat under realistic quiet/noisy conditions and verify your chosen settings.
 7. Keep or explicitly change the saved runtime volume. An absent volume preserves
    the receiver volume. An explicit change may persist on the receiver even after
@@ -55,7 +61,9 @@ A source checkout is not an installed service.
    volume. Choose Play explicitly to hear up to 49 seconds, bounded by actual
    file content, through the existing PTP/ALAC/RTP sender. Ctrl+C interrupts it
    through existing cancellation and bounded cleanup. Answer whether you heard
-   audio: successful protocol responses or packets alone never verify audibility.
+   audio after a completed test: successful protocol responses or packets alone
+   never verify audibility. A failed test reports the error and troubleshooting
+   guidance, then continues setup without an audible-success confirmation prompt.
    This test checks output; it does not test ALSA input.
 8. Review the final summary; changed values are marked and previous values shown.
    Save only when satisfied. Setup retains TOML comments, unrelated configuration,

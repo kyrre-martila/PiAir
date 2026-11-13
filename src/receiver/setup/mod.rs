@@ -554,22 +554,30 @@ fn measure<R: FnMut() -> Result<String>, W: Write>(
     drop(capture);
     Ok(levels)
 }
-fn suggested_threshold(noise: &[f64], signal: &[f64]) -> Option<f64> {
-    if noise.is_empty() || signal.is_empty() {
+pub(crate) fn suggested_threshold(noise: &[f64], signal: &[f64]) -> Option<f64> {
+    // -infinity is a real RMS result for digital silence. NaN, +infinity
+    // and out-of-range finite levels are not usable capture measurements.
+    let valid = |level: &f64| {
+        *level == f64::NEG_INFINITY || (level.is_finite() && (-120.0..=0.0).contains(level))
+    };
+    if noise.is_empty() || signal.is_empty() || !noise.iter().chain(signal).all(valid) {
         return None;
     }
     let mut noise = noise.to_vec();
     let mut signal = signal.to_vec();
     noise.sort_by(f64::total_cmp);
     signal.sort_by(f64::total_cmp);
-    let quiet = noise[(noise.len() * 95).div_ceil(100) - 1].max(-120.0);
+    let quiet = noise[(noise.len() * 95).div_ceil(100) - 1];
     let music = signal[signal.len() / 4];
-    // Require separation, leave margin above nearly all measured noise and
-    // below the quieter music. No invented threshold for overlapping samples.
+    // Require 6 dB on either side. Prefer 12 dB below quieter music rather
+    // than following a very low (or digitally zero) background indefinitely.
+    // The -60 dBFS suggestion floor avoids recommending extreme sensitivity;
+    // weaker inputs need gain investigation or a deliberate manual setting.
     if !music.is_finite() || music - quiet < 12.0 {
         return None;
     }
-    Some((quiet + 6.0).clamp(-120.0, 0.0))
+    let threshold = (quiet + 6.0).max(music - 12.0).max(-60.0);
+    (threshold <= music - 6.0).then_some(threshold)
 }
 fn configure_activity<R: FnMut() -> Result<String>, W: Write>(
     draft: &mut Playback,
@@ -666,6 +674,20 @@ fn test_audio<R: FnMut() -> Result<String>, W: Write>(
             Some(cancel.clone()),
         )
     });
+    playback_feedback(result, ui, &cancel)
+}
+
+fn playback_troubleshooting<R: FnMut() -> Result<String>, W: Write>(
+    ui: &mut Ui<R, W>,
+) -> Result<()> {
+    ui.say("Audio is not verified. Check receiver volume/mute and speakers.\nCheck the local network and PTP UDP 319/320 permissions.\nSee docs/PTP_PORT_PERMISSIONS.md and docs/WAV_PLAYBACK_DIAGNOSTIC.md.")
+}
+
+fn playback_feedback<R: FnMut() -> Result<String>, W: Write>(
+    result: Result<()>,
+    ui: &mut Ui<R, W>,
+    cancel: &AtomicBool,
+) -> Result<()> {
     if cancel.load(Ordering::Relaxed) {
         return match result {
             Err(e) if e.is::<super::lifecycle::CleanupFailure>() => Err(e),
@@ -674,12 +696,15 @@ fn test_audio<R: FnMut() -> Result<String>, W: Write>(
     }
     if let Err(e) = result {
         ui.say(format!("Playback test failed: {e:#}"))?;
+        playback_troubleshooting(ui)?;
+        ui.say("Continuing setup without a successful playback test.")?;
+        return Ok(());
     }
     ui.say("Did you hear the audio?\n1. Yes, audio works\n2. No, show troubleshooting guidance\n3. Skip confirmation")?;
-    match ui.choice("Choose:",3,None)? {
-        1=>ui.say("You confirmed audible output from this test.")?,
-        2=>ui.say("Audio is not verified. Check receiver volume/mute and connected speakers.\nCheck local network, multicast and PTP UDP 319/320 permissions.\nReview docs/PTP_PORT_PERMISSIONS.md and docs/WAV_PLAYBACK_DIAGNOSTIC.md.\nA successful RTSP response or RTP transmission does not prove audibility.\nNo authentication method or receiver was changed automatically.")?,
-        _=>ui.say("Audible playback remains unverified.")?,
+    match ui.choice("Choose:", 3, None)? {
+        1 => ui.say("You confirmed audible output from this test.")?,
+        2 => playback_troubleshooting(ui)?,
+        _ => ui.say("Audible playback remains unverified.")?,
     }
     Ok(())
 }

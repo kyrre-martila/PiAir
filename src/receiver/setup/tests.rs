@@ -154,14 +154,92 @@ fn transient_requires_confirmation_and_never_enrolls_or_falls_back() {
 }
 #[test]
 fn measurement_suggestions_require_real_separation() {
-    assert_eq!(suggested_threshold(&[-70.0; 25], &[-30.0; 25]), Some(-64.0));
+    assert_eq!(suggested_threshold(&[-70.0; 25], &[-30.0; 25]), Some(-42.0));
+    assert_eq!(suggested_threshold(&[-44.0; 25], &[-30.0; 25]), Some(-38.0));
     assert!(suggested_threshold(&[-40.0; 25], &[-35.0; 25]).is_none());
     assert!(suggested_threshold(&[], &[]).is_none());
+    assert!(suggested_threshold(&[], &[-30.0; 25]).is_none());
+    assert!(suggested_threshold(&[-70.0; 25], &[]).is_none());
+    assert!(suggested_threshold(&[-70.0; 25], &[-70.0; 25]).is_none());
     assert!(suggested_threshold(&[f64::NEG_INFINITY; 25], &[f64::NEG_INFINITY; 25]).is_none());
     assert_eq!(
         suggested_threshold(&[f64::NEG_INFINITY; 25], &[-30.0; 25]),
-        Some(-114.0)
+        Some(-42.0)
     );
+    // Digital zero must not justify following an unusably weak input.
+    assert!(suggested_threshold(&[f64::NEG_INFINITY; 25], &[-90.0; 25]).is_none());
+    assert_eq!(suggested_threshold(&[-90.0; 25], &[-54.0; 25]), Some(-60.0));
+}
+#[test]
+fn suggestions_reject_invalid_levels_and_use_quieter_music() {
+    for invalid in [f64::NAN, f64::INFINITY, -121.0, 0.1] {
+        // Reject invalid samples even when they would be outside a percentile.
+        let mut noise = [-70.0; 25];
+        noise[0] = invalid;
+        assert!(suggested_threshold(&noise, &[-30.0; 25]).is_none());
+        let mut music = [-30.0; 25];
+        music[24] = invalid;
+        assert!(suggested_threshold(&[-70.0; 25], &music).is_none());
+    }
+    let mut music = [-20.0; 25];
+    music[..7].fill(-40.0);
+    assert_eq!(suggested_threshold(&[-70.0; 25], &music), Some(-52.0));
+    music[..7].fill(f64::NEG_INFINITY);
+    assert!(suggested_threshold(&[-70.0; 25], &music).is_none());
+}
+
+#[test]
+fn failed_playback_reports_guidance_without_reading_success_confirmation() {
+    let mut ui = Ui {
+        read: || panic!("failed playback must not ask for audible-success confirmation"),
+        out: Vec::new(),
+    };
+    playback_feedback(
+        Err(anyhow::anyhow!(
+            "mock authentication or transmission failure"
+        )),
+        &mut ui,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let text = String::from_utf8(ui.out).unwrap();
+    assert!(text.contains("Playback test failed: mock authentication or transmission failure"));
+    assert!(text.contains("Check receiver volume/mute"));
+    assert!(text.contains("Continuing setup"));
+    assert!(!text.contains("Did you hear the audio?"));
+    assert!(!text.contains("Yes, audio works"));
+}
+
+#[test]
+fn successful_playback_still_requires_user_confirmation_of_audibility() {
+    for (input, expected) in [
+        ("1\n", "You confirmed audible output"),
+        ("2\n", "Audio is not verified"),
+        ("3\n", "Audible playback remains unverified"),
+    ] {
+        let mut ui = scripted(input);
+        playback_feedback(Ok(()), &mut ui, &AtomicBool::new(false)).unwrap();
+        let text = String::from_utf8(ui.out).unwrap();
+        assert!(text.contains("Did you hear the audio?"));
+        assert!(text.contains(expected));
+    }
+}
+
+#[test]
+fn playback_cancellation_and_teardown_failure_remain_errors_without_confirmation() {
+    let mut ui = Ui {
+        read: || panic!("cancelled playback must not prompt"),
+        out: Vec::new(),
+    };
+    let cancel = AtomicBool::new(true);
+    assert!(playback_feedback(Ok(()), &mut ui, &cancel)
+        .unwrap_err()
+        .is::<Cancelled>());
+    let cleanup = super::super::lifecycle::CleanupFailure(anyhow::anyhow!("mock TEARDOWN failed"));
+    assert!(playback_feedback(Err(cleanup.into()), &mut ui, &cancel)
+        .unwrap_err()
+        .is::<super::super::lifecycle::CleanupFailure>());
+    assert!(ui.out.is_empty());
 }
 #[test]
 fn invalid_manual_thresholds_retry_without_changing_draft() {
@@ -180,6 +258,14 @@ fn invalid_manual_thresholds_retry_without_changing_draft() {
     )
     .unwrap();
     assert_eq!(draft.threshold_dbfs, -50.0);
+    // The conservative suggestion floor must not restrict deliberate manual input.
+    configure_activity(
+        &mut draft,
+        &mut scripted("2\n-100\n1000\n30000\n1\n"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(draft.threshold_dbfs, -100.0);
 }
 #[test]
 fn default_skip_does_not_touch_receiver_or_service() {
