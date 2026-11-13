@@ -21,6 +21,13 @@ consistent `LoadState=not-found`, inactive, PID 0 record with all service-specif
 properties empty and no diagnostic on stderr. Loaded units returning nonzero,
 missing or duplicate properties, and unexpected load states fail safely.
 
+The complete installation test also caught systemd reporting the temporary mask
+fragment as the instance symlink path, rather than `/dev/null`. Recovery now
+accepts either representation only for a masked unit whose actual instance
+symlink points to `/dev/null`. Custom units and other symlinks remain refused.
+Destination ownership and permission checks now run before preparing a fresh
+transaction, so an unsafe parent fails before masking or writing application files.
+
 The subprocess regression in `scripts/test_maintenance_systemctl.py` models
 Debian 13's status 1 for a filtered empty inventory and the missing-template
 `show` response. It runs the real Services adapter through fresh installation,

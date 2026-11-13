@@ -238,7 +238,8 @@ class Services:
             if unit == own:
                 active = busy
                 require((p.get("FragmentPath") in ("", FILES["piair@.service"][0]) or
-                         (recovery and p.get("FragmentPath") == "/dev/null" and
+                         (recovery and p.get("LoadState") == "masked" and
+                          p.get("FragmentPath") in ("/dev/null", "/etc/systemd/system/" + own) and
                           os.path.islink("/etc/systemd/system/" + own) and
                           os.readlink("/etc/systemd/system/" + own) == "/dev/null")) and
                         not p.get("DropInPaths") and not p.get("Environment") and
@@ -342,6 +343,8 @@ class Installation:
         path = self.path(MANIFEST)
         self.safe(path)
         if not path.exists():
+            for dest, _ in FILES.values():
+                self.safe(self.path(dest))
             require(not any(self.path(p).exists() or self.path(p).is_symlink() for p, _ in FILES.values()),
                     "Existing unmanaged installation; review/remove it manually before installing")
             return None

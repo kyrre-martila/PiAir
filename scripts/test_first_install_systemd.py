@@ -39,6 +39,15 @@ class FirstInstallSystemdTests(unittest.TestCase):
                     raise RuntimeError('injected post-replacement reload failure')
                 super().reload()
 
+        # Hosted runners make these tool directories writable by the runner.
+        # Model standard Debian ownership for the test, retaining the production
+        # installer's strict parent checks; restore the runner fixture afterward.
+        directories = [Path('/usr/local/bin'), Path('/usr/local/share')]
+        original = [(p, p.stat()) for p in directories]
+        for directory in directories:
+            os.chown(directory, 0, 0)
+            directory.chmod(0o755)
+
         # The archive has the real stock template and managed layout. The inert
         # ELF fixture is never executed; ARM64 startup is checked by release CI.
         data = fixtures.archive(fixtures.files('1.0.1'), '1.0.1')
@@ -78,3 +87,6 @@ class FirstInstallSystemdTests(unittest.TestCase):
             if m.BASE.exists():
                 shutil.rmtree(m.BASE)
             services.reload()
+            for directory, before in original:
+                os.chown(directory, before.st_uid, before.st_gid)
+                directory.chmod(before.st_mode & 0o7777)

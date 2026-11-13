@@ -77,6 +77,24 @@ class SystemctlTests(unittest.TestCase):
             self.inspect(output=stock(True), code=0,
                          loaded='piair@other.service loaded active running PiAir\n')
 
+    def test_recovery_recognizes_only_our_verified_instance_mask(self):
+        own = 'piair@test.service'
+        for fragment in ('/dev/null', '/etc/systemd/system/' + own):
+            output = record(LoadState='masked', FragmentPath=fragment, UnitFileState='masked')
+            execute, _ = self.invoke(output=output, code=0)
+            with patch.object(m.subprocess, 'run', side_effect=execute), patch.object(m.pwd, 'getpwuid') as pw, \
+                    patch.object(m.os.path, 'islink', return_value=True), patch.object(m.os, 'readlink', return_value='/dev/null'):
+                pw.return_value.pw_name = 'test'
+                self.assertEqual(m.Services().inspect(1000, recovery=True), (own, False))
+                with self.assertRaisesRegex(RuntimeError, 'Customized'):
+                    m.Services().inspect(1000)
+        execute, _ = self.invoke(output=record(LoadState='masked', FragmentPath='/etc/systemd/system/' + own), code=0)
+        with patch.object(m.subprocess, 'run', side_effect=execute), patch.object(m.pwd, 'getpwuid') as pw, \
+                patch.object(m.os.path, 'islink', return_value=True), patch.object(m.os, 'readlink', return_value='/custom'):
+            pw.return_value.pw_name = 'test'
+            with self.assertRaisesRegex(RuntimeError, 'Customized'):
+                m.Services().inspect(1000, recovery=True)
+
     def test_custom_service_and_dropins(self):
         for changes in (dict(FragmentPath='/etc/systemd/system/piair@test.service'),
                         dict(DropInPaths='/etc/systemd/system/piair@.service.d/custom.conf'),
@@ -132,6 +150,18 @@ class FreshInstallTests(unittest.TestCase):
         self.assertTrue(all(self.i.path(dest).is_file() for dest, _ in m.FILES.values()))
         self.assertFalse(any(args[3] in ('start', 'enable') for args in calls))
         self.assertEqual(self.snapshot(), self.before)
+
+    def test_untrusted_destination_parent_fails_before_masking_or_writes(self):
+        parent = self.i.path('/usr/local/bin')
+        parent.mkdir(parents=True)
+        parent.chmod(0o777)
+        with self.assertRaisesRegex(RuntimeError, 'Untrusted ownership/permissions'):
+            self.commit()
+        self.assertNotIn('mask', self.service.events)
+        self.assertFalse(any(self.i.path(dest).exists() for dest, _ in m.FILES.values()))
+        self.assertEqual(self.snapshot(), self.before)
+        parent.chmod(0o755)
+        self.commit()
 
     def test_fresh_reload_failure_rolls_back_and_retry_works(self):
         self.service.fail = RuntimeError('reload failed')
