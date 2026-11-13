@@ -1,4 +1,5 @@
 use tracing::level_filters::LevelFilter;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Clone, Copy)]
 struct Mode {
@@ -20,8 +21,8 @@ impl Mode {
 }
 
 pub fn init(verbosity: u8, unattended: bool) {
-    tracing::subscriber::set_global_default(subscriber(verbosity, unattended, std::io::stderr))
-        .expect("logging initialized once");
+    // SubscriberInitExt also installs the log-to-tracing bridge used by dependencies.
+    subscriber(verbosity, unattended, std::io::stderr).init();
 }
 
 fn subscriber<W>(
