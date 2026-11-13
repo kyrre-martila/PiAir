@@ -39,8 +39,8 @@ fn fixture() -> (tempfile::TempDir, Loaded, Vec<Receiver>) {
     (dir, loaded, rows)
 }
 #[test]
-fn approval_requires_both_explicit_confirmations_and_preserves_config() {
-    for answer in ["2\n", "1\n2\n", "", "1\n"] {
+fn approval_requires_one_explicit_confirmation_and_preserves_config() {
+    for answer in ["2\n", "", "q\n"] {
         let (_d, mut loaded, _) = fixture();
         let before = std::fs::read(&loaded.path).unwrap();
         let mut journal = Vec::new();
@@ -50,7 +50,7 @@ fn approval_requires_both_explicit_confirmations_and_preserves_config() {
     }
     let (_d, mut loaded, _) = fixture();
     let mut journal = Vec::new();
-    approve(&mut loaded, ID, &mut scripted("1\n1\n"), &mut journal).unwrap();
+    approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
     assert!(loaded.config.allows(ID));
     assert_eq!(journal.len(), 1);
     let before = std::fs::read(&loaded.path).unwrap();
@@ -86,7 +86,7 @@ fn transient_requires_confirmation_and_never_enrolls_or_falls_back() {
     for input in ["", "1\n2\n", "1\n1\n2\n"] {
         let (_d, mut loaded, rows) = fixture();
         let mut journal = Vec::new();
-        approve(&mut loaded, ID, &mut scripted("1\n1\n"), &mut journal).unwrap();
+        approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
         assert!(authentication(
             &loaded,
             &rows,
@@ -102,7 +102,7 @@ fn transient_requires_confirmation_and_never_enrolls_or_falls_back() {
     }
     let (_d, mut loaded, rows) = fixture();
     let mut journal = Vec::new();
-    approve(&mut loaded, ID, &mut scripted("1\n1\n"), &mut journal).unwrap();
+    approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
     assert_eq!(
         authentication(
             &loaded,
@@ -203,8 +203,9 @@ fn failed_playback_reports_guidance_without_reading_success_confirmation() {
     )
     .unwrap();
     let text = String::from_utf8(ui.out).unwrap();
-    assert!(text.contains("Playback test failed: mock authentication or transmission failure"));
-    assert!(text.contains("Check receiver volume/mute"));
+    assert!(text.contains("couldn't prepare the audio test"));
+    assert!(!text.contains("mock authentication or transmission failure"));
+    assert!(text.contains("piair -v setup"));
     assert!(text.contains("No successful playback test recorded"));
     assert!(!text.contains("Did you hear the audio?"));
     assert!(!text.contains("Yes, audio works"));
@@ -214,7 +215,7 @@ fn failed_playback_reports_guidance_without_reading_success_confirmation() {
 fn successful_playback_still_requires_user_confirmation_of_audibility() {
     for (input, expected) in [
         ("1\n", "You confirmed audible output"),
-        ("2\n", "Audio is not verified"),
+        ("2\n", "couldn't confirm that sound was heard"),
         ("3\n", "Audible playback remains unverified"),
     ] {
         let mut ui = scripted(input);
@@ -295,7 +296,7 @@ fn names_are_printable() {
 fn unsupported_advertisement_never_selects() {
     let (_d, mut loaded, mut rows) = fixture();
     let mut journal = Vec::new();
-    approve(&mut loaded, ID, &mut scripted("1\n1\n"), &mut journal).unwrap();
+    approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
     rows[0].services[0].capabilities = BTreeMap::from([("features".into(), "0x0".into())]);
     assert!(authentication(
         &loaded,
@@ -317,7 +318,7 @@ fn unsupported_advertisement_never_selects() {
 fn stored_credentials_are_reused_without_reenrollment_or_modification() {
     let (_d, mut loaded, mut rows) = fixture();
     let mut journal = Vec::new();
-    approve(&mut loaded, ID, &mut scripted("1\n1\n"), &mut journal).unwrap();
+    approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
     rows[0].services[0]
         .capabilities
         .insert("features".into(), "0x80200,0x14200".into());
@@ -367,7 +368,7 @@ fn enrollment_requires_real_pin_or_setup_code_before_selection() {
     for method in [1, 2] {
         let (_d, mut loaded, mut rows) = fixture();
         let mut journal = Vec::new();
-        approve(&mut loaded, ID, &mut scripted("1\n1\n"), &mut journal).unwrap();
+        approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
         rows[0].services[0]
             .capabilities
             .insert("features".into(), "0x80200,0x14200".into());
@@ -401,7 +402,7 @@ fn mock_alsa_missing_devices_rescan_validation_failure_and_explicit_choice() {
     let mut validated = Vec::new();
     let selected = select_input_with(
         &Playback::default(),
-        &mut scripted("2\n1\nbusy\n1\nchosen\n"),
+        &mut scripted("2\n1\n1\nbusy\n1\n1\nchosen\n"),
         &AtomicBool::new(false),
         || {
             scans += 1;
@@ -535,4 +536,373 @@ fn service_activation_needs_installed_unit_and_both_affirmative_choices() {
         |_, _| panic!("must not activate missing unit"),
     )
     .unwrap();
+}
+
+#[test]
+fn normal_input_list_prefers_conversion_and_preserves_manual_selection() {
+    let devices = vec![
+        ("hw:CARD=USB,DEV=0".into(), "USB".into()),
+        ("plughw:CARD=USB,DEV=0".into(), "USB".into()),
+        ("hw:CARD=Other,DEV=0".into(), "Other".into()),
+    ];
+    let mut ui = scripted("1\n");
+    assert_eq!(
+        select_input_with(
+            &Playback::default(),
+            &mut ui,
+            &AtomicBool::new(false),
+            || Ok(devices.clone()),
+            |_| Ok(())
+        )
+        .unwrap(),
+        "plughw:CARD=USB,DEV=0"
+    );
+    assert_eq!(normal_inputs(devices).len(), 2);
+    assert_eq!(
+        select_input_with(
+            &Playback::default(),
+            &mut scripted("1\n1\nhw:manual\n"),
+            &AtomicBool::new(false),
+            || Ok(vec![]),
+            |_| Ok(())
+        )
+        .unwrap(),
+        "hw:manual"
+    );
+}
+
+#[test]
+fn normal_receiver_screen_has_only_names_and_explicit_selection() {
+    let (_d, loaded, rows) = fixture();
+    let mut ui = scripted("1\n");
+    assert_eq!(
+        choose_receiver(&loaded, &rows, &mut ui).unwrap().as_deref(),
+        Some(ID)
+    );
+    let text = String::from_utf8(ui.out).unwrap();
+    assert!(text.contains("Room"));
+    for technical in [
+        ID,
+        "127.0.0.2",
+        "features",
+        "Endpoint",
+        "Approved:",
+        "Capabilities",
+    ] {
+        assert!(!text.contains(technical));
+    }
+}
+
+#[test]
+fn normal_defaults_and_advanced_adjustment() {
+    let mut draft = Playback::default();
+    let before = draft.clone();
+    let mut ui = scripted("\n");
+    advanced_settings(&mut draft, &mut ui, &AtomicBool::new(false)).unwrap();
+    assert_eq!(draft.threshold_dbfs, before.threshold_dbfs);
+    assert_eq!(draft.volume_db, before.volume_db);
+    let text = String::from_utf8(ui.out).unwrap();
+    assert!(!text.contains("dBFS"));
+    advanced_settings(
+        &mut draft,
+        &mut scripted("2\n2\n-50\n2000\n40000\n1\n2\n"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(draft.threshold_dbfs, -50.0);
+    assert_eq!(draft.volume_db, None);
+}
+
+#[test]
+fn playback_discovery_retries_absence_only_and_keeps_binding() {
+    let (_d, mut loaded, rows) = fixture();
+    approve(&mut loaded, ID, &mut scripted("1\n"), &mut Vec::new()).unwrap();
+    let selected = super::super::validate_selection(&loaded, ID, Method::Transient, &rows).unwrap();
+    let mut scans = 0;
+    let mut final_rows = Some(rows);
+    let result = super::super::playback_discovery(
+        &loaded,
+        &selected,
+        &AtomicBool::new(false),
+        |timeout, _| {
+            assert_eq!(timeout, 5);
+            scans += 1;
+            Ok(if scans == 1 {
+                vec![]
+            } else {
+                final_rows.take().unwrap()
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(scans, 2);
+    assert_eq!(result[0].id, ID);
+    scans = 0;
+    let error =
+        super::super::playback_discovery(&loaded, &selected, &AtomicBool::new(false), |_, _| {
+            scans += 1;
+            Ok(vec![])
+        })
+        .unwrap_err();
+    assert_eq!(scans, 3);
+    assert!(format!("{error:#}").contains("authentication not started"));
+    super::super::playback_discovery(&loaded, &selected, &AtomicBool::new(true), |_, _| {
+        panic!("cancelled discovery must not start")
+    })
+    .unwrap_err();
+    scans = 0;
+    let cancel = AtomicBool::new(false);
+    super::super::playback_discovery(&loaded, &selected, &cancel, |_, cancel| {
+        scans += 1;
+        cancel.store(true, Ordering::Relaxed);
+        Ok(vec![])
+    })
+    .unwrap_err();
+    assert_eq!(scans, 1);
+    for change in ["capability", "conflict", "duplicate", "endpoint"] {
+        let (_, _, mut rows) = fixture();
+        match change {
+            "capability" => {
+                rows[0].services[0]
+                    .capabilities
+                    .insert("sf".into(), "0x80".into());
+            }
+            "conflict" => rows[0].id = "device:aabbccddeeff".into(),
+            "duplicate" => rows.push(Receiver {
+                id: ID.into(),
+                name: "Duplicate".into(),
+                services: vec![],
+            }),
+            _ => {
+                rows[0].services[0].port += 1;
+            }
+        }
+        let mut rows = Some(rows);
+        scans = 0;
+        assert!(
+            super::super::playback_discovery(
+                &loaded,
+                &selected,
+                &AtomicBool::new(false),
+                |_, _| {
+                    scans += 1;
+                    Ok(rows.take().unwrap())
+                }
+            )
+            .is_err(),
+            "{change}"
+        );
+        assert_eq!(scans, 1);
+    }
+}
+
+#[test]
+fn friendly_approval_is_explicit_and_invalid_canonical_id_never_prompts() {
+    let (_d, mut loaded, _) = fixture();
+    let mut ui = scripted("1\n");
+    approve_named(&mut loaded, ID, "Living room", &mut ui, &mut Vec::new()).unwrap();
+    let text = String::from_utf8(ui.out).unwrap();
+    assert!(text.contains("Approve speaker \"Living room\"?"));
+    assert!(!text.contains(ID));
+    let before = std::fs::read(&loaded.path).unwrap();
+    let mut ui = Ui {
+        read: || panic!("invalid identity must not prompt"),
+        out: Vec::new(),
+    };
+    assert!(approve_named(
+        &mut loaded,
+        "device:invalid",
+        "Room",
+        &mut ui,
+        &mut Vec::new()
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&loaded.path).unwrap(), before);
+}
+
+#[test]
+fn normal_wizard_steps_use_plain_labels_and_default_settings() {
+    let (_d, mut loaded, rows) = fixture();
+    let mut draft = Playback::default();
+    let cancel = Arc::new(AtomicBool::new(false));
+    // One affirmative input choice, speaker choice, approval, method choice,
+    // session-only warning and selection save, followed by default settings/test.
+    let mut ui = scripted("1\n1\n1\n1\n1\n1\n\n\n");
+    draft.capture_device = Some(
+        select_input_with(
+            &draft,
+            &mut ui,
+            &cancel,
+            || Ok(vec![("plughw:USB".into(), "USB input".into())]),
+            |_| Ok(()),
+        )
+        .unwrap(),
+    );
+    let id = choose_receiver(&loaded, &rows, &mut ui).unwrap().unwrap();
+    let mut journal = Vec::new();
+    approve_named(&mut loaded, &id, &rows[0].name, &mut ui, &mut journal).unwrap();
+    draft.authentication =
+        Some(authentication(&loaded, &rows, &id, &mut ui, &mut journal, &cancel).unwrap());
+    advanced_settings(&mut draft, &mut ui, &cancel).unwrap();
+    assert!(!test_audio_requested(&mut ui).unwrap());
+    assert_eq!(draft.volume_db, None);
+    assert_eq!(draft.threshold_dbfs, -45.0);
+    assert_eq!(journal.len(), 2);
+    let text = String::from_utf8(ui.out).unwrap();
+    assert!(text.contains("Connect without saving pairing"));
+    assert!(text.contains("does not save a pairing or verify a persistent speaker identity"));
+    for technical in [
+        "OwnTone",
+        "SRP",
+        "ALAC",
+        "PTP",
+        "RTP",
+        "Installer planned",
+        "127.0.0.2",
+        "dBFS",
+    ] {
+        assert!(!text.contains(technical), "{technical}");
+    }
+}
+
+#[test]
+fn playback_failure_stages_keep_details_only_in_verbose_output() {
+    use super::super::playback_error::Stage;
+    for (stage, message) in [
+        (Stage::Discovery, "couldn't find or validate"),
+        (Stage::Connection, "found the speaker but couldn't connect"),
+        (
+            Stage::Playback,
+            "connected to the speaker but couldn't play",
+        ),
+    ] {
+        for detailed in [false, true] {
+            let error = anyhow::anyhow!("SRP HAP PTP ALAC RTP UDP 319/320 original diagnostic")
+                .context("full nested cause")
+                .context(stage);
+            let mut ui = Ui {
+                read: || panic!("failure must not ask if audio was heard"),
+                out: Vec::new(),
+            };
+            playback_feedback_details(Err(error), &mut ui, &AtomicBool::new(false), detailed)
+                .unwrap();
+            let text = String::from_utf8(ui.out).unwrap();
+            assert!(text.contains(message));
+            assert!(!text.contains("You confirmed audible output"));
+            for detail in [
+                "SRP",
+                "HAP",
+                "PTP",
+                "ALAC",
+                "RTP",
+                "319/320",
+                "full nested cause",
+                "original diagnostic",
+            ] {
+                assert_eq!(text.contains(detail), detailed, "{text}");
+            }
+        }
+    }
+    for cancel in [false, true] {
+        let error = super::super::lifecycle::CleanupFailure(anyhow::anyhow!(
+            "original serious cleanup error"
+        ));
+        let mut ui = scripted("");
+        let result =
+            playback_feedback_details(Err(error.into()), &mut ui, &AtomicBool::new(cancel), false)
+                .unwrap_err();
+        assert!(result.is::<super::super::lifecycle::CleanupFailure>());
+        assert!(format!("{result:#}").contains("original serious cleanup error"));
+        assert!(command_error_message(&result, false).contains("Setup stopped"));
+        assert!(!command_error_message(&result, false).contains("original serious cleanup error"));
+        assert!(command_error_message(&result, true).contains("original serious cleanup error"));
+    }
+}
+
+#[test]
+fn aliases_group_by_card_and_device_while_virtual_and_bluetooth_routes_survive() {
+    let ids = [
+        "default:CARD=CODEC",
+        "dsnoop:CARD=CODEC,DEV=0",
+        "front:CARD=CODEC,DEV=0",
+        "hw:CARD=CODEC,DEV=0",
+        "plughw:CARD=CODEC,DEV=0",
+        "sysdefault:CARD=CODEC",
+        "hw:CARD=Second,DEV=0",
+        "plughw:CARD=Second,DEV=0",
+        "plughw:CARD=Second,DEV=1",
+        "hw:CARD=Loopback,DEV=0",
+        "hw:CARD=Loopback,DEV=1",
+        "dsnoop:CARD=Loopback,DEV=1",
+        "bluealsa:DEV=11:22:33:44:55:66,PROFILE=sco",
+        "virtual-loopback",
+        "nonstandard:CARD=CODEC",
+        "hw:CARD=CODEC,DEV=0,SUBDEV=1",
+    ];
+    // Identical descriptions on two cards must not merge their inputs.
+    let devices: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            (
+                id.to_string(),
+                "USB Audio CODEC, technical PCM description".into(),
+            )
+        })
+        .collect();
+    let primary = normal_inputs(devices.clone());
+    assert_eq!(primary.len(), 9);
+    assert!(primary.contains(&("plughw:CARD=CODEC,DEV=0".into(), "USB Audio CODEC".into())));
+    for id in [
+        &ids[7], &ids[8], &ids[9], &ids[10], &ids[12], &ids[13], &ids[14], &ids[15],
+    ] {
+        assert!(primary.iter().any(|(selected, _)| selected == *id), "{id}");
+    }
+    // Every original alias can still be explicitly selected, without rewriting.
+    for (index, id) in ids.iter().enumerate() {
+        let answers = format!("{}\n", index + 1);
+        let mut choice = scripted(&answers);
+        assert_eq!(
+            advanced_input(&devices, &Playback::default(), &mut choice)
+                .unwrap()
+                .as_deref(),
+            Some(*id)
+        );
+    }
+    let mut validated = Vec::new();
+    let mut ui = scripted("1\nq\n");
+    assert!(select_input_with(
+        &Playback::default(),
+        &mut ui,
+        &AtomicBool::new(false),
+        || Ok(devices.clone()),
+        |id| {
+            validated.push(id.to_owned());
+            anyhow::bail!("device busy")
+        }
+    )
+    .is_err());
+    assert_eq!(validated, ["plughw:CARD=CODEC,DEV=0"]); // No silent hw/default retry.
+}
+
+#[test]
+fn playback_feedback_honors_normal_verbose_and_trace_logging_levels() {
+    for (level, detailed) in [
+        (tracing::Level::INFO, false),
+        (tracing::Level::DEBUG, true),
+        (tracing::Level::TRACE, true),
+    ] {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(level)
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut ui = scripted("");
+            let error = anyhow::anyhow!("original SRP diagnostic")
+                .context(super::super::playback_error::Stage::Connection);
+            playback_feedback(Err(error), &mut ui, &AtomicBool::new(false)).unwrap();
+            let text = String::from_utf8(ui.out).unwrap();
+            assert_eq!(text.contains("original SRP diagnostic"), detailed);
+            assert!(text.contains("found the speaker but couldn't connect"));
+        });
+    }
 }

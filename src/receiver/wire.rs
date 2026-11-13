@@ -245,6 +245,10 @@ impl Wire {
             "receiver is not currently approved"
         );
         ensure!(selected.id == id, "receiver is not selected");
+        ensure!(
+            snapshot.iter().filter(|r| r.id == id).count() <= 1,
+            "receiver identity is ambiguous"
+        );
         let receiver = snapshot
             .iter()
             .find(|r| r.id == id)

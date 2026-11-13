@@ -167,12 +167,41 @@ impl Runtime {
         result
     }
     fn attempt(&self, capture: &Capture, cancel: Arc<AtomicBool>) -> Result<()> {
+        self.attempt_with_discovery(&cancel, discovery::discover_cancellable, |snapshot| {
+            self.play_discovered(capture, cancel.clone(), snapshot)
+        })
+    }
+    // Keep the discovery/authentication boundary injectable without opening ALSA
+    // or sockets in tests. Both setup and automatic playback validate through
+    // playback_discovery; only the runtime additionally pins persisted state.
+    fn attempt_with_discovery(
+        &self,
+        cancel: &AtomicBool,
+        mut discover: impl FnMut(u64, &AtomicBool) -> Result<Vec<discovery::Receiver>>,
+        start: impl FnOnce(&[discovery::Receiver]) -> Result<()>,
+    ) -> Result<()> {
         self.check()?;
-        let snapshot = discovery::discover_cancellable(self.discovery_timeout, &cancel)?;
+        let mut loaded = config::load(Some(self.path.clone()))?;
+        // Preserve the invocation's configured discovery window.
+        loaded.config.discovery_timeout_secs = self.discovery_timeout;
+        let snapshot =
+            super::playback_discovery(&loaded, &self.operation, cancel, |timeout, cancel| {
+                self.check()?;
+                discover(timeout, cancel)
+            });
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
         }
+        let snapshot = snapshot?;
         self.check()?;
+        start(&snapshot)
+    }
+    fn play_discovered(
+        &self,
+        capture: &Capture,
+        cancel: Arc<AtomicBool>,
+        snapshot: &[discovery::Receiver],
+    ) -> Result<()> {
         let mut authenticated = super::session::Session::new();
         authenticated.cancel = cancel.clone();
         tracing::info!(target: "piair::runtime", event = "authentication", "selected receiver session starting");
@@ -181,12 +210,12 @@ impl Runtime {
                 Some(credential) => wire::Wire::connect_hap_scoped(
                     &self.path,
                     &self.operation,
-                    &snapshot,
+                    snapshot,
                     credential,
                     Some(&self.selected),
                 ),
                 None => {
-                    wire::Wire::connect(&self.path, &self.selected.id, &self.operation, &snapshot)
+                    wire::Wire::connect(&self.path, &self.selected.id, &self.operation, snapshot)
                 }
             },
             self.credential.as_ref(),

@@ -52,12 +52,13 @@ characters. Zero and broadcast IDs, names, IP addresses, service names, aliases,
 and endpoint suffixes are rejected. Invalid or duplicate identities already in
 the file must be corrected before these commands can proceed.
 
-**Before adding, independently physically verify the ID** against the receiver's
-label or trusted local device settings. An mDNS advertisement, advertised name,
-or network address alone cannot establish physical identity and can be spoofed.
-Adding asks you to attest to that verification, then confirm the exact change
-with `y` or `yes`. Removing asks for change confirmation. Changes require stdin
-and stdout to be interactive terminals; there is no unattended approval flag.
+Adding asks once whether to approve the exact receiver ID for use with PiAir;
+confirm with `y` or `yes`. You do not need to find this technical ID on a speaker
+label or in its settings. Approval permits later connections; it does not
+cryptographically verify receiver identity. Advertisements can be spoofed and
+never trigger automatic approval. Removing also asks once for confirmation.
+Changes require stdin and stdout to be interactive terminals; there is no
+unattended approval flag.
 Any other answer cancels without writing. Existing additions and absent removals
 are reported as harmless no-ops without prompting.
 
@@ -253,7 +254,7 @@ Stable IDs merge only by canonical device identity, never display name/IP/hostna
 Advertisements are untrusted; feature flags indicate advertised capabilities, not
 verified compatibility. Unknown/conflicting IDs cannot be approved.
 
-To approve a physically verified receiver, explicitly add its exact
+To approve your chosen receiver, explicitly add its exact
 `device:<12 lowercase hex digits>` to `receiver_allowlist` in your config.
 The empty list denies every direct receiver connection. Then:
 

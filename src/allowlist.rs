@@ -236,23 +236,12 @@ pub fn run(loaded: &Loaded, command: AllowlistCommand) -> Result<()> {
     );
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
-    if add && !confirm(&mut input, &mut output, &format!("Have you independently physically verified {id} using its device label or trusted local settings? mDNS advertisements alone are insufficient"))? {
-        writeln!(output, "Cancelled; no changes.")?;
-        return Ok(());
-    }
-    if !confirm(
-        &mut input,
-        &mut output,
-        &format!(
-            "{} {id} in {}?",
-            if add {
-                "Approve"
-            } else {
-                "Remove approval for"
-            },
-            loaded.path.display()
-        ),
-    )? {
+    let prompt = if add {
+        format!("Approve this AirPlay receiver for use with PiAir?\nReceiver ID: {id}\nApproval permits connections; it does not verify the receiver's identity.")
+    } else {
+        format!("Remove approval for {id} in {}?", loaded.path.display())
+    };
+    if !confirm(&mut input, &mut output, &prompt)? {
         writeln!(output, "Cancelled; no changes.")?;
         return Ok(());
     }

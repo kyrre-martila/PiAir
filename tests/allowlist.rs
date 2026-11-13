@@ -95,9 +95,10 @@ fn terminal_success_preservation_duplicate_removal_and_absence() {
     fs::write(&path, source).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
     let mut terminal = Terminal::start(command(&path, "add", Some(ID)));
-    terminal.until("mDNS advertisements alone are insufficient");
-    terminal.answer("yes\n");
-    terminal.until("Approve device:");
+    terminal.until("y/yes to confirm");
+    assert!(terminal.output.contains(&format!("Receiver ID: {ID}")));
+    assert!(!terminal.output.contains("physically"));
+    assert!(!terminal.output.contains("device label"));
     terminal.answer("y\n");
     terminal.finish(true);
     let added = fs::read_to_string(&path).unwrap();
@@ -137,30 +138,22 @@ fn cancellation_stale_write_and_readonly_leave_file_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
     fs::write(&path, "# original\n").unwrap();
-    for (first, second) in [("n\n", None), ("yes\n", Some("no\n"))] {
+    for answer in ["n\n", "no\n", "\n", "\x04"] {
         let mut terminal = Terminal::start(command(&path, "add", Some(ID)));
-        terminal.until("mDNS advertisements alone are insufficient");
-        terminal.answer(first);
-        if let Some(second) = second {
-            terminal.until("Approve device:");
-            terminal.answer(second);
-        }
+        terminal.until("Approve this AirPlay receiver");
+        terminal.answer(answer);
         terminal.finish(true);
         assert_eq!(fs::read_to_string(&path).unwrap(), "# original\n");
     }
     let mut terminal = Terminal::start(command(&path, "add", Some(ID)));
-    terminal.until("mDNS advertisements alone are insufficient");
-    terminal.answer("yes\n");
-    terminal.until("Approve device:");
+    terminal.until("Approve this AirPlay receiver");
     fs::write(&path, "# newer\n").unwrap();
     terminal.answer("yes\n");
     terminal.finish(false);
     assert_eq!(fs::read_to_string(&path).unwrap(), "# newer\n");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
     let mut terminal = Terminal::start(command(&path, "add", Some(ID)));
-    terminal.until("mDNS advertisements alone are insufficient");
-    terminal.answer("yes\n");
-    terminal.until("Approve device:");
+    terminal.until("Approve this AirPlay receiver");
     terminal.answer("yes\n");
     terminal.finish(false);
     assert_eq!(fs::read_to_string(&path).unwrap(), "# newer\n");
@@ -247,9 +240,7 @@ fn resolution_and_missing_files_follow_existing_rules() {
         .env("XDG_CONFIG_HOME", dir.path())
         .args(["allowlist", "add", ID]);
     let mut terminal = Terminal::start(default);
-    terminal.until("mDNS advertisements alone are insufficient");
-    terminal.answer("yes\n");
-    terminal.until("Approve device:");
+    terminal.until("Approve this AirPlay receiver");
     terminal.answer("yes\n");
     terminal.finish(true);
     assert!(fs::read_to_string(dir.path().join("piair/config.toml"))
@@ -290,10 +281,12 @@ fn allowlist_help_describes_security_and_commands() {
         "add",
         "remove",
         "device:aabbccddeeff",
-        "physical identity verification",
-        "mDNS alone is insufficient",
+        "one explicit approval",
+        "does not authenticate",
         "y/yes",
     ] {
         assert!(text.contains(expected), "{text}");
     }
+    assert!(!text.contains("physical identity verification"));
+    assert!(!text.contains("device label"));
 }

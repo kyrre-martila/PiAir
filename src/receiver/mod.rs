@@ -16,6 +16,7 @@ pub(crate) mod setup;
 mod media;
 mod pairing;
 mod playback;
+mod playback_error;
 mod profile;
 #[allow(dead_code)] // Playback timing primitives remain gated beyond the initial diagnostic.
 mod ptp;
@@ -199,6 +200,65 @@ fn validate_receiver_observation(
         );
     }
     Ok(selected)
+}
+/// Retry only absence, never a rejected observation. Each attempt is a new,
+/// bounded mDNS snapshot; no endpoint from an earlier attempt is reused.
+fn playback_discovery(
+    loaded: &Loaded,
+    selected: &Selection,
+    cancel: &std::sync::atomic::AtomicBool,
+    discover: impl FnMut(u64, &std::sync::atomic::AtomicBool) -> Result<Vec<Receiver>>,
+) -> Result<Vec<Receiver>> {
+    playback_discovery_inner(loaded, selected, cancel, discover)
+        .context(playback_error::Stage::Discovery)
+}
+fn playback_discovery_inner(
+    loaded: &Loaded,
+    selected: &Selection,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut discover: impl FnMut(u64, &std::sync::atomic::AtomicBool) -> Result<Vec<Receiver>>,
+) -> Result<Vec<Receiver>> {
+    use std::sync::atomic::Ordering;
+    for attempt in 0..3 {
+        ensure!(
+            !cancel.load(Ordering::Relaxed),
+            "receiver discovery cancelled; authentication not started"
+        );
+        let snapshot = discover(loaded.config.discovery_timeout_secs, cancel)
+            .context("receiver discovery failed; authentication not started")?;
+        ensure!(
+            !cancel.load(Ordering::Relaxed),
+            "receiver discovery cancelled; authentication not started"
+        );
+        let count = snapshot.iter().filter(|r| r.id == selected.id).count();
+        // A conflicting identity must not be concealed by a retry, even if the
+        // selected ID is absent from this snapshot.
+        ensure!(
+            !snapshot
+                .iter()
+                .filter(|r| r.id != selected.id)
+                .flat_map(|r| &r.services)
+                .any(|s| s.addresses.iter().any(|ip| selected.addresses.contains(ip))),
+            "receiver discovery has conflicting identities; authentication not started"
+        );
+        if count == 0 {
+            tracing::debug!(
+                attempt = attempt + 1,
+                "selected receiver missing from fresh discovery snapshot"
+            );
+            continue;
+        }
+        ensure!(
+            count == 1,
+            "receiver discovery identity is ambiguous; authentication not started"
+        );
+        let observed = validate_selection(loaded, &selected.id, selected.method, &snapshot)
+            .context("receiver discovery validation failed; authentication not started")?;
+        ensure!(selected.matches_observation(&observed),
+            "receiver identity/capability/endpoint changed; review and select again; authentication not started");
+        return Ok(snapshot);
+    }
+    anyhow::bail!("selected speaker was not found after 3 discovery attempts; check its power and network, then retry; authentication not started")
 }
 pub fn unpair(loaded: &Loaded, id: &str) -> Result<()> {
     exact_id(id)?;
@@ -943,21 +1003,27 @@ fn ptp_operation_cancellable(
         "PTP operation requires interactive confirmation"
     );
     let setup_authorized = cancel.is_some();
-    let snapshot = match &cancel {
-        Some(cancel) => {
-            discovery::discover_cancellable(loaded.config.discovery_timeout_secs, cancel)?
-        }
-        None => discovery::discover(loaded.config.discovery_timeout_secs)?,
+    let discovery_cancel = match &cancel {
+        Some(cancel) => cancel.clone(),
+        None => runtime::signal_cancellation()?,
     };
-    if transient {
-        println!("Explicit OwnTone-reference transient SRP on the selected receiver: no persistent HAP credentials or verified persistent receiver identity; no credentials saved and no authentication fallback. Authenticated capabilities and PTP/type-96 negotiation must succeed before media transmission.");
-    }
-    if let Some((device, duration, volume)) = live {
-        println!("Experimental live PTP capture: device={device:?}; seconds={duration:?} (None = Ctrl+C); volume={volume:?} dB (None preserves current volume). Explicit volume changes may persist. Stereo 44100 Hz S16; no activity detection.");
-    } else if let Some((wav, volume)) = &playback {
-        println!("Selected receiver: {id}; PTP type96, UDP, ALAC16 stereo, 44100 Hz, 352 samples/packet. WAV frames: {}; EOF: {}; volume: {volume:?} dB (None preserves current volume). Explicit volume changes may persist. Local transmission does not prove audible playback.", wav.frames.len(), wav.eof);
-    } else {
-        println!("PTP negotiation only: authenticated /info, initial SETUP, RECORD, SETPEERS, realtime type-96 UDP stream SETUP, {seconds}s bounded observation and TEARDOWN. Zero audio bytes; no volume changes. Reports operational readiness separately from unverified receiver synchronization.");
+    let snapshot = playback_discovery(
+        loaded,
+        &operation,
+        &discovery_cancel,
+        discovery::discover_cancellable,
+    )?;
+    if !setup_authorized {
+        if transient {
+            println!("Explicit OwnTone-reference transient SRP on the selected receiver: no persistent HAP credentials or verified persistent receiver identity; no credentials saved and no authentication fallback. Authenticated capabilities and PTP/type-96 negotiation must succeed before media transmission.");
+        }
+        if let Some((device, duration, volume)) = live {
+            println!("Experimental live PTP capture: device={device:?}; seconds={duration:?} (None = Ctrl+C); volume={volume:?} dB (None preserves current volume). Explicit volume changes may persist. Stereo 44100 Hz S16; no activity detection.");
+        } else if let Some((wav, volume)) = &playback {
+            println!("Selected receiver: {id}; PTP type96, UDP, ALAC16 stereo, 44100 Hz, 352 samples/packet. WAV frames: {}; EOF: {}; volume: {volume:?} dB (None preserves current volume). Explicit volume changes may persist. Local transmission does not prove audible playback.", wav.frames.len(), wav.eof);
+        } else {
+            println!("PTP negotiation only: authenticated /info, initial SETUP, RECORD, SETPEERS, realtime type-96 UDP stream SETUP, {seconds}s bounded observation and TEARDOWN. Zero audio bytes; no volume changes. Reports operational readiness separately from unverified receiver synchronization.");
+        }
     }
     if !setup_authorized {
         interactive::confirm_operation(
@@ -973,10 +1039,7 @@ fn ptp_operation_cancellable(
             },
         )?;
     }
-    let cancel = match cancel {
-        Some(cancel) => cancel,
-        None => runtime::signal_cancellation()?,
-    };
+    let cancel = cancel.unwrap_or(discovery_cancel);
     let mut authenticated = session::Session::new();
     authenticated.cancel = cancel;
     authenticated
@@ -992,8 +1055,11 @@ fn ptp_operation_cancellable(
             },
             credential.as_ref(),
         )
-        .context("selected receiver PTP authentication failed; no fallback")?;
-    let mut session = authenticated.into_ptp_foundation()?;
+        .context("selected receiver PTP authentication failed; no fallback")
+        .context(playback_error::Stage::Connection)?;
+    let mut session = authenticated
+        .into_ptp_foundation()
+        .context(playback_error::Stage::Connection)?;
     let result = (|| {
         session.setup_realtime_authenticated().context(
             "authenticated receiver capabilities or initial PTP SETUP rejected; advertised PTP support alone is insufficient; no fallback",
@@ -1010,6 +1076,10 @@ fn ptp_operation_cancellable(
         }
         session.stop()
     })();
-    println!("PTP operation: {}", session.diagnostic());
-    result
+    if setup_authorized {
+        tracing::debug!(diagnostic = %session.diagnostic(), "playback test completed");
+    } else {
+        println!("PTP operation: {}", session.diagnostic());
+    }
+    result.context(playback_error::Stage::Playback)
 }

@@ -598,12 +598,12 @@ mod stua_volume_tests {
 
 #[derive(Subcommand)]
 #[command(
-    after_help = "Examples:\n  piair allowlist list\n  piair allowlist add device:aabbccddeeff\n  piair allowlist remove device:aabbccddeeff\n\nChanges require an interactive terminal and y/yes. Adding requires independent physical identity verification (device label or trusted local settings); mDNS alone is insufficient. Approval grants eligibility for later receiver operations, not authentication."
+    after_help = "Examples:\n  piair allowlist list\n  piair allowlist add device:aabbccddeeff\n  piair allowlist remove device:aabbccddeeff\n\nChanges require an interactive terminal and y/yes. Adding asks for one explicit approval of the exact canonical receiver ID. Approval permits later connections; it does not authenticate or cryptographically verify the receiver. Discovered receivers are never automatically approved."
 )]
 pub enum AllowlistCommand {
     /// List exact approved IDs and the resolved configuration path.
     List,
-    /// Approve an independently physically verified canonical receiver ID.
+    /// Approve an exact canonical receiver ID for use with PiAir.
     Add { receiver_id: String },
     /// Revoke local approval; stored credentials are retained, no receiver contact.
     Remove { receiver_id: String },
