@@ -30,7 +30,13 @@ customizations, malformed output, actual execution errors, preflight retry and
 fresh-install rollback with unchanged personal data. An actual `systemctl
 --root` test exercises the installed systemd unit-file implementation against an
 isolated inventory. A read-only integration test exercises missing-template
-inspection against a running system manager on the systemd CI runner.
+inspection against a running system manager on the systemd CI runner. An
+explicitly opted-in disposable-runner test in `scripts/test_first_install_systemd.py`
+also performs a real system-wide installation with an inert ELF fixture, injects
+a post-replacement failure, verifies rollback and retry, then checks the installed
+template is loaded, inactive and disabled. All systemctl operations and filesystem
+transactions in that test are real; only hardware prerequisites and the remote
+checksum lookup are substituted.
 
 The existing Rust checks, Python/systemd suite, native ARM64 Bookworm packaging,
 ELF/glibc checks, checksums and clean Bookworm runtime checks remain required.
