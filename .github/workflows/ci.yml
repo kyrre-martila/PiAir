@@ -1,26 +1,59 @@
 name: Rust
 on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
   workflow_dispatch:
+
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         command:
-          - cargo fmt --check
-          - cargo clippy --all-targets -- -D warnings
-          - cargo test
+          - cargo fmt --all -- --check
+          - cargo clippy --locked --all-targets -- -D warnings
+          - cargo test --locked
+          - cargo build --release --locked
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
           components: rustfmt, clippy
       - name: Install ALSA build dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - run: ${{ matrix.command }}
       - name: Check committed dependency resolution
-        if: matrix.command == 'cargo test'
+        run: git diff --exit-code -- Cargo.lock
+
+  arm64:
+    name: ARM64 release build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-unknown-linux-gnu
+      - name: Install native ARM64 ALSA build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - name: Build for Raspberry Pi OS 64-bit architecture
+        run: cargo build --release --locked --target aarch64-unknown-linux-gnu
+      - name: Check committed dependency resolution
         run: git diff --exit-code -- Cargo.lock
