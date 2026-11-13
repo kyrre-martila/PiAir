@@ -171,8 +171,9 @@ fn validate_properties(p: &BTreeMap<&str, &str>, user: &str) -> Result<()> {
         );
     }
     ensure!(
-        p.get("ExecStart")
-            .is_some_and(|v| v.contains("argv[]=/usr/local/bin/piair run --allow-unattended ;")),
+        p.get("ExecStart").is_some_and(|v| v.starts_with(
+            "{ path=/usr/local/bin/piair ; argv[]=/usr/local/bin/piair run --allow-unattended ;"
+        ) && v.matches("argv[]=").count() == 1),
         "unexpected service executable or arguments"
     );
     ensure!(
@@ -217,6 +218,11 @@ mod tests {
         for (from, to) in [
             ("LoadState=loaded", "LoadState=not-found"),
             ("User=pi", "User=root"),
+            ("path=/usr/local/bin/piair ;", "path=/unexpected/program ;"),
+            (
+                "--allow-unattended ; }",
+                "--allow-unattended ; } { path=/unexpected ; argv[]=unexpected ; }",
+            ),
             ("Environment=\n", "Environment=PIAIR_CONFIG=/other\n"),
             ("DropInPaths=\n", "DropInPaths=/override\n"),
             (

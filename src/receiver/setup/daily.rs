@@ -292,10 +292,16 @@ pub(crate) fn daily(mut loaded: Loaded) -> Result<()> {
                         let result =
                             test_audio(&loaded, &loaded.config.playback, &mut ui, cancel.clone());
                         drop(instance);
-                        result?;
-                        if was_running {
+                        // q backs out of the test, but a service we stopped still
+                        // deserves a restart offer. Ctrl+C exits without prompts.
+                        if was_running
+                            && !cancel.load(Ordering::Relaxed)
+                            && (result.is_ok()
+                                || result.as_ref().is_err_and(|e| e.is::<Cancelled>()))
+                        {
                             restart_offer(&loaded, &mut ui)?;
                         }
+                        result?;
                     }
                 }
                 5 => {
