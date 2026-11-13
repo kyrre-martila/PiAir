@@ -19,6 +19,27 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Foreground automatic playback without prompts; requires existing approval and selection.
+    Run {
+        receiver_id: String,
+        /// Explicit permission for repeated unattended sessions for this invocation only.
+        #[arg(long, required = true)]
+        allow_unattended: bool,
+        #[arg(long)]
+        capture_device: String,
+        /// Explicit profile; transient requires a saved --method transient selection.
+        #[arg(long, value_enum)]
+        authentication: crate::receiver::runtime::Authentication,
+        #[arg(long, default_value_t = -45.0, allow_negative_numbers = true)]
+        threshold_dbfs: f64,
+        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(20..=9000))]
+        start_duration_ms: u64,
+        #[arg(long, default_value_t = 30000, value_parser = clap::value_parser!(u64).range(20..=120000))]
+        stop_duration_ms: u64,
+        /// Explicit receiver volume change; may persist. Omitted preserves current volume.
+        #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i32).range(-60..=-10))]
+        volume_db: Option<i32>,
+    },
     /// Manage local receiver approval; never discover or contact receivers.
     Allowlist {
         #[command(subcommand)]

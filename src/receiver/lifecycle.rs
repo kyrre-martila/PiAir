@@ -20,6 +20,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// A failed bounded teardown must remain visible even when interrupted.
+#[derive(Debug)]
+pub(super) struct CleanupFailure(pub anyhow::Error);
+impl std::fmt::Display for CleanupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cleanup failed: {:#}", self.0)
+    }
+}
+impl std::error::Error for CleanupFailure {}
+
 pub const PLAYBACK_BLOCKER: &str = "buffered playback unavailable: receiver clock adoption is unverified; PeerObserved, elapsed time and RTSP 200 never authorize media";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -908,7 +918,9 @@ impl Session {
             !matches!(self.state, State::Closed | State::Failed | State::Stopping),
             "buffered session already closed"
         );
-        let result = self.cleanup();
+        let result = self
+            .cleanup()
+            .map_err(|error| anyhow::Error::new(CleanupFailure(error)));
         self.state.advance(if result.is_ok() {
             State::Closed
         } else {
@@ -982,7 +994,8 @@ impl Session {
             self.state = State::Failed;
             return match cleanup {
                 Ok(()) => Err(error),
-                Err(cleanup) => Err(error.context(format!("cleanup: {cleanup:#}"))),
+                Err(cleanup) => Err(anyhow::Error::new(CleanupFailure(cleanup))
+                    .context(format!("session: {error:#}"))),
             };
         }
         Ok(())

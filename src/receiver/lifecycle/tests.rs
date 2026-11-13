@@ -2342,6 +2342,10 @@ fn complete_ptp_wav_lifecycle_encrypts_paces_syncs_retransmits_and_releases() {
 
 #[test]
 fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() {
+    let active_signal = std::env::var("PIAIR_ACTIVE_PLAYBACK_SIGNAL").ok();
+    let signal_cancel = active_signal
+        .as_ref()
+        .map(|_| super::super::runtime::signal_cancellation().unwrap());
     for (mode, live) in [
         ("cancel", false),
         ("timing-loss", false),
@@ -2358,8 +2362,12 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
         ("duration", true),
         ("auto-stop", true),
         ("auto-cancel", true),
+        ("auto-teardown-timeout", true),
         ("auto-disconnect", true),
     ] {
+        if active_signal.is_some() && !matches!(mode, "auto-cancel" | "auto-teardown-timeout") {
+            continue;
+        }
         let closed = Arc::new(AtomicBool::new(false));
         let server_closed = closed.clone();
         let silence = Arc::new(AtomicBool::new(false));
@@ -2443,7 +2451,7 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
                             "capture must join before TEARDOWN"
                         );
                     }
-                    if mode == "teardown-timeout" {
+                    if matches!(mode, "teardown-timeout" | "auto-teardown-timeout") {
                         thread::sleep(Duration::from_millis(500));
                         break;
                     }
@@ -2461,6 +2469,10 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
                 seq += 1;
             }
         });
+        if let Some(cancel) = &signal_cancel {
+            cancel.store(false, Ordering::Relaxed);
+            owner.cancel = cancel.clone();
+        }
         owner.realtime_profile = true;
         let (event, peer_event) = udp_pair();
         let (general, _peer_general) = udp_pair();
@@ -2509,6 +2521,7 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
 
         let cancel = owner.cancel.clone();
         let (finished, playback_done) = std::sync::mpsc::channel();
+        let active_signal = active_signal.clone();
         let receiver = thread::spawn(move || {
             data.set_nonblocking(false).unwrap();
             data.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
@@ -2542,9 +2555,25 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
             assert!(data.recv(&mut packet).unwrap() > 12);
             if matches!(
                 mode,
-                "cancel" | "teardown-timeout" | "slow-start" | "auto-cancel"
+                "cancel"
+                    | "teardown-timeout"
+                    | "slow-start"
+                    | "auto-cancel"
+                    | "auto-teardown-timeout"
             ) {
-                cancel.store(true, Ordering::Relaxed);
+                if let Some(signal) = &active_signal {
+                    assert!(std::process::Command::new("kill")
+                        .args([signal, &std::process::id().to_string()])
+                        .status()
+                        .unwrap()
+                        .success());
+                } else {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+            if active_signal.is_some() {
+                data.set_read_timeout(Some(Duration::from_millis(100)))
+                    .unwrap();
             }
             if mode == "auto-stop" {
                 quiet.store(true, Ordering::Release);
@@ -2627,7 +2656,7 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
             owner.play_wav(&vec![[123, -456]; 4 * profile::RATE as usize], None)
         };
         let _ = finished.send(());
-        if mode == "teardown-timeout" {
+        if matches!(mode, "teardown-timeout" | "auto-teardown-timeout") {
             assert!(
                 started.elapsed() < Duration::from_secs(2),
                 "TEARDOWN exceeded cleanup bound"
@@ -2646,6 +2675,14 @@ fn playback_cancellation_timing_loss_and_receiver_disconnect_join_and_cleanup() 
             assert_eq!(owner.state(), State::Closed);
         } else {
             assert!(result.is_err(), "{mode}");
+            if matches!(mode, "auto-cancel" | "auto-teardown-timeout") {
+                let outcome = super::super::runtime::finish_attempt(result, true);
+                if mode == "auto-teardown-timeout" {
+                    assert!(outcome.unwrap_err().is::<super::CleanupFailure>());
+                } else {
+                    outcome.unwrap();
+                }
+            }
             assert_eq!(owner.state(), State::Failed);
         }
         if matches!(mode, "startup" | "startup-cancel" | "startup-disconnect") {
@@ -2707,6 +2744,77 @@ fn local_ptp_bind_permission_failure_tears_down_accepted_setup() {
         assert!(!owner.session_bound);
         assert!(owner.control.is_none() && owner.timing.is_none() && owner.events.is_none());
         assert!(owner.diagnostic().contains("TEARDOWN: acknowledged"));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn cancellation_at_each_realtime_control_stage_releases_all_local_resources() {
+    for pending_stage in 1..=5 {
+        let (entered, pending) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let (mut owner, _approval, server) = fixture(move |mut socket| {
+            let mut keys = server_keys();
+            for (seq, method, response) in [
+                (1, "GET /info ", Some(realtime_info())),
+                (2, "SETUP ", Some(setup(123))),
+                (3, "RECORD ", None),
+                (4, "SETPEERS ", None),
+                (5, "SETUP ", None),
+            ] {
+                let header = read_request(&mut socket, &mut keys).0;
+                assert!(
+                    header.starts_with(method),
+                    "stage {pending_stage}, expected {method}, got {header}"
+                );
+                if seq == pending_stage {
+                    entered.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(2)).unwrap();
+                    // Cancellation must close the wire without a later control
+                    // stage, media request, redial, or reuse of cipher state.
+                    assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+                    return;
+                }
+                reply(&mut socket, &mut keys, seq, response);
+            }
+        });
+        let cancel = owner.cancel.clone();
+        owner.control.as_mut().unwrap().diagnostic_cancel = Some(cancel.clone());
+        owner.realtime_profile = true;
+        let change = thread::spawn(move || {
+            pending.recv_timeout(Duration::from_secs(2)).unwrap();
+            cancel.store(true, Ordering::Relaxed);
+            release.send(()).unwrap();
+        });
+        let start = Instant::now();
+        let (event, _peer_event) = udp_pair();
+        let (general, _peer_general) = udp_pair();
+        let result = owner.negotiate_with(|wire, setup, clock| {
+            Ok((
+                None,
+                ptp::Service::attach(
+                    ptp::Grandmaster::new(
+                        clock,
+                        setup.clock_id,
+                        Instant::now(),
+                        Duration::from_secs(30),
+                    )?,
+                    event,
+                    general,
+                    wire.ptp_lease()?,
+                )?,
+            ))
+        });
+        let result = owner
+            .finish(result)
+            .and_then(|()| owner.negotiate_realtime());
+        assert!(result.is_err(), "pending stage {pending_stage}");
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(owner.state(), State::Failed);
+        assert!(owner.control.is_none() && owner.timing.is_none() && owner.events.is_none());
+        assert!(owner.realtime_transport.is_none() && owner.realtime_encoder.is_none());
+        assert!(owner.prepared.is_none() && owner.stream.is_none());
+        change.join().unwrap();
         server.join().unwrap();
     }
 }

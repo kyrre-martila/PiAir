@@ -244,7 +244,11 @@ impl Records {
     }
 }
 
-fn collect(daemon: &ServiceDaemon, timeout: Duration) -> Result<Vec<Receiver>> {
+fn collect(
+    daemon: &ServiceDaemon,
+    timeout: Duration,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<Receiver>> {
     let monitor = daemon.monitor().context("cannot monitor mDNS failures")?;
     let channels = [daemon.browse(AIRPLAY)?, daemon.browse(RAOP)?];
     let deadline = Instant::now() + timeout;
@@ -253,7 +257,7 @@ fn collect(daemon: &ServiceDaemon, timeout: Duration) -> Result<Vec<Receiver>> {
         timeout_secs = timeout.as_secs(),
         "passive mDNS discovery started"
     );
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
         // Limit each batch so continuous multicast traffic cannot extend timeout.
         for channel in &channels {
             for _ in 0..32 {
@@ -291,9 +295,16 @@ fn collect(daemon: &ServiceDaemon, timeout: Duration) -> Result<Vec<Receiver>> {
 }
 
 pub fn discover(timeout_secs: u64) -> Result<Vec<Receiver>> {
+    discover_cancellable(timeout_secs, &std::sync::atomic::AtomicBool::new(false))
+}
+
+pub(crate) fn discover_cancellable(
+    timeout_secs: u64,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<Receiver>> {
     let daemon =
         ServiceDaemon::new().context("cannot start mDNS; check UDP 5353 and multicast access")?;
-    let result = collect(&daemon, Duration::from_secs(timeout_secs));
+    let result = collect(&daemon, Duration::from_secs(timeout_secs), cancel);
     // Always request shutdown, including after a partially successful browse setup.
     let shutdown = (|| -> Result<()> {
         for service in [AIRPLAY, RAOP] {

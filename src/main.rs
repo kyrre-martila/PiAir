@@ -23,6 +23,32 @@ fn run_with_discovery(
 ) -> Result<()> {
     let loaded = config::load(cli.config)?;
     match cli.command {
+        Command::Run {
+            receiver_id,
+            allow_unattended,
+            capture_device,
+            authentication,
+            threshold_dbfs,
+            start_duration_ms,
+            stop_duration_ms,
+            volume_db,
+        } => {
+            receiver::runtime::unattended(
+                &loaded,
+                receiver::runtime::Settings {
+                    receiver_id,
+                    capture_device,
+                    authentication,
+                    volume_db,
+                    detection: audio::activity::Settings {
+                        threshold_dbfs,
+                        start_ms: start_duration_ms,
+                        stop_ms: stop_duration_ms,
+                    },
+                },
+                allow_unattended,
+            )?;
+        }
         Command::Allowlist { command } => allowlist::run(&loaded, command)?,
         Command::Receivers => {
             receiver::list(&loaded, &discover(loaded.config.discovery_timeout_secs)?)?
