@@ -13,8 +13,8 @@ use std::{
 use toml_edit::{DocumentMut, Item, Value};
 
 #[derive(Debug, PartialEq)]
-struct Snapshot {
-    text: String,
+pub(crate) struct Snapshot {
+    pub(crate) text: String,
     // Detect replacement, chmod and in-place writes, even with identical bytes.
     stamp: Stamp,
 }
@@ -44,20 +44,23 @@ impl From<&fs::Metadata> for Stamp {
     }
 }
 
-fn snapshot(path: &Path) -> Result<Option<Snapshot>> {
+pub(crate) fn snapshot(path: &Path) -> Result<Option<Snapshot>> {
+    safe_parent(path, false)?;
     let metadata = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
     ensure!(
-        metadata.is_file(),
-        "configuration must be a regular file, not a symlink"
+        metadata.is_file()
+            && metadata.nlink() == 1
+            && metadata.uid() == rustix::process::geteuid().as_raw(),
+        "configuration must be an owned regular file with one link, not a symlink"
     );
     let stamp = Stamp::from(&metadata);
     let mut file = File::options()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .context("cannot read configuration")?;
     ensure!(
@@ -126,16 +129,19 @@ fn confirm(input: &mut impl BufRead, output: &mut impl Write, prompt: &str) -> R
     )
 }
 
-fn save(path: &Path, expected: Option<&Snapshot>, text: &str) -> Result<()> {
+pub(crate) fn save(path: &Path, expected: Option<&Snapshot>, text: &str) -> Result<()> {
     Config::parse(text)?;
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    fs::create_dir_all(parent).context("cannot create configuration directory")?;
+    safe_parent(path, true)?;
     // Lock the stable directory inode, not the configuration inode replaced by rename.
-    // Every allowlist writer holds this lock through comparison and publication.
-    let directory = File::open(parent)?;
+    // All configuration writers hold this lock through comparison and publication.
+    let directory = File::options()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(parent)?;
     directory
         .try_lock()
         .context("another configuration writer is active; retry later")?;
@@ -385,5 +391,79 @@ mod tests {
             1
         );
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+}
+
+// Reject symlink ancestors and directories writable by other users. Sticky /tmp
+// is allowed for private temporary directories; the immediate parent must be owned.
+fn safe_parent(path: &Path, create: bool) -> Result<()> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let parent = absolute
+        .parent()
+        .context("configuration needs a parent directory")?;
+    let mut current = std::path::PathBuf::new();
+    for component in parent.components() {
+        ensure!(
+            !matches!(component, std::path::Component::ParentDir),
+            "configuration path must not contain .."
+        );
+        current.push(component.as_os_str());
+        let meta = match fs::symlink_metadata(&current) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if !create {
+                    return Ok(());
+                }
+                use std::os::unix::fs::DirBuilderExt;
+                fs::DirBuilder::new().mode(0o700).create(&current)?;
+                fs::symlink_metadata(&current)?
+            }
+            Err(e) => return Err(e.into()),
+        };
+        ensure!(
+            meta.is_dir() && !meta.file_type().is_symlink(),
+            "configuration parent must not be a symlink"
+        );
+        ensure!(
+            meta.mode() & 0o022 == 0 || meta.mode() & 0o1000 != 0,
+            "configuration ancestor is writable by others"
+        );
+        if current == parent {
+            ensure!(
+                meta.uid() == rustix::process::geteuid().as_raw() && meta.mode() & 0o022 == 0,
+                "configuration directory must be owned and not writable by others"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod parent_security_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn refuses_symlink_ancestors_hardlinks_and_writable_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        assert!(save(&alias.join("config.toml"), None, "").is_err());
+        assert!(!real.join("config.toml").exists());
+        let path = real.join("config.toml");
+        fs::write(&path, "# original").unwrap();
+        let link = real.join("link");
+        fs::hard_link(&path, &link).unwrap();
+        assert!(snapshot(&path).is_err());
+        fs::remove_file(link).unwrap();
+        let old = snapshot(&path).unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(save(&path, old.as_ref(), "").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# original");
     }
 }

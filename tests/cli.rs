@@ -730,7 +730,6 @@ fn unattended_run_requires_opt_in_receiver_and_explicit_authentication() {
     for extra in [
         vec![],
         vec!["--authentication", "own-tone-transient"],
-        vec!["--allow-unattended"],
         vec!["--allow-unattended", "--authentication", "legacy"],
     ] {
         let args: Vec<_> = base.into_iter().chain(extra).collect();
@@ -738,6 +737,12 @@ fn unattended_run_requires_opt_in_receiver_and_explicit_authentication() {
         assert_eq!(output.status.code(), Some(2));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("ALSA"));
     }
+    let output = run(&base
+        .into_iter()
+        .chain(["--allow-unattended"])
+        .collect::<Vec<_>>());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("missing playback.authentication"));
     let output = run(&["run", "--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();

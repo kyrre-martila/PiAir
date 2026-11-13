@@ -77,11 +77,11 @@ entries, and validate the whole configuration before publishing. Existing file
 permissions and ownership are preserved; read-only files and symlinks are refused.
 Writes use a flushed temporary file in the same directory and atomic replacement,
 followed by directory sync. Temporary files are cleaned up on pre-commit failures.
-Allowlist writers take a nonblocking directory lock and reject stale content or
+Allowlist, playback configuration and calibration writers take a nonblocking directory lock and reject stale content or
 metadata after confirmation and immediately before replacement. If a competing
 write is detected, rerun and review the new state. Other tools and manual editors
 must honor the same directory lock to serialize the final replacement; avoid
-editing/calibrating the same configuration concurrently. A directory-sync error
+manual editing of the same configuration concurrently. A directory-sync error
 reports that the complete file was saved but durability could not be confirmed.
 
 ## Identify and monitor a USB input
@@ -157,6 +157,43 @@ idle input and varied music. If quiet music cannot start reliably while noise
 stays below stop, improve signal-to-noise ratio/gain/cabling before lowering
 thresholds. Never silently adapt thresholds during music. Recalibrate after
 changing gain, cabling, ADC or source volume.
+
+## Save automatic playback settings
+
+After explicitly approving and persistently selecting your receiver, save its
+operational settings once. Replace the placeholder ID with your approved HomePod:
+
+```sh
+piair config set-playback device:0123456789ab \
+  --capture-device 'plughw:CARD=CODEC,DEV=0' \
+  --authentication own-tone-transient \
+  --threshold-dbfs -45 --start-duration-ms 1000 --stop-duration-ms 30000
+piair run --allow-unattended
+```
+
+This example uses a Behringer UCA202 and a HomePod explicitly selected with
+`--method transient`. Its values worked for one Raspberry Pi setup; they are
+not universal hardware recommendations. `stored-hap` instead requires existing
+HAP credentials and a persistent receiver selection. Neither profile is inferred.
+Saving performs local validation only and never discovers, connects or captures.
+It cannot approve, select, pair or move credentials.
+
+`config set-playback` patches `[playback]`, retaining omitted values. For example,
+`piair config set-playback --threshold-dbfs -48` updates only the effective
+threshold. Optional `--volume-db -20` sets receiver volume on playback and may
+persist remotely; `--preserve-volume` clears a saved volume. `run` accepts the
+same flags as invocation-only overrides, plus an optional positional receiver ID.
+Explicit CLI values override saved playback values, which override runtime numeric
+defaults. Device, receiver ID and authentication have no runtime defaults and
+produce actionable errors when absent. `[audio]` is never used as a fallback.
+
+Existing files need no migration or repeated pairing. `[audio]` retains the
+legacy two-threshold monitor/calibration detector; calibration changes only those
+thresholds. Automatic playback retains its existing single-threshold detector.
+There is no safe automatic conversion between those semantics. See
+[the schema and runtime rules](docs/RUNTIME.md#persistent-playback-configuration).
+Operational changes apply after restart; security revocations remain live.
+Saved settings never replace the mandatory per-invocation `--allow-unattended`.
 
 ## Configuration and detector behavior
 

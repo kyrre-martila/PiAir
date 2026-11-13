@@ -21,24 +21,12 @@ pub struct Cli {
 pub enum Command {
     /// Foreground automatic playback without prompts; requires existing approval and selection.
     Run {
-        receiver_id: String,
-        /// Explicit permission for repeated unattended sessions for this invocation only.
+        receiver_id: Option<String>,
+        /// Explicit permission for this invocation only; saved settings never authorize playback.
         #[arg(long, required = true)]
         allow_unattended: bool,
-        #[arg(long)]
-        capture_device: String,
-        /// Explicit profile; transient requires a saved --method transient selection.
-        #[arg(long, value_enum)]
-        authentication: crate::receiver::runtime::Authentication,
-        #[arg(long, default_value_t = -45.0, allow_negative_numbers = true)]
-        threshold_dbfs: f64,
-        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(20..=9000))]
-        start_duration_ms: u64,
-        #[arg(long, default_value_t = 30000, value_parser = clap::value_parser!(u64).range(20..=120000))]
-        stop_duration_ms: u64,
-        /// Explicit receiver volume change; may persist. Omitted preserves current volume.
-        #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i32).range(-60..=-10))]
-        volume_db: Option<i32>,
+        #[command(flatten)]
+        playback: PlaybackArgs,
     },
     /// Manage local receiver approval; never discover or contact receivers.
     Allowlist {
@@ -233,6 +221,12 @@ pub enum AudioCommand {
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
+    /// Save validated automatic playback settings locally; no audio or receiver contact.
+    SetPlayback {
+        receiver_id: Option<String>,
+        #[command(flatten)]
+        playback: PlaybackArgs,
+    },
     Check,
     Show,
 }
@@ -850,4 +844,29 @@ mod live_arguments {
                 .is_err()
         );
     }
+}
+
+/// Shared patch arguments for run and the scriptable configuration writer.
+#[derive(clap::Args, Default)]
+pub struct PlaybackArgs {
+    #[arg(long)]
+    pub capture_device: Option<String>,
+    #[arg(long, value_enum)]
+    pub authentication: Option<crate::receiver::runtime::Authentication>,
+    #[arg(long, allow_negative_numbers = true)]
+    pub threshold_dbfs: Option<f64>,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(20..=9000))]
+    pub start_duration_ms: Option<u64>,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(20..=120000))]
+    pub stop_duration_ms: Option<u64>,
+    #[arg(
+        long,
+        allow_negative_numbers = true,
+        conflicts_with = "preserve_volume",
+        value_parser = clap::value_parser!(i32).range(-60..=-10)
+    )]
+    pub volume_db: Option<i32>,
+    /// Clear a saved volume for set-playback, or preserve receiver volume for this run.
+    #[arg(long)]
+    pub preserve_volume: bool,
 }

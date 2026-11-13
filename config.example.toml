@@ -19,3 +19,19 @@ start_duration_ms = 200
 stop_duration_ms = 5000
 pre_roll_ms = 1000
 calibration_duration_secs = 30
+
+# Automatic AirPlay playback ONLY: `piair run --allow-unattended`.
+# [audio] above remains independent and controls monitor/calibration only.
+# No receiver, capture device or authentication profile is inferred by run.
+# Set these with `piair config set-playback ...` after approval and selection.
+[playback]
+# capture_device = "plughw:CARD=CODEC,DEV=0" # Example Behringer UCA202, verify locally
+# receiver_id = "device:0123456789ab" # Placeholder: replace with approved selected HomePod ID
+# authentication = "own-tone-transient" # Requires explicit --method transient selection
+# Alternatively "stored-hap" uses existing enrolled HAP credentials.
+# These numeric defaults retain the previous automatic runtime behavior; they
+# are proven for one setup, not universal recommendations for audio hardware.
+threshold_dbfs = -45.0
+start_duration_ms = 1000
+stop_duration_ms = 30000
+# volume_db = -20 # Optional -60..=-10 integer dB; may persist on the receiver

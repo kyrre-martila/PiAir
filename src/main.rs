@@ -26,28 +26,15 @@ fn run_with_discovery(
         Command::Run {
             receiver_id,
             allow_unattended,
-            capture_device,
-            authentication,
-            threshold_dbfs,
-            start_duration_ms,
-            stop_duration_ms,
-            volume_db,
+            playback,
         } => {
-            receiver::runtime::unattended(
-                &loaded,
-                receiver::runtime::Settings {
-                    receiver_id,
-                    capture_device,
-                    authentication,
-                    volume_db,
-                    detection: audio::activity::Settings {
-                        threshold_dbfs,
-                        start_ms: start_duration_ms,
-                        stop_ms: stop_duration_ms,
-                    },
-                },
-                allow_unattended,
-            )?;
+            anyhow::ensure!(allow_unattended, "run requires explicit --allow-unattended");
+            let settings = loaded
+                .config
+                .playback
+                .patched(receiver_id, playback)?
+                .effective()?;
+            receiver::runtime::unattended(&loaded, settings, allow_unattended)?;
         }
         Command::Allowlist { command } => allowlist::run(&loaded, command)?,
         Command::Receivers => {
@@ -214,6 +201,12 @@ fn run_with_discovery(
             println!("No service or receiver status was queried.");
         }
         Command::Config { command } => match command {
+            ConfigCommand::SetPlayback {
+                receiver_id,
+                playback,
+            } => {
+                config::save_playback(&loaded, receiver_id, playback)?;
+            }
             ConfigCommand::Check => {
                 println!("Valid: {} ({})", loaded.path.display(), loaded.source);
             }
