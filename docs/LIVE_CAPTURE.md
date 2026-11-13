@@ -109,7 +109,7 @@ Still required on Raspberry Pi 3B: identify the UCA202 by stable card ID; test
 unplug/reconnect input; Ctrl+C during prefill and playback; and physically confirm
 HomePod sound through the end of bounded playback. Synthetic tests do not establish
 USB driver behavior, long-term audibility, actual system/receiver latency, or
-OwnTone-equivalent hardware performance. See the README for exact commands.
+OwnTone-equivalent hardware performance. See [advanced usage](ADVANCED_USAGE.md#experimental-live-usb-input-over-ptp) for exact commands.
 
 ## Automatic turntable mode
 

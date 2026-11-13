@@ -119,7 +119,7 @@ within stop duration plus a documented bounded teardown budget.
 
 ## Current implementation bounds
 
-See README for exact setting ranges and commands. At 48 kHz, the default one-second
+See [advanced usage](ADVANCED_USAGE.md) for exact setting ranges and commands. At 48 kHz, the default one-second
 ring stores 48,000 timestamped stereo f32 frames (768,000 bytes); maximum validated
 retention is ten seconds at 192 kHz (30,720,000 bytes, below 32 MiB). Pre-roll must
 cover start qualification plus one window; actual receiver startup latency is
