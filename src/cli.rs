@@ -19,6 +19,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Check for a stable official release and update the installed application.
+    Update,
+    /// Remove the installed application, preserving personal configuration and credentials.
+    Uninstall,
     /// Interactive first-time setup or safe reconfiguration (requires a terminal).
     Setup,
     /// Start the installed current-account service.

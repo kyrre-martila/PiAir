@@ -1,0 +1,111 @@
+name: Raspberry Pi release
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Bookworm ARM64 package and runtime
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    container:
+      # Official Rust 1.93 on Debian Bookworm (multiarch image index).
+      image: rust:1.93-bookworm@sha256:7c4ae649a84014c467d79319bbf17ce2632ae8b8be123ac2fb2ea5be46823f31
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install build and validation dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libasound2-dev pkg-config python3 binutils
+      - name: Validate Rust before packaging
+        run: |
+          rustup component add rustfmt clippy
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - name: Build native GNU ARM64 in Bookworm
+        run: cargo build --release --locked --target aarch64-unknown-linux-gnu
+      - name: Check ELF, dependencies, symbol versions and startup
+        run: sh scripts/verify-bookworm.sh target/aarch64-unknown-linux-gnu/release/piair
+      - name: Package and validate tag/version
+        shell: bash
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          tag="v$version"
+          if [[ "$RELEASE_REF" == refs/tags/* ]]; then tag=${RELEASE_REF#refs/tags/}; fi
+          python3 scripts/release.py --tag "$tag"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git diff --exit-code -- Cargo.lock
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: piair-bookworm-arm64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  runtime:
+    name: Clean Bookworm runtime startup
+    needs: package
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    container: debian:bookworm-slim
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: piair-bookworm-arm64
+          path: dist
+      - name: Verify and start with only supported runtime dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libasound2 ca-certificates
+          cd dist
+          sha256sum --check SHA256SUMS
+          tar -xzf piair-*-aarch64-unknown-linux-gnu.tar.gz
+          cd piair-*-aarch64-unknown-linux-gnu
+          sha256sum --check SHA256SUMS
+          test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.36'
+          ldd ./piair
+          ./piair --version
+          ./piair --help >/dev/null
+          test -s audio/Pachelbel_Canon_audio_test.wav
+          test -s audio/LICENSE.md
+
+  publish:
+    # Only an explicitly pushed version tag can publish, never PR/main/dispatch.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [package, runtime]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: piair-bookworm-arm64
+          path: dist
+      - name: Publish verified versioned assets using the scoped Actions token
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea9 # v7.0.1
+        with:
+          script: |
+            const fs = require('fs');
+            const tag = context.ref.slice('refs/tags/'.length);
+            if (!/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(tag)) throw new Error('Invalid stable tag');
+            const name = `piair-${tag.slice(1)}-aarch64-unknown-linux-gnu.tar.gz`;
+            const assets = [name, 'SHA256SUMS'];
+            for (const asset of assets) fs.accessSync(`dist/${asset}`);
+            // Draft until both assets upload; a failed upload never exposes a partial stable release.
+            const {data: release} = await github.rest.repos.createRelease({...context.repo, tag_name: tag, name: `PiAir ${tag}`, draft: true,
+              body: 'Raspberry Pi OS 64-bit Bookworm or newer (ARM64, glibc >= 2.36). See docs/INSTALL.md for installation and checksums. The bundled recording is separately CC BY-SA 3.0; attribution is included.'});
+            for (const asset of assets) await github.rest.repos.uploadReleaseAsset({...context.repo, release_id: release.id, name: asset, data: fs.readFileSync(`dist/${asset}`)});
+            await github.rest.repos.updateRelease({...context.repo, release_id: release.id, draft: false, make_latest: 'true'});

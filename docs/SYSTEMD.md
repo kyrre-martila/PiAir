@@ -4,7 +4,7 @@ The optional `systemd/piair@.service` is a **system** service template for Raspb
 Pi OS 64-bit (Bookworm/systemd 252 or later). An instance names an existing Linux
 account. PiAir runs as that account, in the foreground, without a terminal. It
 survives SSH logout; optional boot enablement is an explicit operator action.
-Installing files neither starts nor enables playback. There is no installer or updater. `piair setup` can configure playback and
+Installing files neither starts nor enables playback. Use the [release installer and maintenance commands](INSTALL.md). `piair setup` can configure playback and
 optionally activate a verified installed stock unit; see [SETUP.md](SETUP.md).
 
 ## Prepare as the PiAir user (no sudo)
@@ -53,7 +53,7 @@ directory and owned regular 0600 files. Confirm the service uses the same config
 as the successful foreground invocation. Relative custom paths resolve from the
 account's home; absolute paths avoid ambiguity.
 
-## Manual installation for testing (sudo commands)
+## Manual source installation for developers (sudo commands)
 
 Build as the ordinary user with `cargo build --release --locked`. Review the
 unit, then install the trusted binary without file capabilities. Keep the binary
@@ -67,8 +67,9 @@ sudo systemctl daemon-reload
 sudo systemctl start piair@USERNAME.service
 ```
 
-No `setcap` is needed for this binary. For upgrades, stop the service, replace the
-binary using the same install command, and start it explicitly. Systemd grants
+No `setcap` is needed for this binary. For release installations, use `piair update` and `piair uninstall`; see
+[installation and recovery](INSTALL.md). For manual source upgrades, stop the
+service before replacing files and start it explicitly. Systemd grants
 capabilities on each start, so replacing the binary requires no capability
 reapplication. Do not install a set-ID or file-capability-bearing binary here:
 privileged exec transitions can clear ambient capabilities.
@@ -238,4 +239,4 @@ sudoers/helpers. It never stops another service. If authorization fails, config
 is still saved; inspect both enablement and status before retrying. Custom units,
 config paths, environments or active services require manual review using this
 document. An absent unit is optional: finish setup successfully and follow the
-manual procedure above; installer work is planned for PR #74.
+manual procedure above; use the [release installation procedure](INSTALL.md).

@@ -28,3 +28,6 @@ rustc-ice-*.txt
 
 # Python deployment-helper tests
 __pycache__/
+
+# Release artifacts
+dist/
