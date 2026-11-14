@@ -924,7 +924,7 @@ fn optional_service_with<R: FnMut() -> Result<String>, W: Write>(
     let service = match inspect(loaded) {
         Ok(s) => s,
         Err(e) => {
-            ui.say(format!("Automatic activation unavailable: {e}\nSetup can finish successfully without a service.\nManual procedure: docs/SYSTEMD.md."))?;
+            ui.say(format!("Automatic activation unavailable: {e}\nSetup can finish successfully without a service.\nManual procedure: docs/OPERATIONS.md."))?;
             return Ok(());
         }
     };

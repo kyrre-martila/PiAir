@@ -6,10 +6,7 @@ use super::{
 use crate::audio::alac;
 use anyhow::{ensure, Result};
 use rand::{rngs::OsRng, RngCore};
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::VecDeque, time::Duration};
 use zeroize::{Zeroize, Zeroizing};
 
 // Sender policy, independent of the receiver's informational RECORD header and
@@ -19,60 +16,11 @@ pub const PLAYBACK_LEAD_SAMPLES: u32 = 2 * RATE;
 pub const STREAM_LATENCY_SAMPLES: u32 = profile::MIN_LATENCY;
 pub const SYNC_OFFSET_SAMPLES: u32 = PLAYBACK_LEAD_SAMPLES - STREAM_LATENCY_SAMPLES;
 
-pub struct Clock {
-    mono: Instant,
-    ntp: u64,
-}
-impl Clock {
-    pub fn new() -> Result<Self> {
-        let wall = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        let ntp = ((wall.as_secs().wrapping_add(2_208_988_800) & 0xffff_ffff) << 32)
-            | (((u64::from(wall.subsec_nanos())) << 32) / 1_000_000_000);
-        Ok(Self {
-            mono: Instant::now(),
-            ntp,
-        })
-    }
-    pub fn now(&self) -> u64 {
-        self.instant(Instant::now())
-    }
-    pub fn instant(&self, instant: Instant) -> u64 {
-        self.at(instant.saturating_duration_since(self.mono))
-    }
-    pub fn at(&self, elapsed: Duration) -> u64 {
-        self.ntp
-            .wrapping_add(elapsed.as_secs().wrapping_shl(32))
-            .wrapping_add((u64::from(elapsed.subsec_nanos()) << 32) / 1_000_000_000)
-    }
-}
 pub fn sample_time(samples: u64) -> Duration {
     Duration::new(
         samples / u64::from(RATE),
         ((samples % u64::from(RATE)) * 1_000_000_000 / u64::from(RATE)) as u32,
     )
-}
-pub fn timing_reply(request: &[u8], recv: u64, send: u64) -> Result<[u8; 32]> {
-    ensure!(
-        request.len() == 32 && request[..2] == [0x80, 0xd2],
-        "invalid NTP timing query"
-    );
-    let mut out = [0; 32];
-    out[..2].copy_from_slice(&[0x80, 0xd3]);
-    out[2..4].copy_from_slice(&request[2..4]);
-    out[8..16].copy_from_slice(&request[24..32]);
-    out[16..24].copy_from_slice(&recv.to_be_bytes());
-    out[24..].copy_from_slice(&send.to_be_bytes());
-    Ok(out)
-}
-pub fn sync(first: bool, next: u32, ntp: u64) -> [u8; 20] {
-    let mut out = [0; 20];
-    out[0] = if first { 0x90 } else { 0x80 };
-    out[1] = 0xd4;
-    out[3] = 7;
-    out[4..8].copy_from_slice(&next.wrapping_sub(SYNC_OFFSET_SAMPLES).to_be_bytes());
-    out[8..16].copy_from_slice(&ntp.to_be_bytes());
-    out[16..].copy_from_slice(&next.to_be_bytes());
-    out
 }
 /// PTP RTCP time announcement (PT 215), from the same clock as UDP319/320.
 /// The scheduler supplies the RTP position corresponding to `time` and its next
@@ -198,161 +146,9 @@ impl Drop for Encoder {
     }
 }
 /// RECORD Audio-Latency is diagnostic only, as in OwnTone's response handler.
-/// Parsing is deliberately non-fatal and never logs receiver-supplied text.
-pub fn record_latency(headers: &std::collections::BTreeMap<String, String>) {
-    let header = headers.get("audio-latency");
-    let value = header
-        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        .and_then(|n| n.parse::<u32>().ok());
-    let parse_status = match (header, value) {
-        (None, _) => "absent",
-        (_, Some(_)) => "unsigned decimal",
-        _ => "malformed unsigned decimal or u32 overflow",
-    };
-    tracing::debug!(target: "piair::rtsp", phase = "RECORD",
-        audio_latency_present = header.is_some(), audio_latency_samples = ?value,
-        parse_status, sender_sync_offset_samples = SYNC_OFFSET_SAMPLES,
-        sender_playback_lead_samples = PLAYBACK_LEAD_SAMPLES,
-        "RECORD receiver latency (informational)");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn record_latency_is_informational_and_diagnostics_are_bounded() {
-        for input in [
-            None,
-            Some(""),
-            Some("secret-token"),
-            Some("+11025"),
-            Some("-1"),
-            Some("11025.0"),
-            Some("11025 0"),
-            Some("4294967296"),
-            Some("0"),
-            Some("11024"),
-            Some("11025"),
-            Some("44100"),
-            Some("88200"),
-            Some("88201"),
-            Some("4294967295"),
-        ] {
-            let mut headers = std::collections::BTreeMap::new();
-            headers.insert("authorization".into(), "secret-credential".into());
-            if let Some(input) = input {
-                headers.insert("audio-latency".into(), input.into());
-            }
-            // Actual sync bytes cannot change after observing any RECORD header.
-            let initial = sync(true, 10, 123);
-            let periodic = sync(false, 44162, 123 + (1_u64 << 32));
-            let emit = || {
-                record_latency(&headers);
-                assert_eq!(sync(true, 10, 123), initial);
-                assert_eq!(sync(false, 44162, 123 + (1_u64 << 32)), periodic);
-            };
-            assert!(
-                super::super::diagnostics::tests::capture(tracing::Level::INFO, emit).is_empty()
-            );
-            let output = super::super::diagnostics::tests::capture(tracing::Level::DEBUG, emit);
-            assert!(output.contains("informational"), "{output}");
-            assert!(
-                output.contains("sender_sync_offset_samples\":77175"),
-                "{output}"
-            );
-            assert!(
-                output.contains("sender_playback_lead_samples\":88200"),
-                "{output}"
-            );
-            assert!(
-                output.contains(&format!("audio_latency_present\":{}", input.is_some())),
-                "{output}"
-            );
-            if let Some(n) = input
-                .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-                .and_then(|n| n.parse::<u32>().ok())
-            {
-                assert!(output.contains(&format!("Some({n})")), "{output}");
-            } else {
-                assert!(
-                    output.contains("audio_latency_samples\":\"None\""),
-                    "{output}"
-                );
-            }
-            let status = match input {
-                None => "absent",
-                Some(n)
-                    if !n.is_empty()
-                        && n.bytes().all(|b| b.is_ascii_digit())
-                        && n.parse::<u32>().is_ok() =>
-                {
-                    "unsigned decimal"
-                }
-                _ => "malformed unsigned decimal or u32 overflow",
-            };
-            assert!(
-                output.contains(&format!("parse_status\":\"{status}\"")),
-                "{output}"
-            );
-            assert!(!output.contains("secret"), "{output}");
-        }
-    }
-    #[test]
-    fn sender_timeline_has_one_offset_and_bounded_lead_and_drain() {
-        assert_eq!(SYNC_OFFSET_SAMPLES, 77175);
-        assert_eq!(STREAM_LATENCY_SAMPLES, 11025);
-        assert_eq!(
-            SYNC_OFFSET_SAMPLES + STREAM_LATENCY_SAMPLES,
-            PLAYBACK_LEAD_SAMPLES
-        );
-        let mono = Instant::now();
-        let clock = Clock {
-            mono,
-            ntp: 0xffff_fffe_8000_0000,
-        };
-        let origin = u32::MAX - 10;
-        // Initial sync and periodic syncs, including RTP and NTP era wrap.
-        // Periodic scheduling rounds up to a packet boundary just as Session does.
-        let interval = u64::from(RATE).div_ceil(SPF as u64) * SPF as u64;
-        for sent in [
-            0,
-            interval,
-            2 * interval,
-            3 * interval,
-            10 * interval,
-            30 * interval,
-        ] {
-            let next = origin.wrapping_add(sent as u32);
-            let elapsed = sample_time(sent);
-            let ntp = clock.instant(mono + elapsed);
-            let packet = sync(sent == 0, next, ntp);
-            assert_eq!(packet[0], if sent == 0 { 0x90 } else { 0x80 });
-            assert_eq!(
-                u32::from_be_bytes(packet[4..8].try_into().unwrap()),
-                origin.wrapping_sub(77175).wrapping_add(sent as u32)
-            );
-            assert_eq!(u32::from_be_bytes(packet[16..].try_into().unwrap()), next);
-            assert_eq!(u64::from_be_bytes(packet[8..16].try_into().unwrap()), ntp);
-            let ticks = ntp.wrapping_sub(clock.ntp);
-            let expected_ticks = ((u128::from(sent) << 32) / u128::from(RATE)) as u64;
-            // Nanosecond and NTP fixed-point truncation: < 6 NTP ticks.
-            assert!(expected_ticks.abs_diff(ticks) <= 5);
-            assert_eq!(next.wrapping_sub(origin), sent as u32);
-        }
-        for seconds in [1, 2, 3, 10, 30] {
-            let signal = seconds * u64::from(RATE);
-            let total = signal + u64::from(PLAYBACK_LEAD_SAMPLES);
-            let transmitted = total.div_ceil(SPF as u64) * SPF as u64;
-            assert!(transmitted >= total && transmitted - total < SPF as u64);
-            assert_eq!(sample_time(total), Duration::from_secs(seconds + 2));
-            // The signal's playback deadline is covered by the silence tail.
-            assert_eq!(
-                total - signal,
-                u64::from(SYNC_OFFSET_SAMPLES + STREAM_LATENCY_SAMPLES)
-            );
-            assert!(sample_time(transmitted) < Duration::from_millis((seconds + 2) * 1000 + 8));
-        }
-    }
     fn fixture_encoder() -> Encoder {
         let mut e = Encoder::new().unwrap();
         e.key.copy_from_slice(&(0..32).collect::<Vec<_>>());
@@ -451,38 +247,6 @@ mod tests {
             Encoder::new().unwrap().key.as_ref(),
             Encoder::new().unwrap().key.as_ref()
         );
-    }
-    #[test]
-    fn timing_and_sync_use_protocol_fields_and_monotonic_sample_time() {
-        let mut q = [0; 32];
-        q[..4].copy_from_slice(&[0x80, 0xd2, 0, 7]);
-        q[24..].copy_from_slice(&0x0102030405060708_u64.to_be_bytes());
-        let r = timing_reply(&q, 9, 10).unwrap();
-        assert_eq!(&r[..8], &[0x80, 0xd3, 0, 7, 0, 0, 0, 0]);
-        assert_eq!(&r[8..16], &q[24..]);
-        assert_eq!(&r[16..24], &9_u64.to_be_bytes());
-        assert_eq!(&r[24..], &10_u64.to_be_bytes());
-        assert!(timing_reply(&q[..31], 9, 10).is_err());
-        q[1] = 0xd3;
-        assert!(timing_reply(&q, 9, 10).is_err());
-        let s = sync(true, 10, 123);
-        assert_eq!(&s[..4], &[0x90, 0xd4, 0, 7]);
-        assert_eq!(
-            &s[4..8],
-            &10_u32.wrapping_sub(SYNC_OFFSET_SAMPLES).to_be_bytes()
-        );
-        assert_eq!(&s[8..16], &123_u64.to_be_bytes());
-        assert_eq!(&s[16..], &10_u32.to_be_bytes());
-        assert_eq!(sample_time(u64::from(RATE)), Duration::from_secs(1));
-        assert_eq!(
-            sample_time(u64::from(RATE) * 3600),
-            Duration::from_secs(3600)
-        );
-        let clock = Clock {
-            mono: Instant::now(),
-            ntp: 0xffffffff00000000,
-        };
-        assert_eq!(clock.at(Duration::from_secs(1)), 0);
     }
 }
 

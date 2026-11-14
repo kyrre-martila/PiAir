@@ -34,24 +34,16 @@ flags = 0
     fs::set_permissions(selection, fs::Permissions::from_mode(0o600)).unwrap();
     config
 }
-fn command(config: &Path, automatic: bool, device: &str) -> Command {
+fn command(config: &Path, device: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_piair"));
     command.arg("--config").arg(config);
-    if automatic {
-        command.args([
-            "automatic-ptp-capture",
-            ID,
-            "--experimental-owntone-transient",
-        ]);
-    } else {
-        command.args([
-            "run",
-            ID,
-            "--allow-unattended",
-            "--authentication",
-            "own-tone-transient",
-        ]);
-    }
+    command.args([
+        "run",
+        ID,
+        "--allow-unattended",
+        "--authentication",
+        "own-tone-transient",
+    ]);
     command.args(["--capture-device", device, "--threshold-dbfs", "0"]);
     command
 }
@@ -123,16 +115,14 @@ fn automatic_processes_exclude_each_other_and_kernel_releases_lock_on_exit() {
     let first_config = fixture(&dir.path().join("first"));
     let other_config = fixture(&dir.path().join("other"));
     for signal in ["-INT", "-TERM", "-KILL"] {
-        let mut first = Process::spawn(
-            command(&first_config, false, "null"),
-            dir.path().join("first.log"),
-        );
+        let mut first =
+            Process::spawn(command(&first_config, "null"), dir.path().join("first.log"));
         first.ready();
-        for automatic in [false, true] {
+        {
             // Different config paths and devices must not bypass exclusion.
             // The invalid device also proves rejection precedes ALSA opening.
             let mut second = Process::spawn(
-                command(&other_config, automatic, "piair-never-open"),
+                command(&other_config, "piair-never-open"),
                 dir.path().join("second.log"),
             );
             assert_eq!(second.wait().code(), Some(1));
@@ -141,7 +131,7 @@ fn automatic_processes_exclude_each_other_and_kernel_releases_lock_on_exit() {
                 error.contains("another automatic playback instance is already running"),
                 "{error}"
             );
-            assert!(error.contains("stop that piair run or automatic-ptp-capture"));
+            assert!(error.contains("stop the existing PiAir playback process"));
             assert!(!error.contains("ALSA"));
             assert!(!error.contains("interactive confirmation"));
             assert!(
@@ -158,7 +148,7 @@ fn automatic_processes_exclude_each_other_and_kernel_releases_lock_on_exit() {
         }
         // A successor acquires immediately, even following uncatchable SIGKILL.
         let mut successor = Process::spawn(
-            command(&other_config, false, "null"),
+            command(&other_config, "null"),
             dir.path().join("successor.log"),
         );
         successor.ready();
@@ -166,13 +156,13 @@ fn automatic_processes_exclude_each_other_and_kernel_releases_lock_on_exit() {
     }
     // Startup/capture failure must release the lock too, with a failing exit code.
     let mut failed = Process::spawn(
-        command(&first_config, false, "piair-never-open"),
+        command(&first_config, "piair-never-open"),
         dir.path().join("failure.log"),
     );
     assert_eq!(failed.wait().code(), Some(1));
     assert!(failed.output().contains("ALSA capture failed"));
     let mut successor = Process::spawn(
-        command(&other_config, false, "null"),
+        command(&other_config, "null"),
         dir.path().join("after-error.log"),
     );
     successor.ready();

@@ -1,4 +1,4 @@
-//! Protocol facts selected in AIRPLAY_REFERENCE_ANALYSIS.md. No sender code port.
+//! Bounded plist parsing and fixed realtime ALAC profile.
 use anyhow::{ensure, Context, Result};
 use plist::{Dictionary, Value};
 use std::io::Cursor;
@@ -161,9 +161,6 @@ pub fn port(d: &Dictionary, key: &str) -> Result<u16> {
     ensure!(p != 0, "zero negotiated {key}");
     Ok(p)
 }
-pub fn capabilities(value: &Value) -> Result<()> {
-    capabilities_inner(value, false)
-}
 
 /// A receiver may publish only buffered formats in supportedFormats. Missing
 /// realtime details are unknown; audio/ALAC feature bits remain mandatory.
@@ -195,29 +192,6 @@ fn capabilities_inner(value: &Value, allow_missing_audio_stream: bool) -> Result
         }
     }
     Ok(())
-}
-/// Bit 41 advertises PTP support, not an NTP prohibition. OwnTone 29.3
-/// permits NTP when PTP is disabled/unavailable. Never fabricate PTP clocks.
-pub fn select_ntp(info: &Value) -> Result<()> {
-    let d = dictionary(info)?;
-    let features = integer(d, "features")?;
-    tracing::debug!(target: "piair::rtsp", timing_profile = "NTP", features,
-        ptp_advertised = features & (1u64 << 41) != 0,
-        ntp_advertisement = "not established by feature bit 41",
-        "timing profile selected; PTP is unsupported");
-    Ok(())
-}
-pub fn ntp_offer(device: &str, uuid: uuid::Uuid, port: u16) -> Result<Zeroizing<Vec<u8>>> {
-    ensure!(port != 0, "zero local timing port");
-    binary(&mut dict([
-        ("deviceID", Value::String(device.into())),
-        (
-            "sessionUUID",
-            Value::String(uuid.to_string().to_uppercase()),
-        ),
-        ("timingProtocol", Value::String("NTP".into())),
-        ("timingPort", uint(u64::from(port))),
-    ]))
 }
 pub fn stream_offer(key: &[u8; 32], control_port: u16, session: u32) -> Result<Zeroizing<Vec<u8>>> {
     ensure!(control_port != 0, "zero local control port");
@@ -288,11 +262,6 @@ pub fn stream(value: &Value) -> Result<Stream> {
     let control = port(s, "controlPort")?;
     ensure!(data != control, "overlapping negotiated media ports");
     Ok(Stream { data, control, id })
-}
-
-/// Validate any connection echo without requiring fields OwnTone doesn't require.
-pub fn stream_for_connection(value: &Value, session: u32) -> Result<Stream> {
-    stream_for_timing(value, session, "NTP")
 }
 
 /// Both timing profiles share the same realtime ALAC/RTP contract.
@@ -372,51 +341,6 @@ pub fn transient_info(bytes: &[u8], selected: &super::compatibility::Capabilitie
 mod tests {
     use super::*;
     #[test]
-    fn generated_ntp_offer_has_exact_typed_semantics_for_full_sender_identity() {
-        let uuid = uuid::Uuid::parse_str("00112233-4455-4677-8899-aabbccddeeff").unwrap();
-        for port in [1, 7010, u16::MAX] {
-            let offer = ntp_offer("12:34:56:78:9A:BC:DE:F0", uuid, port).unwrap();
-            // Decode using the general plist reader, independently of our bounded parser.
-            let value = Value::from_reader(Cursor::new(&*offer)).unwrap();
-            let fields = value.as_dictionary().unwrap();
-            assert_eq!(fields.len(), 4);
-            assert_eq!(
-                fields["deviceID"].as_string(),
-                Some("12:34:56:78:9A:BC:DE:F0")
-            );
-            assert_eq!(
-                fields["sessionUUID"].as_string(),
-                Some("00112233-4455-4677-8899-AABBCCDDEEFF")
-            );
-            assert_eq!(fields["timingProtocol"].as_string(), Some("NTP"));
-            assert!(matches!(fields["timingPort"], Value::Integer(_)));
-            assert_eq!(
-                fields["timingPort"].as_unsigned_integer(),
-                Some(u64::from(port))
-            );
-            if port == 7010 {
-                let independent = Value::from_reader(Cursor::new(include_bytes!(
-                    "../../tests/fixtures/sequence-setup.plist"
-                )))
-                .unwrap();
-                assert_eq!(value, independent); // Semantic equality, not serialization equality.
-            }
-        }
-    }
-    #[test]
-    fn ntp_offer_matches_independent_fixture_and_keeps_uuid_v4() {
-        let uuid = uuid::Uuid::parse_str("00112233-4455-4677-8899-AABBCCDDEEFF").unwrap();
-        let offer = ntp_offer("02:01:02:03:04:05", uuid, 7010).unwrap();
-        assert_eq!(
-            parse(&offer).unwrap(),
-            parse(include_bytes!("../../tests/fixtures/initial-setup.plist")).unwrap()
-        );
-        assert!(ntp_offer("02:01:02:03:04:05", uuid, 0).is_err());
-        for f in [0, 1u64 << 41] {
-            assert!(select_ntp(&dict([("features", uint(f))])).is_ok());
-        }
-    }
-    #[test]
     fn offer_matches_independently_serialized_protocol_fixture() {
         let key: [u8; 32] = (0..32).collect::<Vec<_>>().try_into().unwrap();
         let offer = stream_offer(&key, 6001, 1).unwrap();
@@ -428,39 +352,14 @@ mod tests {
         assert!(parse(b"<plist></plist>").is_err());
         assert!(parse(&[0; 8193]).is_err());
     }
-    #[test]
-    fn reject_incompatible_formats_and_invalid_ports() {
-        let good = dict([("features", uint((1 << 9) | (1 << 19)))]);
-        assert!(capabilities(&good).is_ok());
-        assert!(capabilities(&dict([("features", uint(1 << 9))])).is_err());
-        for (field, value) in [
-            ("type", uint(103)),
-            ("dataPort", uint(65536)),
-            ("controlPort", uint(0)),
-            ("audioFormat", uint(0)),
-            ("ct", uint(1)),
-            ("et", uint(0)),
-            ("latencyMin", uint(0)),
-            ("latencyMax", uint(88201)),
-            ("latencyMin", Value::String("11025".into())),
-            ("sr", uint(48000)),
-            ("spf", uint(1024)),
-            ("streamID", uint(u64::MAX)),
-        ] {
-            let mut s = dict([
-                ("type", uint(96)),
-                ("dataPort", uint(6000)),
-                ("controlPort", uint(6001)),
-            ]);
-            s.as_dictionary_mut().unwrap().insert(field.into(), value);
-            assert!(stream(&dict([("streams", Value::Array(vec![s]))])).is_err());
-        }
-    }
 }
 
 #[cfg(test)]
 mod stream_contract_tests {
     use super::*;
+    fn stream_for_connection(value: &Value, session: u32) -> Result<Stream> {
+        stream_for_timing(value, session, "PTP")
+    }
     fn response(fields: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
         let mut s = dict([("dataPort", uint(6000)), ("controlPort", uint(6001))]);
         for (k, v) in fields {
@@ -493,7 +392,7 @@ mod stream_contract_tests {
             ("audioMode", Value::String("movie".into())),
             ("isMedia", Value::Boolean(false)),
             ("supportsDynamicStreamID", Value::Boolean(true)),
-            ("timingProtocol", Value::String("PTP".into())),
+            ("timingProtocol", Value::String("NTP".into())),
         ] {
             assert!(stream_for_connection(&response([(field, value)]), 7).is_err());
         }

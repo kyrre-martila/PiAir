@@ -1,4 +1,4 @@
-//! Bounded PCM WAV input for the realtime diagnostic (no transport logic).
+//! Bounded PCM WAV input for setup and daily speaker tests.
 use anyhow::{bail, ensure, Context, Result};
 use std::{
     fs::File,
@@ -8,6 +8,7 @@ use std::{
 
 pub struct Playback {
     pub frames: Vec<[i16; 2]>,
+    #[cfg(test)]
     pub eof: bool,
 }
 fn u16le(b: &[u8]) -> u16 {
@@ -130,6 +131,7 @@ impl Playback {
             .collect();
         Ok(Self {
             frames,
+            #[cfg(test)]
             eof: available <= requested,
         })
     }

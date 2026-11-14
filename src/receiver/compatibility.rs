@@ -1,5 +1,5 @@
 //! Local policy over untrusted advertisements, not receiver compatibility proof.
-//! Evidence and deliberate unsupported paths: docs/PAIRING.md.
+//! Evidence and deliberate unsupported paths: docs/SECURITY.md.
 use crate::discovery::Advertisement;
 use anyhow::{bail, ensure, Context, Result};
 use clap::ValueEnum;
@@ -41,7 +41,7 @@ pub struct Capabilities {
 impl Capabilities {
     /// Only operational status may drift after selection. Keep feature words,
     /// authentication/access policy, protocol version, unknown bits and even
-    /// presence/absence pinned. See docs/PAIRING.md for evidence and assumptions.
+    /// presence/absence pinned. See docs/SECURITY.md for evidence and assumptions.
     pub fn matches_selection(&self, selected: &Self) -> bool {
         const OPERATIONAL: u32 = (1 << 2) // audio cable attached
             | (1 << 11) // relay/current-track availability

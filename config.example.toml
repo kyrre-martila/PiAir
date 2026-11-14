@@ -22,7 +22,7 @@ calibration_duration_secs = 30
 
 # Automatic AirPlay playback: the installed service (`piair start`).
 # Foreground `piair run --allow-unattended` needs explicit PTP port permission;
-# see docs/PTP_PORT_PERMISSIONS.md. No privileges are granted by configuration.
+# see docs/OPERATIONS.md#timing-permissions. No privileges are granted by configuration.
 # [audio] above remains independent and controls monitor/calibration only.
 # No receiver, capture device or authentication profile is inferred by run.
 # Set these with `piair config set-playback ...` after approval and selection.

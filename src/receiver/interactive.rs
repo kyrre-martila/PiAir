@@ -1,5 +1,5 @@
 //! Terminal presentation and orchestration; transport authorization stays in Wire.
-use super::{compatibility::Method, discovery, exact_id, store::Store, AuthProfile, Selection};
+use super::{compatibility::Method, discovery, exact_id, store::Store, Selection};
 use crate::{config::Loaded, discovery::Receiver};
 use anyhow::{ensure, Context, Result};
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -83,7 +83,7 @@ fn authorize(
         if proposed.enrollment {
             ensure!(
                 store.credential(&proposed.selected.id)?.is_none(),
-                "credentials now exist; use authenticate explicitly; no re-enrollment"
+                "credentials now exist; start playback through setup or the daily menu; no re-enrollment"
             );
         } else if proposed.selected.method != Method::Transient {
             ensure!(
@@ -294,29 +294,9 @@ pub(crate) fn pairing(loaded: &Loaded) -> Result<()> {
     )?;
     if let Some(proposed) = proposed {
         let id = proposed.selected.id.clone();
-        super::pair_with_selection(
-            loaded,
-            &id,
-            false,
-            false,
-            AuthProfile::Legacy,
-            Some(proposed),
-        )?;
+        super::pair_with_selection(loaded, &id, Some(proposed))?;
     }
     Ok(())
-}
-
-pub(super) fn choose_for_stream(loaded: &Loaded) -> Result<ProposedSelection> {
-    terminal()?;
-    let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
-    prepare(
-        loaded,
-        &snapshot,
-        &mut io::stdin().lock(),
-        &mut io::stdout().lock(),
-        false,
-    )?
-    .context("no playback selection")
 }
 
 // The user must supply evidence advertisements cannot establish.
@@ -330,9 +310,9 @@ fn enrollment_prerequisite(
         Method::PinDisplay => "PIN-display requires a receiver-supported PIN display or equivalent independently verified PIN delivery mechanism. Is that available for this receiver? [y/N]: ",
         Method::SetupCode => "Existing HAP setup-code enrollment requires a genuine, independently obtained HAP setup code for this receiver. An AirPlay password is not a HAP setup code. Do you have that code? [y/N]: ",
         Method::StoredHap => anyhow::bail!("stored HAP is authentication-only; no enrollment"),
-        Method::Transient => anyhow::bail!("transient authentication does not enroll persistent credentials; use authenticate explicitly; no fallback"),
+        Method::Transient => anyhow::bail!("transient authentication does not enroll persistent credentials; start playback through setup or the daily menu; no fallback"),
     };
-    writeln!(output, "Do not invent codes or guess methods. If neither prerequisite is available, persistent enrollment cannot currently proceed through these methods. Cancel safely; active selection and credentials remain unchanged. For a separately authorized session-only diagnostic, see docs/RECEIVER_AUTHENTICATION.md and the explicit authenticate --experimental-owntone-transient command. No automatic fallback.")?;
+    writeln!(output, "Do not invent codes or guess methods. If neither prerequisite is available, persistent enrollment cannot currently proceed through these methods. Cancel safely; active selection and credentials remain unchanged. See docs/SECURITY.md for session-only playback trust limits. No automatic fallback.")?;
     confirm(input, output, prompt)
 }
 
@@ -352,7 +332,7 @@ fn prepare(
     }
     let selected = if let Some(selected) = previous.as_ref().filter(|s| s.id == id) {
         ensure!(!enrollment || selected.method != Method::Transient,
-            "selected transient method does not enroll credentials; persistent enrollment requires verified PIN delivery or a genuine independently obtained HAP setup code. If neither is available, enrollment cannot currently proceed; see docs/RECEIVER_AUTHENTICATION.md for explicitly authorized session authentication");
+            "selected transient method does not enroll credentials; persistent enrollment requires verified PIN delivery or a genuine independently obtained HAP setup code. If neither is available, enrollment cannot currently proceed; see docs/SECURITY.md for explicitly authorized session authentication");
         let observed = super::validate_selection(loaded, &id, selected.method, snapshot)?;
         ensure!(
             selected.matches_observation(&observed),

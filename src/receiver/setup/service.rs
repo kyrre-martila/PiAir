@@ -29,7 +29,7 @@ fn output(args: &[&str]) -> Result<String> {
         .context("systemctl unavailable")?;
     ensure!(
         result.status.success(),
-        "systemd query failed; see docs/SYSTEMD.md"
+        "systemd query failed; see docs/OPERATIONS.md"
     );
     Ok(String::from_utf8(result.stdout)?)
 }
@@ -130,7 +130,7 @@ fn query(loaded: &Loaded, verify: bool) -> Result<Service> {
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
             && !user.starts_with('-'),
-        "account requires manual systemd escaping; see docs/SYSTEMD.md"
+        "account requires manual systemd escaping; see docs/OPERATIONS.md"
     );
     let unit = format!("piair@{user}.service");
     let text = output(&[
@@ -177,7 +177,7 @@ fn query(loaded: &Loaded, verify: bool) -> Result<Service> {
         trusted_file(fragment)?;
         ensure!(
             std::fs::read_to_string(fragment)? == include_str!("../../../systemd/piair@.service"),
-            "custom service template requires manual review; see docs/SYSTEMD.md"
+            "custom service template requires manual review; see docs/OPERATIONS.md"
         );
         trusted_file(Path::new("/usr/local/bin/piair"))?;
         validate_config_path(loaded, &home)?;
@@ -212,7 +212,7 @@ fn validate_properties(p: &BTreeMap<&str, &str>, user: &str) -> Result<()> {
     for key in ["Environment", "EnvironmentFiles", "DropInPaths"] {
         ensure!(
             p.get(key) == Some(&"") || (key == "EnvironmentFiles" && !p.contains_key(key)),
-            "custom service environment/drop-ins require manual review: docs/SYSTEMD.md"
+            "custom service environment/drop-ins require manual review: docs/OPERATIONS.md"
         );
     }
     ensure!(
@@ -232,7 +232,7 @@ fn validate_config_path(loaded: &Loaded, home: &Path) -> Result<()> {
     ensure!(home.is_absolute(), "account home must be absolute");
     let saved = std::fs::canonicalize(&loaded.path)?;
     let expected = std::fs::canonicalize(home.join(".config/piair/config.toml"))?;
-    ensure!(saved==expected, "service resolves HOME/.config/piair/config.toml, which differs from saved config; configure a reviewed drop-in manually (docs/SYSTEMD.md)");
+    ensure!(saved==expected, "service resolves HOME/.config/piair/config.toml, which differs from saved config; configure a reviewed drop-in manually (docs/OPERATIONS.md)");
     Ok(())
 }
 pub(super) fn activate(loaded: &Loaded, expected: &Service) -> Result<()> {
@@ -251,7 +251,7 @@ pub(super) fn activate(loaded: &Loaded, expected: &Service) -> Result<()> {
         .args(["--system", "enable", "--now", &current.unit])
         .status()
         .context("systemctl activation failed")?;
-    ensure!(status.success(), "service activation was not completed; authorization may have been denied. Check systemctl status and docs/SYSTEMD.md; enablement may already be saved");
+    ensure!(status.success(), "service activation was not completed; authorization may have been denied. Check systemctl status and docs/OPERATIONS.md; enablement may already be saved");
     Ok(())
 }
 #[cfg(test)]
@@ -339,10 +339,10 @@ impl Backend for System<'_> {
         let status = Command::new("systemctl")
             .args(["--system", action, unit])
             .status()
-            .context("cannot run systemctl; see docs/SYSTEMD.md")?;
+            .context("cannot run systemctl; see docs/OPERATIONS.md")?;
         ensure!(
             status.success(),
-            "service operation failed or authorization denied; see docs/SYSTEMD.md"
+            "service operation failed or authorization denied; see docs/OPERATIONS.md"
         );
         Ok(())
     }
@@ -421,7 +421,7 @@ fn stream_logs(
     let mut child = command
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .context("journalctl unavailable; see docs/SYSTEMD.md")?;
+        .context("journalctl unavailable; see docs/OPERATIONS.md")?;
     let mut pipe = child.stdout.take().context("missing journal output")?;
     // Every exit, including broken output and cancellation, reaps journalctl.
     struct Child(std::process::Child);
@@ -486,7 +486,7 @@ fn stream_logs(
     let status = child.0.wait()?;
     ensure!(
         status.success() || cancel.load(Ordering::Relaxed),
-        "cannot read service logs; check journal permissions (docs/SYSTEMD.md)"
+        "cannot read service logs; check journal permissions (docs/OPERATIONS.md)"
     );
     Ok(())
 }
@@ -531,7 +531,7 @@ fn render_log(line: &str, detailed: bool) -> String {
         return super::clean(line);
     };
     let Some(message) = entry.get("MESSAGE").and_then(Value::as_str) else {
-        return "Non-text journal entry; see docs/SYSTEMD.md".into();
+        return "Non-text journal entry; see docs/OPERATIONS.md".into();
     };
     let event = serde_json::from_str::<Value>(message).ok();
     let timestamp = event

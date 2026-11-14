@@ -50,15 +50,7 @@ pub(crate) fn worker(loaded: &Loaded, saved: &str) -> Result<()> {
     let cancel = runtime::signal_cancellation()?;
     check_saved(loaded, saved)?;
     recording_operation(loaded, &path, |id, transient, wav, volume| {
-        super::super::ptp_operation_cancellable(
-            loaded,
-            id,
-            transient,
-            10,
-            Some((wav, volume)),
-            None,
-            Some(cancel.clone()),
-        )
+        super::super::recording_playback(loaded, id, transient, wav, volume, cancel.clone())
     })?;
     ensure!(!cancel.load(Ordering::Relaxed), "Recording cancelled");
     Ok(())
@@ -143,7 +135,7 @@ fn workflow<R: FnMut() -> Result<String>, W: Write>(
     let running = match backend.validate().and_then(|()| backend.inspect()) {
         Ok(running) => running,
         Err(e) => {
-            ui.say(format!("Recording test unavailable: {e:#}\nSettings are saved. Continue without testing; see docs/SYSTEMD.md."))?;
+            ui.say(format!("Recording test unavailable: {e:#}\nSettings are saved. Continue without testing; see docs/OPERATIONS.md."))?;
             return Ok(Report::skipped());
         }
     };

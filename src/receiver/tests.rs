@@ -34,14 +34,9 @@ fn request(socket: &mut TcpStream, expected: &str) -> Vec<u8> {
     request_method(socket, expected, Method::PinDisplay)
 }
 fn request_method(socket: &mut TcpStream, expected: &str, method: Method) -> Vec<u8> {
-    request_http_profile(socket, expected, method, false)
+    request_http_profile(socket, expected, method)
 }
-fn request_http_profile(
-    socket: &mut TcpStream,
-    expected: &str,
-    method: Method,
-    pyatv: bool,
-) -> Vec<u8> {
+fn request_http_profile(socket: &mut TcpStream, expected: &str, method: Method) -> Vec<u8> {
     socket
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -56,10 +51,10 @@ fn request_http_profile(
     assert!(own || text.starts_with(&format!("POST {expected} HTTP/1.1\r\n")));
     assert!(text.contains(&format!(
         "{}: {}\r\n",
-        if pyatv { "x-apple-hkp" } else { "X-Apple-HKP" },
+        "X-Apple-HKP",
         if method == Method::Transient { 4 } else { 3 }
     )));
-    if !pyatv && !own {
+    if !own {
         assert!(text.contains("Host: 127.0.0.1:"));
     }
     let length = text
@@ -69,10 +64,7 @@ fn request_http_profile(
         .trim()
         .parse()
         .unwrap();
-    if pyatv {
-        assert_eq!(text, format!("POST {expected} HTTP/1.1\r\nContent-Length: {length}\r\nuser-agent: AirPlay/320.20\r\nconnection: keep-alive\r\nx-apple-hkp: 4\r\ncontent-type: application/octet-stream\r\n\r\n"));
-    }
-    if !pyatv && !own {
+    if !own {
         let seq = text
             .lines()
             .find_map(|line| line.strip_prefix("CSeq: "))
@@ -113,7 +105,6 @@ fn local_mock(f: impl FnOnce(TcpStream) + Send + 'static) -> (Wire, thread::Join
 }
 #[derive(Clone, Copy)]
 enum Fault {
-    HttpM3,
     None,
     WrongPin,
     Proof,
@@ -158,7 +149,7 @@ fn setup_mock_with_transient(
     signed_id: &str,
     transient: impl FnOnce(TcpStream, Zeroizing<[u8; 64]>),
 ) {
-    setup_mock_http(socket, fault, method, pin, signed_id, false, transient)
+    setup_mock_http(socket, fault, method, pin, signed_id, transient)
 }
 #[allow(clippy::too_many_arguments)]
 fn setup_mock_http(
@@ -167,12 +158,9 @@ fn setup_mock_http(
     method: Method,
     pin: &str,
     signed_id: &str,
-    pyatv: bool,
     transient: impl FnOnce(TcpStream, Zeroizing<[u8; 64]>),
 ) {
-    setup_mock_transport(
-        socket, fault, method, pin, signed_id, pyatv, false, transient,
-    )
+    setup_mock_transport(socket, fault, method, pin, signed_id, false, transient)
 }
 #[allow(clippy::too_many_arguments)]
 fn setup_mock_transport(
@@ -181,21 +169,11 @@ fn setup_mock_transport(
     method: Method,
     pin: &str,
     signed_id: &str,
-    pyatv: bool,
     own: bool,
     transient: impl FnOnce(TcpStream, Zeroizing<[u8; 64]>),
 ) {
     let reply = |socket: &mut TcpStream, seq: u32, fields: &[(u8, &[u8])]| {
-        if pyatv {
-            let body = encode(fields);
-            write!(
-                socket,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-                body.len()
-            )
-            .unwrap();
-            socket.write_all(&body).unwrap();
-        } else if own {
+        if own {
             let body = encode(fields);
             let response = [
                 format!(
@@ -221,13 +199,9 @@ fn setup_mock_transport(
     } else {
         0
     };
-    let m1_bytes = request_http_profile(&mut socket, "/pair-setup", method, pyatv);
+    let m1_bytes = request_http_profile(&mut socket, "/pair-setup", method);
     if method == Method::Transient {
-        let expected = if pyatv {
-            [0x00, 0x01, 0x00, 0x06, 0x01, 0x01, 0x13, 0x01, 0x10]
-        } else {
-            [0x06, 0x01, 0x01, 0x00, 0x01, 0x00, 0x13, 0x01, 0x10]
-        };
+        let expected = [0x06, 0x01, 0x01, 0x00, 0x01, 0x00, 0x13, 0x01, 0x10];
         assert_eq!(m1_bytes, expected);
     }
     let m1 = Tlv::parse(&m1_bytes).unwrap();
@@ -257,20 +231,7 @@ fn setup_mock_transport(
         return;
     }
     reply(&mut socket, 1 + offset, &fields);
-    let m3 = Tlv::parse(&request_http_profile(
-        &mut socket,
-        "/pair-setup",
-        method,
-        pyatv,
-    ))
-    .unwrap();
-    if matches!(fault, Fault::HttpM3) {
-        socket
-            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
-            .unwrap();
-        assert_eof(&mut socket);
-        return;
-    }
+    let m3 = Tlv::parse(&request_http_profile(&mut socket, "/pair-setup", method)).unwrap();
     let a = m3.get(PUBLIC_KEY).unwrap();
     let u = BigUint::from_bytes_be(hash(&[&srp::pad(a).unwrap(), &b]).as_ref());
     let shared = server.compute_premaster_secret(
@@ -1326,28 +1287,6 @@ fn authenticated_socket_continues_with_independent_counters_and_idempotent_clean
     server.join().unwrap();
 }
 #[test]
-fn buffered_audio_gate_never_sends_setup_or_media_and_preserves_failure() {
-    use session::{Session, State};
-    let (wire, server) = local_mock(|s| {
-        let (mut socket, _) = verify_mock_continue(s, Fault::None, PI).unwrap();
-        assert_eof(&mut socket);
-    });
-    let mut session = Session::new();
-    session.start(|| Ok(wire), &credential()).unwrap();
-    assert!(session.start_buffered_audio().is_err());
-    assert_eq!(session.state(), State::Failed);
-    let reason = session.failure().unwrap().to_owned();
-    assert!(reason.contains("FairPlay") && reason.contains("codec"));
-    session.shutdown();
-    session.shutdown();
-    assert!(session.check_control().is_err());
-    assert_eq!(session.failure(), Some(reason.as_str()));
-    assert!(session
-        .start(|| panic!("no reconnect"), &credential())
-        .is_err());
-    server.join().unwrap();
-}
-#[test]
 fn control_rejects_invalid_status_correlation_lengths_plaintext_and_receiver_termination() {
     for response in [
         "RTSP/1.0 200 OK\r\nCSeq: 2\r\n\r\n", // replayed CSeq
@@ -1541,9 +1480,6 @@ fn replayed_encrypted_response_and_plaintext_reentry_close_control() {
     control.close();
     server.join().unwrap();
 }
-
-#[path = "stream_tests.rs"]
-mod stream_tests;
 
 #[test]
 fn operational_status_transitions_preserve_saved_approval_and_credentials() {
@@ -1937,157 +1873,6 @@ fn transient_pins_authorization_preserves_credentials_and_uses_fresh_secrets() {
     assert_ne!(secrets[0].as_slice(), secrets[1].as_slice());
 }
 
-fn pyatv_preamble_request(socket: &mut TcpStream) {
-    socket
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    let mut header = Vec::new();
-    while !header.ends_with(b"\r\n\r\n") {
-        let mut byte = [0];
-        socket.read_exact(&mut byte).unwrap();
-        header.push(byte[0]);
-    }
-    assert_eq!(header, b"POST /pair-pin-start HTTP/1.1\r\nuser-agent: AirPlay/320.20\r\nconnection: keep-alive\r\nx-apple-hkp: 4\r\ncontent-type: application/octet-stream\r\n\r\n");
-}
-
-#[test]
-fn pyatv_preamble_then_existing_transient_proof_and_encrypted_control() {
-    let (mut wire, server) = local_mock_method(Method::Transient, |mut socket| {
-        pyatv_preamble_request(&mut socket);
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-            .unwrap();
-        setup_mock_http(
-            socket,
-            Fault::None,
-            Method::Transient,
-            "3939",
-            PI,
-            true,
-            |mut socket, key| {
-                let mut keys = ControlKeys::new(key.as_ref());
-                keys.swap_directions_for_test();
-                encrypted_request(&mut socket, &mut keys, 3);
-                encrypted_reply(
-                    &mut socket,
-                    &mut keys,
-                    b"RTSP/1.0 200 OK\r\nCSeq: 3\r\nContent-Length: 0\r\n\r\n",
-                );
-                assert_eof(&mut socket);
-            },
-        );
-    });
-    let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
-        wire.pyatv_transient_preamble().unwrap();
-        let mut session = session::Session::new();
-        session.start_selected(|| Ok(wire), None).unwrap();
-        session.check_control().unwrap();
-        session.stop().unwrap();
-    });
-    server.join().unwrap();
-    assert!(output.contains("pyatv transient preamble"));
-    assert!(output.contains("pair-setup M1/M2"));
-    assert!(!output.contains("3939"));
-}
-
-#[test]
-fn pyatv_preamble_rejection_stops_without_m1_or_fallback_and_logs_safely() {
-    for status in [403, 470, 500] {
-        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
-            pyatv_preamble_request(&mut socket);
-            write!(socket, "HTTP/1.1 {status} secret-reason\r\nContent-Length: 12\r\nSet-Cookie: secret-cookie\r\n\r\nsecret-proof").unwrap();
-            assert_eof(&mut socket);
-        });
-        let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
-            assert!(wire.pyatv_transient_preamble().is_err());
-            assert!(wire.post("/pair-setup", &[]).is_err());
-        });
-        server.join().unwrap();
-        assert!(output.contains(&status.to_string()));
-        assert!(!output.contains("secret"));
-        assert!(!output.contains("pair-setup M1/M2"));
-    }
-}
-
-#[test]
-fn pyatv_preamble_rejects_non_transient_without_request() {
-    let (mut wire, server) = local_mock(|mut socket| assert_eof(&mut socket));
-    assert!(wire.pyatv_transient_preamble().is_err());
-    drop(wire);
-    server.join().unwrap();
-}
-
-#[test]
-fn pyatv_preamble_success_then_m1_rejection_is_safe_and_final() {
-    for status in [400, 403, 470, 500] {
-        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
-            pyatv_preamble_request(&mut socket);
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                .unwrap();
-            let m1 = request_http_profile(&mut socket, "/pair-setup", Method::Transient, true);
-            assert_eq!(m1, [0x00, 0x01, 0x00, 0x06, 0x01, 0x01, 0x13, 0x01, 0x10]);
-            write!(socket, "HTTP/1.1 {status} secret-reason\r\nContent-Length: 12\r\nSet-Cookie: secret-cookie\r\n\r\nsecret-proof").unwrap();
-            assert_eof(&mut socket);
-        });
-        let output = diagnostics::tests::capture(tracing::Level::DEBUG, || {
-            let mut session = session::Session::new();
-            assert!(session
-                .start_selected(
-                    || {
-                        wire.pyatv_transient_preamble()?;
-                        Ok(wire)
-                    },
-                    None
-                )
-                .is_err());
-            assert_eq!(session.state(), session::State::Failed);
-        });
-        server.join().unwrap();
-        assert!(output.contains("pyatv transient preamble"));
-        assert!(output.contains("pair-setup M1/M2"));
-        assert!(output.contains(&status.to_string()));
-        assert!(!output.contains("secret"));
-    }
-}
-
-#[test]
-fn pyatv_option_rejects_persistent_selection_before_confirmation_or_connection() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("config.toml");
-    std::fs::write(&config, format!("receiver_allowlist=['{ID}']")).unwrap();
-    let store = store::Store::new(&config).unwrap();
-    store.select(&selection(7000)).unwrap();
-    let loaded = crate::config::load(Some(config)).unwrap();
-    let error = pair(&loaded, ID, true, false, AuthProfile::PyatvDiagnostic).unwrap_err();
-    assert!(error.to_string().contains("explicit transient selection"));
-    assert!(store.credential(ID).unwrap().is_none());
-}
-
-#[test]
-fn pyatv_m3_rejection_and_invalid_proof_are_final() {
-    for fault in [Fault::HttpM3, Fault::Proof] {
-        let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
-            pyatv_preamble_request(&mut socket);
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                .unwrap();
-            setup_mock_http(
-                socket,
-                fault,
-                Method::Transient,
-                "3939",
-                PI,
-                true,
-                |_, _| panic!("rejection must stop"),
-            );
-        });
-        wire.pyatv_transient_preamble().unwrap();
-        assert!(pairing::transient(wire).is_err());
-        server.join().unwrap();
-    }
-}
-
 fn owntone_caps() -> compatibility::Capabilities {
     compatibility::Capabilities {
         features: 1 << 48,
@@ -2159,7 +1944,6 @@ fn owntone_same_socket_info_m1_m4_and_encrypted_options() {
             Method::Transient,
             "3939",
             PI,
-            false,
             true,
             |mut socket, shared| {
                 let mut keys = ControlKeys::new(shared.as_ref());
@@ -2235,7 +2019,6 @@ fn owntone_invalid_tlv_state_or_srp_proof_never_activates_cipher() {
                 Method::Transient,
                 "3939",
                 PI,
-                false,
                 true,
                 |_, _| panic!("invalid authentication accepted"),
             );
@@ -2462,7 +2245,6 @@ fn owntone_control_check_fragmented_frames_and_directional_counters() {
             Method::Transient,
             "3939",
             PI,
-            false,
             true,
             |mut socket, shared| {
                 let mut keys = ControlKeys::new(shared.as_ref());
@@ -2507,7 +2289,6 @@ fn owntone_control_check_failures_close_without_retry_or_audio() {
                 Method::Transient,
                 "3939",
                 PI,
-                false,
                 true,
                 |mut socket, shared| {
                     let mut keys = ControlKeys::new(shared.as_ref());
@@ -2629,44 +2410,6 @@ fn stua_stored_credentials_reused_without_writes_or_method_fallback() {
 }
 
 #[test]
-fn stua_session_gates_reject_before_authentication_or_connection() {
-    for playback in [false, true] {
-        let mut c = credential();
-        c.receiver_id = "invalid".into();
-        assert!(session::Session::new()
-            .start_hap_stream_selected(
-                || panic!("mismatched credential must not connect"),
-                &c,
-                playback
-            )
-            .is_err());
-        c.receiver_id = HAP_FIXTURE_ID.into();
-        c.version = 1;
-        assert!(session::Session::new()
-            .start_hap_stream_selected(
-                || panic!("unsupported credential must not connect"),
-                &c,
-                playback
-            )
-            .is_err());
-        c.version = 2;
-        for (id, method) in [
-            (ID, Method::PinDisplay),
-            (HAP_FIXTURE_ID, Method::Transient),
-        ] {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let mut peer = listener.accept().unwrap().0;
-            let wire = Wire::mock_method(socket, Duration::from_secs(1), id, method);
-            assert!(session::Session::new()
-                .start_hap_stream_selected(|| Ok(wire), &c, playback)
-                .is_err());
-            assert_eof(&mut peer);
-        }
-    }
-}
-
-#[test]
 fn stua_identity_and_endpoint_drift_never_opens_control_socket() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
@@ -2778,7 +2521,10 @@ fn stua_operation_leases_recheck_credentials_and_approval_independently_of_defau
         // not redirect or authorize this explicitly targeted operation.
         let wire = Wire::connect_hap_operation(&config, &selected, &observed, &c).unwrap();
         let (mut peer, _) = listener.accept().unwrap();
-        let lease = wire.lease();
+        let wire = wire
+            .secure(ControlKeys::new(b"lease"), ControlKeys::events(b"lease"))
+            .unwrap();
+        let lease = wire.ptp_lease().unwrap();
         assert!(wire.reauthorize().is_ok());
         assert!(lease.check().is_ok());
         let path = dir.path().join("receiver-state/02d899c1833f.toml");
@@ -2857,7 +2603,7 @@ fn stua_operation_rejects_ambiguous_state_and_changed_confirmation_before_socket
 
 // Exercise the actual buffered entry point, rather than selecting a profile in
 // the test factory. All network traffic is confined to an authorized loopback.
-fn buffered_transient_fixture(wire: &mut Wire) -> tempfile::TempDir {
+fn ptp_transient_fixture(wire: &mut Wire) -> tempfile::TempDir {
     let dir = wire.ptp_test_authorization().unwrap();
     let identity = dir.path().join("receiver-state/client-identity.toml");
     std::fs::write(&identity, "client='123456789ABCDEF0'\nremote=123456789\n").unwrap();
@@ -2868,7 +2614,7 @@ fn buffered_transient_fixture(wire: &mut Wire) -> tempfile::TempDir {
         .unwrap();
     dir
 }
-fn buffered_files(dir: &tempfile::TempDir) -> std::collections::BTreeMap<String, Vec<u8>> {
+fn private_state_files(dir: &tempfile::TempDir) -> std::collections::BTreeMap<String, Vec<u8>> {
     std::fs::read_dir(dir.path().join("receiver-state"))
         .unwrap()
         .map(|entry| {
@@ -2881,7 +2627,7 @@ fn buffered_files(dir: &tempfile::TempDir) -> std::collections::BTreeMap<String,
         .collect()
 }
 #[test]
-fn buffered_transient_reuses_rtsp_srp_and_enters_encrypted_negotiation() {
+fn ptp_transient_reuses_rtsp_srp_and_enters_encrypted_negotiation() {
     transient_reuses_rtsp_srp_and_enters_encrypted_negotiation(false);
 }
 #[test]
@@ -2897,7 +2643,6 @@ fn transient_reuses_rtsp_srp_and_enters_encrypted_negotiation(ptp: bool) {
             Method::Transient,
             "3939",
             PI,
-            false,
             true,
             |mut socket, shared| {
                 let mut keys = ControlKeys::new(shared.as_ref());
@@ -2920,8 +2665,8 @@ fn transient_reuses_rtsp_srp_and_enters_encrypted_negotiation(ptp: bool) {
             },
         );
     });
-    let dir = buffered_transient_fixture(&mut wire);
-    let before = buffered_files(&dir);
+    let dir = ptp_transient_fixture(&mut wire);
+    let before = private_state_files(&dir);
     let (error, state) = if ptp {
         let mut authenticated = session::Session::new();
         authenticated
@@ -2941,11 +2686,11 @@ fn transient_reuses_rtsp_srp_and_enters_encrypted_negotiation(ptp: bool) {
     };
     assert!(error.contains("403"), "{error}");
     assert_eq!(state, lifecycle::State::Failed);
-    assert_eq!(before, buffered_files(&dir));
+    assert_eq!(before, private_state_files(&dir));
     server.join().unwrap();
 }
 #[test]
-fn buffered_transient_authentication_failures_close_without_fallback_or_writes() {
+fn lifecycle_transient_authentication_failures_close_without_fallback_or_writes() {
     transient_authentication_failures_close_without_fallback_or_writes(false);
 }
 #[test]
@@ -2992,14 +2737,13 @@ fn transient_authentication_failures_close_without_fallback_or_writes(ptp: bool)
                     Method::Transient,
                     "3939",
                     PI,
-                    false,
                     true,
                     |_, _| panic!("invalid proof must not establish a session"),
                 ),
                 _ => unreachable!(),
             }
         });
-        let dir = buffered_transient_fixture(&mut wire);
+        let dir = ptp_transient_fixture(&mut wire);
         if fault == "revoked" {
             std::fs::write(dir.path().join("config.toml"), "receiver_allowlist=[]").unwrap();
         } else if fault == "changed" {
@@ -3008,7 +2752,7 @@ fn transient_authentication_failures_close_without_fallback_or_writes(ptp: bool)
             selection.port += 1;
             store.select(&selection).unwrap();
         }
-        let before = buffered_files(&dir);
+        let before = private_state_files(&dir);
         if ptp {
             let mut owner = session::Session::new();
             assert!(
@@ -3016,7 +2760,6 @@ fn transient_authentication_failures_close_without_fallback_or_writes(ptp: bool)
                 "{fault}"
             );
             assert_eq!(owner.state(), session::State::Failed);
-            assert_eq!(owner.packets_sent, 0);
             assert!(owner.into_ptp_foundation().is_err());
         } else {
             let mut owner = lifecycle::Session::new();
@@ -3026,13 +2769,13 @@ fn transient_authentication_failures_close_without_fallback_or_writes(ptp: bool)
                 .start(|| panic!("failed owner must not reconnect"), None)
                 .is_err());
         }
-        assert_eq!(before, buffered_files(&dir), "{fault}");
+        assert_eq!(before, private_state_files(&dir), "{fault}");
         server.join().unwrap();
     }
 }
 
 #[test]
-fn buffered_transient_cancellation_during_srp_closes_before_setup() {
+fn ptp_transient_cancellation_during_srp_closes_before_setup() {
     let mut owner = lifecycle::Session::new();
     let cancel = owner.cancel.clone();
     let (mut wire, server) = local_mock_method(Method::Transient, move |mut socket| {
@@ -3042,12 +2785,12 @@ fn buffered_transient_cancellation_during_srp_closes_before_setup() {
         socket.write_all(b"R").unwrap();
         assert_eof(&mut socket);
     });
-    let dir = buffered_transient_fixture(&mut wire);
-    let before = buffered_files(&dir);
+    let dir = ptp_transient_fixture(&mut wire);
+    let before = private_state_files(&dir);
     let error = format!("{:#}", owner.start(|| Ok(wire), None).unwrap_err());
     assert!(error.contains("interrupted"), "{error}");
     assert_eq!(owner.state(), lifecycle::State::Failed);
-    assert_eq!(before, buffered_files(&dir));
+    assert_eq!(before, private_state_files(&dir));
     drop(owner);
     server.join().unwrap();
 }
@@ -3120,7 +2863,7 @@ fn persisted_wav_selection_validates_stored_hap_and_rejects_drift_without_fallba
         let credential_path = dir.path().join("receiver-state/02d899c1833f.toml");
         let selection_bytes = std::fs::read(&selection_path).unwrap();
         let credential_bytes = std::fs::read(&credential_path).unwrap();
-        // Match stream-test's complete pre-confirmation transition, including
+        // Exercise the complete pre-confirmation credential transition, including
         // the comparison between the derived operation and fresh discovery.
         let prepare = |snapshot: &[Receiver]| -> Result<(Selection, Credential)> {
             let loaded = config::load(Some(path.clone()))?;
@@ -3238,7 +2981,7 @@ fn ptp_transient_opt_in_needs_selection_but_never_hap_credentials() {
         .err()
         .unwrap()
         .to_string()
-        .contains("--experimental-owntone-transient"));
+        .contains("explicitly configured transient"));
     for method in [Method::PinDisplay, Method::SetupCode, Method::StoredHap] {
         let mut conflicting = selected.clone();
         conflicting.method = method;

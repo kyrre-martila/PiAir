@@ -52,141 +52,12 @@ fn run_with_discovery(
         Command::Receivers => {
             receiver::list(&loaded, &discover(loaded.config.discovery_timeout_secs)?)?
         }
-        Command::ReceiverPlan { method } => {
-            let snapshot = discover(loaded.config.discovery_timeout_secs)?;
-            print!(
-                "{}",
-                receiver::planning::diagnostic(&snapshot, |id| loaded.config.allows(id), method)
-            );
-        }
         Command::Pairing => receiver::interactive::pairing(&loaded)?,
         Command::Select {
             receiver_id,
             method,
         } => receiver::select(&loaded, &receiver_id, method)?,
-        Command::Pair { receiver_id } => receiver::pair(
-            &loaded,
-            &receiver_id,
-            false,
-            false,
-            receiver::AuthProfile::Legacy,
-        )?,
-        Command::Authenticate {
-            receiver_id,
-            control_check,
-            experimental_pyatv_transient_preamble,
-            experimental_owntone_transient,
-        } => receiver::pair(
-            &loaded,
-            &receiver_id,
-            true,
-            control_check,
-            if experimental_owntone_transient {
-                receiver::AuthProfile::OwnToneTransient
-            } else if experimental_pyatv_transient_preamble {
-                receiver::AuthProfile::PyatvDiagnostic
-            } else {
-                receiver::AuthProfile::Legacy
-            },
-        )?,
-        Command::StreamTest {
-            receiver_id,
-            seconds,
-            volume_db,
-            setup_check,
-            record_check,
-            stream_setup_check,
-            playback_check,
-            audio_file,
-            setup_timeout_seconds,
-            setup_profile,
-            experimental_owntone_transient,
-        } => receiver::stream_test(
-            &loaded,
-            receiver_id.as_deref(),
-            seconds,
-            volume_db,
-            setup_check,
-            record_check,
-            stream_setup_check,
-            playback_check,
-            audio_file.as_deref(),
-            setup_timeout_seconds,
-            setup_profile,
-            experimental_owntone_transient,
-        )?,
-        Command::PtpNegotiationCheck {
-            receiver_id,
-            experimental_owntone_transient,
-            observation_seconds,
-        } => receiver::ptp_negotiation_check(
-            &loaded,
-            &receiver_id,
-            experimental_owntone_transient,
-            observation_seconds,
-        )?,
-        Command::AutomaticPtpCapture {
-            receiver_id,
-            capture_device,
-            threshold_dbfs,
-            start_duration_ms,
-            stop_duration_ms,
-            volume_db,
-            experimental_owntone_transient,
-        } => receiver::automatic_capture(
-            &loaded,
-            &receiver_id,
-            &capture_device,
-            volume_db,
-            experimental_owntone_transient,
-            audio::activity::Settings {
-                threshold_dbfs,
-                start_ms: start_duration_ms,
-                stop_ms: stop_duration_ms,
-            },
-        )?,
-        Command::ExperimentalPtpCapture {
-            receiver_id,
-            capture_device,
-            seconds,
-            volume_db,
-            experimental_owntone_transient,
-        } => receiver::ptp_capture(
-            &loaded,
-            &receiver_id,
-            &capture_device,
-            seconds,
-            volume_db,
-            experimental_owntone_transient,
-        )?,
-        Command::PtpWavPlayback {
-            receiver_id,
-            audio_file,
-            seconds,
-            volume_db,
-            experimental_owntone_transient,
-        } => receiver::ptp_wav_playback(
-            &loaded,
-            &receiver_id,
-            &audio_file,
-            seconds,
-            volume_db,
-            experimental_owntone_transient,
-        )?,
-        Command::BufferedTest {
-            receiver_id,
-            setup_check,
-            control_check,
-            confirm_audio,
-        } => {
-            receiver::buffered_test(
-                &loaded,
-                &receiver_id,
-                setup_check,
-                confirm_audio,
-                control_check,
-            )?;
-        }
+        Command::Pair { receiver_id } => receiver::pair(&loaded, &receiver_id)?,
         Command::Unpair { receiver_id } => receiver::unpair(&loaded, &receiver_id)?,
         Command::Audio { command } => audio::run(command, &loaded)?,
         Command::Status => receiver::setup::daily_status(&loaded)?,
@@ -237,9 +108,6 @@ fn run_with_discovery(
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    if let Err(error) = cli.validate() {
-        error.exit();
-    }
     let detailed = cli.verbose > 0;
     let recording = matches!(cli.command, Some(Command::ServiceRecording { .. }));
     logging::init(
