@@ -46,44 +46,58 @@ A source checkout is not an installed service.
    thresholds and explicit volume changes; see [runtime settings](RUNTIME.md).
    Defaults are -45 dBFS, 1000 ms sustained audio to start and 30000 ms silence
    to stop. Verify them with your source; they are not universal recommendations.
-7. Play or skip the optional test recording (Skip is the default). An absent volume preserves
-   the receiver volume. An explicit change may persist on the receiver even after
-   playback or failure. The optional recording test always preserves receiver
-   volume. Choose Play explicitly to hear up to 49 seconds, bounded by actual
-   file content, through the existing PTP/ALAC/RTP sender. Ctrl+C interrupts it
-   through existing cancellation and bounded cleanup. Answer whether you heard
-   audio after a completed test: successful protocol responses or packets alone
-   never verify audibility. A failed test reports the error and troubleshooting
-   guidance, then continues setup without an audible-success confirmation prompt.
-   This test checks output; it does not test ALSA input.
-8. Review the final input, speaker, connection, detection and volume summary.
-   Advanced settings show changed values and previous values.
-   Save only when satisfied. Setup retains TOML comments, unrelated configuration,
-   allowlist entries, protected credentials, file ownership and permissions using
-   the existing atomic writer and concurrent-edit checks. Saving does not prove
-   audible playback. If a service was already running, stop it before setup and
-   explicitly start it when ready; no restart is needed for a stopped service.
-9. Optionally enable/start the already installed stock service for your current
-   non-root account. No is the default. Setup displays the exact unit and saved
-   path, verifies configuration resolution and requires another confirmation.
-   Normal system authorization (systemctl/polkit) applies. Declining or lacking
-   service support does not prevent successful setup. See [SYSTEMD.md](SYSTEMD.md)
-   and [release installation](INSTALL.md).
+7. Review the input, speaker, connection, detection and volume summary. Save only
+   when satisfied. The atomic writer retains TOML comments, unrelated settings,
+   approval, credentials, ownership and file permissions. Saving does not prove
+   audible playback.
+8. Optionally enable and start the installed stock service for your current
+   account. No is the default. Setup displays the unit and saved path and asks
+   for confirmation. Normal systemctl/polkit authorization applies.
+9. Independently play or skip the optional recording (Skip is the default).
+   Declining boot startup does not prevent testing. The test uses the just-saved
+   configuration and selected authentication method, with no fallback or receiver
+   substitution. It always preserves the receiver's current volume, including
+   when an explicit automatic-playback volume is saved. It plays at most the
+   existing 49 seconds through the existing PTP/ALAC/RTP sender. It tests speaker
+   output, **not ALSA input**. After completed transmission, answer whether you
+   heard it; packets alone never establish audibility. A negative answer or test
+   failure retains the saved setup and provides troubleshooting.
+10. Setup displays its completion message.
 
-## Playback permissions and safe next steps
+## Service-backed test and recovery
 
-The ordinary installed executable has no file capabilities. Foreground recording
-and automatic playback need permission to bind local UDP ports 319/320, so a
-normal `piair setup` test may report a local permission failure. This is not a
-pairing or receiver failure. You can skip the test and save settings.
+The installed service runs automatic capture, not the recording. Testing creates
+one randomly named `piair-recording-USER-UUID.service` using `systemd-run`, with
+normal system authorization. It runs only the installed executable's fixed
+`service-recording --saved FINGERPRINT` operation as the current non-root user.
+The temporary unit copies security restrictions and CAP_NET_BIND_SERVICE from
+the compiled stock template, has no restart policy or boot enablement, and has a
+100-second total runtime backstop plus the existing 30-second stop timeout.
+No ExecStart overrides, file capabilities, sudoers or sysctl changes are used.
 
-The installed systemd service supplies the required capability. Check `piair status`,
-then explicitly use `piair start` when ready to test automatic USB input playback.
-Starting it does not enable boot startup. Confirm sound physically; service status
-alone does not verify playback. A foreground recording test needs a separate
-explicitly authorized developer build/capability grant; see
-[PTP permissions](PTP_PORT_PERMISSIONS.md). Never grant file capabilities to the
-managed installed executable or run setup as root. Setup never grants privileges.
+The wizard verifies the installed executable, unmodified root-owned template,
+account and default config path through existing service integrity checks. The
+worker holds the existing per-user runtime lock and configuration-writer lock,
+and rejects a changed config fingerprint before playback. Another user's active
+PiAir service is a conflict; it is never stopped. Foreground runtimes must be
+stopped by their owners. Timing-port contention fails safely without killing
+other processes or deleting locks.
+
+A stopped service stays stopped and its boot enablement stays unchanged. If your
+service is running, testing asks before interrupting it, then separately offers
+to restore automatic playback. Declining interruption skips testing. Ctrl+C, q
+or EOF cancels the test with bounded teardown and never silently restarts playback.
+Missing recording/attribution, missing/customized service, wrong executable/config
+path or authorization denial makes the optional test unavailable; setup can finish.
+On uncertain teardown, PiAir reports the exact temporary unit and suppresses
+recovery startup. Inspect it with `systemctl status UNIT` and ask an administrator
+if authorization prevents stopping it. The manager lifetime bound also covers a
+killed/disconnected wizard; SIGKILL and a failed system manager cannot guarantee
+immediate cleanup. Temporary units are collected after completion.
+
+The ordinary installed executable has no file capabilities and setup must not run
+as root. Separate foreground developer diagnostics still require explicit timing
+port permission; see [PTP permissions](PTP_PORT_PERMISSIONS.md).
 
 ## Reconfiguration and cancellation
 
@@ -101,7 +115,7 @@ state before retrying. Credentials are never silently removed or replaced.
 
 Setup reserves the existing per-user automatic-runtime lock before changing state
 or testing audio. Stop your own `piair run` or `automatic-ptp-capture` first. Setup
-will not stop a process or another user's service. The lock stays held until
+asks before stopping its verified current-account service and never stops another process or another user's service. The lock stays held until
 capture/playback cleanup completes. It does not coordinate different Linux users
 or network namespaces. Operational settings take effect on explicit restart;
 security revocation checks remain active during running sessions.
@@ -117,14 +131,10 @@ Apache-2.0 license. See [the full attribution](../tests/assets/audio/LICENSE.md)
 for source, modifications and licensing. The packaged LICENSE.md retains this attribution alongside the recording;
 the simplified wizard does not display it before playback. No additional tone, recording or sender is created for setup.
 
-Resource resolution requires **both** `Pachelbel_Canon_audio_test.wav` and
-`LICENSE.md` in the same directory, in this order:
-
-- If `PIAIR_AUDIO_DATA_DIR` is set, only that directory is checked. It is a directory
-  override, not a URL, and a missing override is not silently replaced.
-- `/usr/local/share/piair/audio`.
-- `/usr/share/piair/audio`.
-- The build checkout's `tests/assets/audio` directory, for development.
+The installed service-backed test requires both `Pachelbel_Canon_audio_test.wav`
+and `LICENSE.md` in `/usr/local/share/piair/audio`. Reinstall PiAir if either is
+missing. Service execution deliberately ignores foreground environment overrides
+and development-checkout data. Standalone developer diagnostics retain their explicit audio-file options.
 
 The executable does not embed the roughly 9.6 MB recording. Installed binaries
 work independently of the current working directory. The release installer packages the existing WAV and its unchanged attribution together in one of these

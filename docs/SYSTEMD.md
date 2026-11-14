@@ -9,16 +9,23 @@ optionally activate a verified installed stock unit; see [SETUP.md](SETUP.md).
 
 ## Prepare as the PiAir user (no sudo)
 
-First use the existing interactive CLI to explicitly approve, select and, when
-required, pair your receiver. Save and test `[playback]` using
-[the runtime workflow](RUNTIME.md#persistent-playback-configuration):
+Run setup as the intended ordinary account to explicitly approve/select the
+receiver and configure authentication. Save settings, choose optional boot
+startup, then independently choose the service-backed recording test:
 
 ```sh
-piair config check
-piair config show
-piair run --allow-unattended
-# Stop the foreground test with Ctrl+C before starting the service.
+piair setup
+piair status
+# Explicitly start automatic input playback when ready:
+piair start
 ```
+
+The optional recording test uses a temporary unit with the same sandbox and
+capability grant; it never enables boot startup or changes the stock ExecStart.
+It asks before interrupting a running service and asks separately before restoring
+it. See [test execution and recovery](SETUP.md#service-backed-test-and-recovery).
+Separate foreground developer tests retain their explicit
+[PTP permission requirements](PTP_PORT_PERMISSIONS.md).
 
 The service executes exactly `/usr/local/bin/piair run --allow-unattended`.
 It never approves, selects, pairs, prompts, or switches receivers. Authentication

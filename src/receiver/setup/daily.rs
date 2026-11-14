@@ -461,17 +461,8 @@ pub(crate) fn daily(mut loaded: Loaded) -> Result<()> {
                 3 => receiver(&mut loaded, &mut ui, &cancel)?,
                 4 => {
                     complete(&loaded)?;
-                    if !test_audio_requested(&mut ui)? {
-                        return Ok(());
-                    }
-                    let path = resources::locate().context("Test recording or LICENSE.md is missing. Install both in /usr/local/share/piair/audio or set PIAIR_AUDIO_DATA_DIR. PiAir was not stopped.")?;
-                    // Parse before stopping too: a missing, unreadable or invalid
-                    // WAV must not interrupt working playback.
-                    super::super::wav::Playback::open(&path, 49)?;
-                    stopped_action(&mut loaded, &mut ui, &cancel, |loaded, ui| {
-                        let _instance = runtime::InstanceLock::acquire()?;
-                        play_test_audio(loaded, &loaded.config.playback, ui, cancel.clone())
-                    })?;
+                    let saved = recording::fingerprint(&loaded.path)?;
+                    recording::offer(&loaded, &saved, &mut ui, &cancel)?;
                 }
                 5 => {
                     ui.say("1. Run setup\n2. View saved playback settings\nQ. Back")?;

@@ -34,8 +34,8 @@ Use `piair --help` for direct and advanced commands.
   A crash between the two atomic files can leave different receiver IDs. Runtime
   preparation rejects this state; run setup to review and repair before starting.
   Approval explicitly granted before a later failure remains saved.
-- **Test recording missing:** install both WAV and LICENSE.md as described in
-  [SETUP.md](SETUP.md), or set `PIAIR_AUDIO_DATA_DIR`. Nothing is downloaded.
+- **Test recording missing:** reinstall PiAir to restore both WAV and LICENSE.md in
+  `/usr/local/share/piair/audio`; see [SETUP.md](SETUP.md). Nothing is downloaded by testing.
 - **No logs / journal access denied:** `piair logs` reads the latest 40 entries
   for the current account's unit; `piair logs --follow` follows it until Ctrl+C.
   Structured events show their message, errors and runtime event details;
@@ -51,6 +51,18 @@ Starting or stopping does not enable or disable boot startup. A stopped service
 is not automatically started after changing receivers or settings. If the menu
 stopped a running service, it offers a separate confirmed start afterward.
 No automatic fallback, multiple outputs or receiver occupancy checks are used.
+
+## Recording test
+
+Test audio uses the saved speaker and authentication method in a temporary
+systemd service with the installed service's permissions. It preserves current
+speaker volume and tests output, not ALSA input. Boot startup and testing are
+independent; a stopped service stays stopped and testing never enables startup.
+A running service requires explicit interruption approval and a separate restore
+approval. q, EOF and Ctrl+C cancel without restart. After transmission, PiAir asks
+whether you heard the recording. Failure or a negative answer retains setup.
+Missing/customized services and denied authorization allow continuing without a
+test. See [service-backed testing and recovery](SETUP.md#service-backed-test-and-recovery).
 
 ## Cancelled or failed menu actions
 

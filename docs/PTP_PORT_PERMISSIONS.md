@@ -24,16 +24,20 @@ file capabilities for that service. The grant is applied at every start and
 survives binary upgrades without setcap. Do not run the manual helper for this
 service deployment. Existing configuration and credentials stay with their owner.
 
-## Foreground setup versus the installed service
+## Setup recording test
 
-`piair setup` runs as your ordinary user and can configure/save without playback.
-Its optional recording test cannot bind privileged timing ports on a standard
-installation. Skip it and explicitly start automatic playback through `piair start`
-after saving, or use a separate developer executable below to test a recording.
-The service grants its own process a capability; it does not grant permission to
-other foreground invocations. Never apply the helper to `/usr/local/bin/piair`:
-that managed executable deliberately has no file capabilities and maintenance
-checks its integrity. Do not change sudoers or privileged-port sysctls.
+`piair setup` saves reviewed settings, asks about boot startup, then independently
+offers the bundled recording test. The test runs as your non-root account in a
+temporary systemd service with the stock service's sandbox and CAP_NET_BIND_SERVICE.
+The foreground wizard does not bind privileged ports or elevate itself.
+Declining boot startup still allows testing; testing never enables a unit.
+Missing/customized installations or denied system authorization make testing
+unavailable without preventing setup completion. See [setup](SETUP.md).
+
+The capability belongs to service processes, not other foreground invocations.
+Never apply the helper to `/usr/local/bin/piair`: that managed executable has no
+file capabilities and maintenance checks its integrity. Do not change sudoers,
+service capability grants or privileged-port sysctls.
 
 ## Explicit post-build step for standalone developer CLI use
 

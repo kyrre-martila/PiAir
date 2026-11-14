@@ -91,6 +91,7 @@ pub(super) fn require_terminal(stdin: bool, stdout: bool) -> Result<()> {
 pub(super) fn terminal_line(cancel: &AtomicBool) -> Result<String> {
     use rustix::event::{poll, PollFd, PollFlags, Timespec};
     let stdin = io::stdin();
+    let mut line = Vec::new();
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(Cancelled.into());
@@ -108,12 +109,24 @@ pub(super) fn terminal_line(cancel: &AtomicBool) -> Result<String> {
             Err(e) => return Err(e.into()),
             _ => {}
         }
-        let mut line = String::new();
-        stdin.read_line(&mut line)?;
-        if cancel.load(Ordering::Relaxed) {
-            return Err(Cancelled.into());
+        // Read one byte directly from the terminal fd. std::io::Stdin's shared
+        // buffered reader can hide pasted q/EOF behind a later poll, preventing
+        // the service-backed test from observing cancellation promptly.
+        let mut byte = [0u8; 1];
+        match rustix::io::read(&stdin, &mut byte) {
+            Ok(0) => return Ok(String::from_utf8(line)?),
+            Ok(_) => {
+                line.push(byte[0]);
+                if byte[0] == b'\n' {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err(Cancelled.into());
+                    }
+                    return Ok(String::from_utf8(line)?);
+                }
+            }
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(e) => return Err(e.into()),
         }
-        return Ok(line);
     }
 }
 
