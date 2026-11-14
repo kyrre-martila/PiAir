@@ -5,7 +5,12 @@ mod inputs;
 use inputs::normal_inputs;
 mod resources;
 pub(crate) use daily::{daily, daily_control, daily_logs, daily_status};
+mod recording;
 mod service;
+pub(crate) use recording::worker as service_recording;
+pub(crate) fn recording_cleanup_failed(error: &anyhow::Error) -> bool {
+    error.is::<super::lifecycle::CleanupFailure>()
+}
 pub(crate) use service::require_installed_executable;
 mod ui;
 use super::{
@@ -67,9 +72,25 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
     };
     let mut journal = Vec::new();
     let result = (|| {
-        ui.say("Welcome to PiAir setup.\nChoose an input and speaker, try the sound, then save your settings.\nEnter numbered choices. q or Ctrl+C cancels.\nSpeaker approval and connection selection save when confirmed; playback settings save at the end.")?;
+        ui.say("Welcome to PiAir setup.\nChoose an input and speaker, save settings, then optionally test the sound.\nEnter numbered choices. q or Ctrl+C cancels.\nSpeaker approval and connection selection save when confirmed; playback settings save at the end.")?;
         ensure!(cfg!(target_os = "linux"), "PiAir requires Linux and ALSA");
         // Guard setup mutations and tests with the runtime's existing exclusion.
+        let interrupted_for_setup = if let Ok(current) = service::inspect_current(&loaded) {
+            if current.active == "active" && current.pid != 0 {
+                let _installed = service::require_installed_executable()?;
+                if !ui.confirm("Reconfiguration requires temporarily stopping your automatic playback. Interrupt it now? Playback will only restart with explicit approval.")? {
+                    ui.say("Setup cancelled; automatic playback is unchanged.")?;
+                    return Ok(());
+                }
+                service::control(&loaded, "stop")?;
+                journal.push("Automatic playback explicitly stopped for setup. It will not restart without approval; use piair start when ready.".into());
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let instance = runtime::InstanceLock::acquire()?;
         requirements(&mut ui)?;
         let mut loaded = loaded;
@@ -125,7 +146,6 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
         // Approval changes above are intentional. Pin the remaining configuration
         // before allowing a long monitoring/test/review interval.
         advanced_settings(&mut draft, &mut ui, &cancel)?;
-        test_audio(&loaded, &draft, &mut ui, cancel.clone())?;
 
         loop {
             ui.say(format!("\n5. Review and finish\nInput: {}\nSpeaker: {receiver_name}\nConnection: {}\nAudio detection: automatic\nVolume: {}", clean(draft.capture_device.as_deref().unwrap_or("Not configured")), authentication_label(draft.authentication), volume_label(draft.volume_db)))?;
@@ -141,6 +161,9 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
             }
         }
         ensure!(!cancel.load(Ordering::Relaxed), Cancelled);
+        let mut reviewed =
+            config::Config::parse(baseline.as_ref().map_or("", |s| s.text.as_str()))?;
+        reviewed.playback = draft.clone();
         config::save_playback_checked(
             &loaded,
             draft.receiver_id.clone(),
@@ -153,9 +176,30 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
         ));
         ui.say("Settings saved.")?;
         drop(instance);
+        let saved = recording::fingerprint(&loaded.path)?;
         let loaded = config::load(Some(loaded.path.clone()))?;
+        if toml::to_string(&loaded.config)? != toml::to_string(&reviewed)? {
+            ui.say("Settings were saved, but configuration changed afterward. Startup and testing skipped. Review the current settings with piair setup.")?;
+            return Ok(());
+        }
+        recording::check_saved(&loaded, &saved)?;
         optional_service(&loaded, &mut ui, &mut journal)?;
-        ui.say("Setup complete.\nCheck service availability with piair status. Start automatic playback explicitly with piair start when ready.\nForeground playback needs local timing-port permission; see docs/PTP_PORT_PERMISSIONS.md.\nSaving settings does not verify audible playback.\nRe-run piair setup whenever you want to reconfigure.")?;
+        let restore_after_setup = interrupted_for_setup
+            && service::inspect_current(&loaded)
+                .is_ok_and(|s| matches!(s.active.as_str(), "inactive" | "failed") && s.pid == 0);
+        let safe_to_restore = recording::offer(&loaded, &saved, &mut ui, &cancel)?;
+        if restore_after_setup
+            && safe_to_restore
+            && !cancel.load(Ordering::Relaxed)
+            && service::inspect_current(&loaded)
+                .is_ok_and(|s| matches!(s.active.as_str(), "inactive" | "failed") && s.pid == 0)
+            && ui.confirm("Restore the automatic playback you stopped for setup now?")?
+        {
+            if let Err(e) = service::control(&loaded, "start") {
+                ui.say(format!("Could not restore playback: {e:#}. Inspect piair status, then explicitly run piair start."))?;
+            }
+        }
+        ui.say("Setup complete.\nCheck service availability with piair status. Start automatic playback explicitly with piair start when ready.\nSaving settings does not verify audible playback.\nRe-run piair setup whenever you want to reconfigure.")?;
         Ok(())
     })();
     if result.is_err() {
@@ -575,7 +619,7 @@ fn advanced_settings<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
     cancel: &AtomicBool,
 ) -> Result<()> {
-    ui.say("Audio detection is automatic. Speaker volume will follow your saved setting (or stay unchanged).\n1. Continue [default]\n2. Advanced audio and volume settings")?;
+    ui.say("\n4. Audio detection and optional advanced settings\nAudio detection is automatic. Speaker volume will follow your saved setting (or stay unchanged).\n1. Continue [default]\n2. Advanced audio and volume settings")?;
     if ui.choice("Choose:", 2, Some(1))? == 2 {
         configure_activity(draft, ui, cancel)?;
         configure_volume(draft, ui)?;
@@ -652,49 +696,10 @@ fn configure_volume<R: FnMut() -> Result<String>, W: Write>(
         }
     }
 }
-fn test_audio<R: FnMut() -> Result<String>, W: Write>(
-    loaded: &Loaded,
-    draft: &Playback,
-    ui: &mut Ui<R, W>,
-    cancel: Arc<AtomicBool>,
-) -> Result<()> {
-    if !test_audio_requested(ui)? {
-        return Ok(());
-    }
-    play_test_audio(loaded, draft, ui, cancel)
-}
 fn test_audio_requested<R: FnMut() -> Result<String>, W: Write>(ui: &mut Ui<R, W>) -> Result<bool> {
-    ui.say("\n4. Test audio\nPlay a recording on your chosen speaker.\n1. Play test recording (49 seconds)\n2. Skip test [default]")?;
+    ui.say("\n7. Optional audio test\nPlay the bundled recording through your saved AirPlay speaker, using systemd permissions. This does not test the ALSA input.\n1. Play test recording (49 seconds)\n2. Skip test [default]")?;
     Ok(ui.choice("Choose:", 2, Some(2))? == 1)
 }
-fn play_test_audio<R: FnMut() -> Result<String>, W: Write>(
-    loaded: &Loaded,
-    draft: &Playback,
-    ui: &mut Ui<R, W>,
-    cancel: Arc<AtomicBool>,
-) -> Result<()> {
-    let Some(path) = resources::locate() else {
-        tracing::debug!("Test recording or LICENSE.md missing; install both in /usr/local/share/piair/audio, or set PIAIR_AUDIO_DATA_DIR. Development: tests/assets/audio.");
-        ui.say(
-            "The test recording is unavailable. Reinstall PiAir to restore it. Skipping the test.",
-        )?;
-        return Ok(());
-    };
-    ui.say("Playing the test recording. Speaker volume is preserved. Ctrl+C stops playback.")?;
-    let result = super::wav::Playback::open(&path, 49).and_then(|wav| {
-        super::ptp_operation_cancellable(
-            loaded,
-            draft.receiver_id.as_deref().context("missing receiver")?,
-            draft.authentication == Some(Authentication::OwnToneTransient),
-            10,
-            Some((wav, None)),
-            None,
-            Some(cancel.clone()),
-        )
-    });
-    playback_feedback(result, ui, &cancel)
-}
-
 fn playback_troubleshooting<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
 ) -> Result<()> {

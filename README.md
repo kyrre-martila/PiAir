@@ -25,7 +25,7 @@ and archive, and asks before system-wide installation. No Rust, Cargo, Git,
 compilation or existing configuration is needed. Then run `piair setup`.
 
 ```sh
-piair setup       # Configure audio input, receiver and authentication
+piair setup       # Save settings, choose boot startup, optionally test speaker audio
 piair             # Open the daily menu (also works over SSH with a TTY)
 ```
 
@@ -33,6 +33,10 @@ Setup guides speaker selection and approval, explicit authentication,
 audio detection settings, an optional 49-second recording test, and optional
 activation of the installed service. See [setup and troubleshooting](docs/SETUP.md).
 Existing configurations and stored credentials remain usable without pairing again.
+
+Setup saves settings before independently offering boot startup and a 49-second
+recording test. The optional test uses systemd permissions as your ordinary user
+and preserves speaker volume; it does not test the ALSA input.
 
 ## Daily use
 

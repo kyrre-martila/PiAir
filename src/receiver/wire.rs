@@ -17,7 +17,7 @@ use zeroize::{Zeroize, Zeroizing};
 pub(super) struct PtpPermissionDenied;
 impl std::fmt::Display for PtpPermissionDenied {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("This foreground process cannot open the local timing ports (UDP 319/320). The installed service supplies this permission; the ordinary installed executable does not. Finish saving setup, then explicitly start the installed service with piair start for automatic playback. For a foreground recording test, see docs/PTP_PORT_PERMISSIONS.md for a separate developer build with an explicit capability grant. Do not run PiAir as root or change pairing to fix this local permission problem.")
+        f.write_str("This foreground process cannot open the local timing ports (UDP 319/320). The installed service supplies this permission; the ordinary installed executable does not. Use the optional service-backed recording test after saving in piair setup, or explicitly start automatic playback with piair start. For a foreground recording test, see docs/PTP_PORT_PERMISSIONS.md for a separate developer build with an explicit capability grant. Do not run PiAir as root or change pairing to fix this local permission problem.")
     }
 }
 impl std::error::Error for PtpPermissionDenied {}

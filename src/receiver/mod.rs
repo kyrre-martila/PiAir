@@ -1003,7 +1003,7 @@ fn ptp_operation_cancellable(
         "selected receiver must advertise audio, ALAC and PTP; no fallback"
     );
     ensure!(
-        io::stdin().is_terminal() && io::stdout().is_terminal(),
+        cancel.is_some() || (io::stdin().is_terminal() && io::stdout().is_terminal()),
         "PTP operation requires interactive confirmation"
     );
     let setup_authorized = cancel.is_some();

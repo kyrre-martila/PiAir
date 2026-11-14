@@ -853,3 +853,39 @@ mod executable_identity_tests {
         );
     }
 }
+
+/// PTP timing ports are shared across accounts. Never stop a competing unit.
+pub(super) fn no_other_services(own: &str) -> Result<()> {
+    let text = output(&[
+        "list-units",
+        "--state=active,activating,deactivating",
+        "--plain",
+        "--no-legend",
+        "piair@*.service",
+    ])?;
+    other_services(&text, own)
+}
+fn other_services(text: &str, own: &str) -> Result<()> {
+    for line in text.lines() {
+        let unit = line.split_whitespace().next().unwrap_or("");
+        ensure!(unit == own || unit.is_empty(), "Another user's PiAir service is active ({unit}). It will not be stopped. Skip testing or ask its owner to stop it before retrying.");
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod recording_conflict_tests {
+    #[test]
+    fn another_account_is_never_a_stop_target() {
+        super::other_services(
+            "piair@pi.service loaded active running PiAir",
+            "piair@pi.service",
+        )
+        .unwrap();
+        assert!(super::other_services(
+            "piair@other.service loaded active running PiAir",
+            "piair@pi.service"
+        )
+        .is_err());
+        super::other_services("", "piair@pi.service").unwrap();
+    }
+}

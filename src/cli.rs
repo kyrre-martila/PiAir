@@ -20,6 +20,12 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Internal fixed recording operation; invoked only by the requested temporary service.
+    #[command(hide = true)]
+    ServiceRecording {
+        #[arg(long)]
+        saved: String,
+    },
     /// Check for a stable official release and update the installed application.
     #[command(display_order = 9)]
     Update,

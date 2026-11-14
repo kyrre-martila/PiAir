@@ -272,11 +272,11 @@ fn invalid_manual_thresholds_retry_without_changing_draft() {
 fn default_skip_does_not_touch_receiver_or_service() {
     let (_d, loaded, _) = fixture();
     let mut ui = scripted("\n");
-    test_audio(
+    recording::offer(
         &loaded,
-        &Playback::default(),
+        "unused when skipped",
         &mut ui,
-        Arc::new(AtomicBool::new(false)),
+        &AtomicBool::new(false),
     )
     .unwrap();
     assert!(Store::new(&loaded.path)

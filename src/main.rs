@@ -33,6 +33,7 @@ fn run_with_discovery(
         Command::Update | Command::Uninstall => {
             unreachable!("maintenance dispatched before configuration")
         }
+        Command::ServiceRecording { saved } => receiver::setup::service_recording(&loaded, &saved)?,
         Command::Setup => receiver::setup::run(loaded)?,
         Command::Run {
             receiver_id,
@@ -247,6 +248,7 @@ fn main() -> std::process::ExitCode {
         error.exit();
     }
     let detailed = cli.verbose > 0;
+    let recording = matches!(cli.command, Some(Command::ServiceRecording { .. }));
     logging::init(
         cli.verbose,
         matches!(cli.command, Some(Command::Run { .. })),
@@ -255,7 +257,12 @@ fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!(error = %receiver::setup::command_error_message(&error, detailed), "command failed");
-            std::process::ExitCode::FAILURE
+            if recording && receiver::setup::recording_cleanup_failed(&error) {
+                // systemd-run --wait propagates the worker status to the wizard.
+                std::process::ExitCode::from(75)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
         }
     }
 }
