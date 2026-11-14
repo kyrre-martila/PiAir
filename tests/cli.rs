@@ -913,7 +913,10 @@ fn development_executable_can_observe_but_cannot_control_installed_service() {
         let text = String::from_utf8(output.stderr).unwrap();
         assert!(text.contains("Service control is unavailable"), "{text}");
     }
-    let output = run(&["status"]);
+    let ordinary = run(&["status"]);
+    let ordinary = String::from_utf8(ordinary.stdout).unwrap();
+    assert!(!ordinary.contains("Invoking executable:"));
+    let output = run(&["-v", "status"]);
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("Invoking executable: not verified as installed PiAir"));
