@@ -20,6 +20,9 @@ test -n "$maximum"
 test "$(printf '%s\n' "$maximum" 2.36 | sort -V | tail -1)" = 2.36
 echo "Maximum required glibc: $maximum (Bookworm ceiling: 2.36)"
 ldd "$binary"
-! ldd "$binary" | grep -q 'not found'
+if ldd "$binary" | grep -q 'not found'; then
+    echo "Unresolved runtime dependency" >&2
+    exit 1
+fi
 "$binary" --version
 "$binary" --help >/dev/null

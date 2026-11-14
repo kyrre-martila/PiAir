@@ -283,6 +283,40 @@ class InstallTests(unittest.TestCase):
         self.assertLess(self.service.events.index("stop"), self.service.events.index("mask"))
         self.assertNotIn("start", self.service.events)
 
+    def test_stable_103_to_104_update_through_installed_maintenance(self):
+        # The installed helper is unchanged from v1.0.3. Exercise discovery,
+        # checksum validation, startup gate and the real transaction together.
+        # ELF bytes and systemd are fixtures; this is not hardware validation.
+        self.seed("1.0.3")
+        self.service.active = True
+        data = archive(files("1.0.4"), "1.0.4")
+        base = m.REPO + "/releases/download/v1.0.4/"
+        responses = {
+            m.API: b'{"tag_name":"v1.0.4","draft":false,"prerelease":false}',
+            base + m.filename("1.0.4"): data,
+            base + "SHA256SUMS": (m.digest(data) + "  " + m.filename("1.0.4") + "\n").encode(),
+        }
+        def authorize(action, v, path):
+            self.assertEqual((action, v), ("install", "1.0.4"))
+            self.assertEqual(Path(path).read_bytes(), data)
+            self.commit(v=v)
+        with patch.object(m, "prerequisites"), \
+                patch.object(m, "VERSION", self.i.path(m.VERSION)), \
+                patch.object(m, "JOURNAL", self.i.path(m.JOURNAL)), \
+                patch.object(m, "fetch", side_effect=lambda url, *args: responses[url]) as fetch, \
+                patch.object(m, "confirm", return_value=True), \
+                patch.object(m, "run", return_value="piair 1.0.4") as startup, \
+                patch.object(m, "authorize", side_effect=authorize):
+            m.main(["update"])
+        self.assertEqual(fetch.call_args_list[0].args[0], m.API)
+        startup.assert_called_once()
+        self.assertEqual(self.i.read_manifest()["version"], "1.0.4")
+        self.assertEqual(self.snapshot(), self.before)
+        self.assertTrue(self.service.enabled)
+        self.assertNotIn("start", self.service.events)
+        for dest, mode in m.FILES.values():
+            self.assertEqual(self.i.path(dest).stat().st_mode & 0o7777, mode)
+
     def test_declined_stop_changes_nothing(self):
         old = self.seed()
         self.service.active = True
@@ -541,6 +575,27 @@ class InstallTests(unittest.TestCase):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_bookworm_unresolved_library_fails_before_startup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            stubs = {
+                "uname": "echo aarch64",
+                "readelf": "case $1 in -h) echo 'Machine: AArch64';; -l) echo /lib/ld-linux-aarch64.so.1;; -d) echo 'Shared library: [libasound.so.2]';; --version-info) echo GLIBC_2.36;; esac",
+                "ldd": "echo 'libasound.so.2 => not found'",
+                "piair": "touch \"$0.started\"",
+            }
+            for name, body in stubs.items():
+                path = directory / name
+                path.write_text("#!/bin/sh\n" + body + "\n")
+                path.chmod(0o755)
+            result = subprocess.run(["sh", str(ROOT / "scripts/verify-bookworm.sh"),
+                                     str(directory / "piair")],
+                                    env={**os.environ, "PATH": tmp + ":" + os.environ["PATH"]},
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Unresolved runtime dependency", result.stderr)
+            self.assertFalse((directory / "piair.started").exists())
+
     def test_version_tag_mismatch_and_invalid_semver(self):
         for tag, v in [("v0.2.0", "0.1.0"), ("0.1.0", "0.1.0"), ("v0.1.0-rc1", "0.1.0")]:
             with self.assertRaises(RuntimeError):
