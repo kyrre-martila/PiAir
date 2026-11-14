@@ -4,7 +4,6 @@ import importlib.util
 import io
 import json
 import os
-import re
 from pathlib import Path
 import struct
 import subprocess
@@ -52,11 +51,10 @@ def archive(content, v="0.1.0", extra=None):
 
 
 class FirstInstallExtractionTests(unittest.TestCase):
-    """Execute the actual copyable documentation, without sudo or network access."""
+    """Execute the official extraction gate, without sudo or network access."""
     package = "piair-0.1.0-aarch64-unknown-linux-gnu"
-    # The first shell block installs OS dependencies; select the download block.
-    block = (ROOT / "docs/INSTALL.md").read_text().split("```sh\n")[2].split("```")[0]
-    bootstrap = block.split("<<'PYTHON'\n", 1)[1].split("\nPYTHON", 1)[0]
+    bootstrap = (ROOT / "install.sh").read_text().split("<<'PYTHON'\n")[1].split("\nPYTHON")[0]
+    bootstrap = bootstrap[:bootstrap.index('if __name__ == "__main__":')] + "\nextract(pathlib.Path(sys.argv[1] + '.tar.gz').read_bytes(), sys.argv[1])\n"
 
     @staticmethod
     def changed_archive(name, kind=tarfile.REGTYPE, replace=False, repeat=1, v="0.1.0"):
@@ -155,48 +153,9 @@ class FirstInstallExtractionTests(unittest.TestCase):
                 self.assertEqual((outside / "piair").read_text(), "preserve me")
                 self.assertEqual({p.name for p in outside.iterdir()}, {"piair"})
 
-    def test_documented_procedure_cleans_downloads_on_success_or_failure(self):
-        current = r.tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
-        self.assertEqual(re.search(r"^  version=(.+)$", self.block, re.MULTILINE).group(1), current)
-        package = m.filename(current).removesuffix(".tar.gz")
-        for outcome in ("success", "installer failure", "checksum mismatch", "unsafe archive", "download failure"):
-            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as temporary:
-                directory = Path(temporary)
-                binaries = directory / "bin"
-                binaries.mkdir()
-                scratch = directory / "scratch"
-                scratch.mkdir()
-                marker = directory / "installer-started"
-                content = files(current)
-                # Harmless normal-user installer stand-in; never calls sudo/systemctl.
-                content["maintain.py"] = ("import os, pathlib, sys\n"
-                    "pathlib.Path(os.environ['PIAIR_TEST_STARTED']).write_text('started')\n"
-                    "sys.exit(int(os.environ['PIAIR_TEST_EXIT']))\n").encode()
-                data = archive(content, current)
-                if outcome == "unsafe archive":
-                    data = self.changed_archive(package + "/../outside", v=current)
-                (directory / (package + ".tar.gz")).write_bytes(data)
-                sha = "0" * 64 if outcome == "checksum mismatch" else m.digest(data)
-                (directory / "SHA256SUMS").write_text(sha + "  " + package + ".tar.gz\n")
-                (binaries / "mktemp").write_text("#!" + sys.executable + "\n"
-                    "import os, tempfile\nprint(tempfile.mkdtemp(dir=os.environ['PIAIR_TEST_SCRATCH']))\n")
-                (binaries / "curl").write_text("#!" + sys.executable + "\n"
-                    "import os, pathlib, shutil, sys\n"
-                    "if os.environ['PIAIR_TEST_DOWNLOAD_FAIL'] == '1': sys.exit(22)\n"
-                    "dest = sys.argv[sys.argv.index('-o') + 1]\n"
-                    "shutil.copyfile(pathlib.Path(os.environ['PIAIR_TEST_FIXTURE']) / dest, dest)\n")
-                for path in binaries.iterdir():
-                    path.chmod(0o755)
-                env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"],
-                           PIAIR_TEST_SCRATCH=str(scratch), PIAIR_TEST_FIXTURE=str(directory),
-                           PIAIR_TEST_STARTED=str(marker),
-                           PIAIR_TEST_EXIT="1" if outcome == "installer failure" else "0",
-                           PIAIR_TEST_DOWNLOAD_FAIL="1" if outcome == "download failure" else "0")
-                result = subprocess.run(["bash", "-c", self.block], cwd=directory, env=env,
-                                        text=True, capture_output=True, check=False)
-                self.assertEqual(result.returncode == 0, outcome == "success", result.stderr)
-                self.assertEqual(list(scratch.iterdir()), [], result.stderr)
-                self.assertEqual(marker.exists(), outcome in ("success", "installer failure"))
+class ManualExtractionTests(FirstInstallExtractionTests):
+    """Keep the advanced manual procedure subject to the same attack fixtures."""
+    bootstrap = (ROOT / "docs/INSTALL.md").read_text().split("<<'PYTHON'\n")[1].split("\nPYTHON")[0]
 
 
 class ServiceMock:

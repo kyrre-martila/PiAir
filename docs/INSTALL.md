@@ -15,17 +15,48 @@ sudo apt update
 sudo apt install curl ca-certificates python3 libasound2
 ```
 
-Choose a version from [official releases](https://github.com/kyrre-martila/PiAir/releases).
-The block below selects **1.0.2** and downloads
-`piair-1.0.2-aarch64-unknown-linux-gnu.tar.gz` and `SHA256SUMS` from `v1.0.2`.
-Release preparation does not publish these assets: if they are not available yet,
-wait for the maintainer to publish v1.0.2. No existing PiAir files or configuration
-are required.
+Install the current published stable official release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kyrre-martila/PiAir/main/install.sh | bash
+```
+
+Run this as your ordinary user, **without sudo**. Python 3.9+, glibc 2.36+,
+ALSA, sudo and a running systemd manager are required. The installer checks the
+system, downloads the latest stable release and matching checksum, and validates
+archive members before executing the verified maintenance helper. Read its
+system-wide installation prompt and enter `y` or `yes` to approve. Empty input,
+EOF and declined prompts never approve installation. Prompts use `/dev/tty`,
+including when piped through bash; execution without a controlling terminal fails
+closed. Sudo is used only by the existing maintenance helper for system changes.
+Nothing automatically starts or enables playback. Then run:
+
+```sh
+piair --version
+piair setup
+```
+
+### Advanced / manual installation
+
+For inspection or troubleshooting, download the entry point before running it:
+
+```sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/kyrre-martila/PiAir/main/install.sh
+less install.sh
+bash install.sh
+```
+
+For a specific version or bootstrap troubleshooting, the manual equivalent is
+below. Choose a published stable version deliberately. Run it from a terminal as
+your ordinary user; never extract or execute a package before verifying it.
+
+<details>
+<summary>Advanced manual download, validation and installation</summary>
 
 ```sh
 (
   set -eu
-  version=1.0.2
+  version=1.0.2 # Example only: choose a published stable version deliberately
   package="piair-${version}-aarch64-unknown-linux-gnu"
   download=$(mktemp -d /tmp/piair-install.XXXXXXXXXX)
   trap 'rm -rf -- "$download"' EXIT
@@ -34,7 +65,15 @@ are required.
   base="https://github.com/kyrre-martila/PiAir/releases/download/v${version}"
   curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 -o "$package.tar.gz" "$base/$package.tar.gz"
   curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 -o SHA256SUMS "$base/SHA256SUMS"
-  sha256sum --check SHA256SUMS
+  python3 -I - "$package.tar.gz" <<'CHECKSUM'
+import hashlib, pathlib, re, sys
+name = sys.argv[1]
+lines = [line for line in pathlib.Path("SHA256SUMS").read_text("ascii").splitlines()
+         if line.split() and line.split()[-1].lstrip("*") == name]
+if (len(lines) != 1 or not re.fullmatch(r"[0-9a-f]{64}  " + re.escape(name), lines[0])
+        or hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() != lines[0][:64]):
+    raise SystemExit("Selected archive checksum missing, ambiguous or mismatched")
+CHECKSUM
   python3 -I - "$package" <<'PYTHON'
 import pathlib, re, sys, tarfile
 package = sys.argv[1]
@@ -69,18 +108,7 @@ PYTHON
 )
 ```
 
-The block checks every archive path and member type before writing any extracted
-files, and removes its temporary directory on success, failure or cancellation.
-The installer then reuses its full package validation before system changes.
-Read the confirmation and enter `y` to install. Sudo asks for normal system
-installation authorization. Nothing starts or enables playback. Then run:
-
-```sh
-piair --version   # Expected: piair 1.0.2
-piair --help
-piair setup
-piair
-```
+</details>
 
 The executable is installed in `/usr/local/bin`, normally on the Pi user's PATH.
 Setup runs as your ordinary user using the installed executable, without source
@@ -152,8 +180,7 @@ systemctl status piair@USERNAME.service
   executable/helper is unavailable after an interrupted first install/uninstall,
   an administrator can run the root-owned backup helper:
   `sudo python3 -I /usr/local/share/piair/transaction/maintain.py _commit recover`.
-  If no previous helper exists (first install), repeat the verified download and
-  installation block; it performs recovery first, then repeat once to install.
+  If no previous helper exists (first install), repeat the official installation command; it performs recovery first, then repeat once to install.
   The maintenance mask persists across reboot until recovery finishes, preventing
   boot startup from using a partially replaced installation. Never delete the transaction directory
   or manually replace individual files to bypass recovery.
@@ -175,6 +202,15 @@ Root owns `/usr/local/bin/piair` (0755), `/etc/systemd/system/piair@.service`
 No file capabilities are installed. The unchanged stock service supplies
 CAP_NET_BIND_SERVICE to the normal user with NoNewPrivileges and existing
 restrictions; the standalone development capability helper stays separate.
+
+The entry point trusts the official repository's `main/install.sh` over HTTPS.
+It uses GitHub's `/releases/latest` endpoint and additionally rejects draft,
+prerelease and noncanonical version tags; it constructs asset URLs itself from
+that stable version, never from arbitrary API asset URLs. It verifies exactly one
+matching archive checksum before extracting an allowlist of regular files.
+Unexpected, missing, duplicate, oversized, linked or special members are refused.
+Temporary files live in a private directory and are cleaned on success, failure,
+HUP, INT and TERM (SIGKILL/power loss cannot run cleanup).
 
 Downloads use HTTPS and SHA-256 checksums. Checksums detect corruption or a
 mismatched artifact; they are **not independent proof of authenticity** if the

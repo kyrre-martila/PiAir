@@ -13,10 +13,15 @@ HomePod. See [validation status](docs/DEVELOPMENT.md#validation-status).
 
 Precompiled packages support **Raspberry Pi OS 64-bit Bookworm or newer** on ARM64
 Raspberry Pis (Pi 3/4/5 and Zero 2 W). Follow the
-[download, checksum verification and installation steps](docs/INSTALL.md#install).
-The installation guide selects version **1.0.2**; wait for its official release
-assets if they have not been published yet. No Rust, Cargo, Git, compilation or
-existing PiAir configuration is needed for release installation.
+[installation guide](docs/INSTALL.md#install). Install as your ordinary user:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kyrre-martila/PiAir/main/install.sh | bash
+```
+
+The installer selects the current stable official release, verifies its checksum
+and archive, and asks before system-wide installation. No Rust, Cargo, Git,
+compilation or existing configuration is needed. Then run `piair setup`.
 
 ```sh
 piair setup       # Configure audio input, receiver and authentication
