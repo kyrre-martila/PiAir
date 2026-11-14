@@ -28,11 +28,12 @@ A source checkout is not an installed service.
    16-bit stereo client requirements, then closes it. If a raw `hw:` device
    cannot provide that format, explicitly select its `plughw:` conversion PCM.
    Setup does not silently replace the identifier or choose another card.
-4. Select your AirPlay receiver after discovery. Inspect its canonical device ID,
-   endpoint, capabilities and local approval/selection/pairing state. Verify its
-   identity independently using a physical label or trusted receiver settings.
-   mDNS advertisements are untrusted. New approval requires two explicit
-   confirmations; choosing a menu row alone grants nothing.
+4. Select your AirPlay speaker by its advertised name. The simplified picker
+   offers friendly names, rescan and cancellation. Technical details are available
+   separately with `piair receivers` or `piair devices`, not from the picker. A new speaker needs one explicit approval prompt;
+   its advertised name and device ID do not verify its identity. The connection
+   choice is saved separately after confirmation. See
+   [receiver address binding](RECEIVER_ADDRESS_BINDING.md) if discovery changes.
 5. Choose an advertised compatible authentication path. Existing validated HAP
    credentials can be reused without enrollment. PIN-display enrollment requires
    actual supported PIN delivery. HAP setup-code enrollment requires a genuine
@@ -40,22 +41,12 @@ A source checkout is not an installed service.
    Codes are entered without echo. OwnTone-reference transient authentication
    requires explicit confirmation and does not establish verified persistent
    receiver identity. There is no automatic authentication fallback.
-6. Keep the current/default activity settings or adjust them. The numeric defaults
-   are -45 dBFS, 1000 ms sustained audio to start and 30000 ms silence to stop;
-   they are starting points, not universal hardware recommendations. The optional
-   measurement step shows actual input levels using the automatic detector. Stop
-   the source for five seconds, then play representative music for five seconds.
-   Only sufficiently separated measurements yield a provisional suggestion
-   using the background's 95th percentile and quieter music's 25th percentile.
-   The suggestion is at least six dB above background, preferably twelve dB below
-   quiet music, and never below -60 dBFS. It requires at least six dB of headroom
-   below quiet music; overlapping or very weak measurements get no suggestion.
-   Digital silence does not justify an extremely sensitive threshold. These are
-   conservative suggestion limits only; manual configuration retains its full
-   supported range. Confirm before applying a suggestion to the draft and again
-   before saving the reviewed configuration.
-   Repeat under realistic quiet/noisy conditions and verify your chosen settings.
-7. Keep or explicitly change the saved runtime volume. An absent volume preserves
+6. Normal setup keeps automatic detection and the current/default volume.
+   Advanced settings are optional. They include input measurement, activity
+   thresholds and explicit volume changes; see [runtime settings](RUNTIME.md).
+   Defaults are -45 dBFS, 1000 ms sustained audio to start and 30000 ms silence
+   to stop. Verify them with your source; they are not universal recommendations.
+7. Play or skip the optional test recording (Skip is the default). An absent volume preserves
    the receiver volume. An explicit change may persist on the receiver even after
    playback or failure. The optional recording test always preserves receiver
    volume. Choose Play explicitly to hear up to 49 seconds, bounded by actual
@@ -65,18 +56,34 @@ A source checkout is not an installed service.
    never verify audibility. A failed test reports the error and troubleshooting
    guidance, then continues setup without an audible-success confirmation prompt.
    This test checks output; it does not test ALSA input.
-8. Review the final summary; changed values are marked and previous values shown.
+8. Review the final input, speaker, connection, detection and volume summary.
+   Advanced settings show changed values and previous values.
    Save only when satisfied. Setup retains TOML comments, unrelated configuration,
    allowlist entries, protected credentials, file ownership and permissions using
-   the existing atomic writer and concurrent-edit checks. Restart PiAir explicitly
-   to apply operational changes. For a foreground trial, run
-   `piair run --allow-unattended`, retaining any custom `--config` argument.
+   the existing atomic writer and concurrent-edit checks. Saving does not prove
+   audible playback. If a service was already running, stop it before setup and
+   explicitly start it when ready; no restart is needed for a stopped service.
 9. Optionally enable/start the already installed stock service for your current
    non-root account. No is the default. Setup displays the exact unit and saved
    path, verifies configuration resolution and requires another confirmation.
    Normal system authorization (systemctl/polkit) applies. Declining or lacking
    service support does not prevent successful setup. See [SYSTEMD.md](SYSTEMD.md)
    and [release installation](INSTALL.md).
+
+## Playback permissions and safe next steps
+
+The ordinary installed executable has no file capabilities. Foreground recording
+and automatic playback need permission to bind local UDP ports 319/320, so a
+normal `piair setup` test may report a local permission failure. This is not a
+pairing or receiver failure. You can skip the test and save settings.
+
+The installed systemd service supplies the required capability. Check `piair status`,
+then explicitly use `piair start` when ready to test automatic USB input playback.
+Starting it does not enable boot startup. Confirm sound physically; service status
+alone does not verify playback. A foreground recording test needs a separate
+explicitly authorized developer build/capability grant; see
+[PTP permissions](PTP_PORT_PERMISSIONS.md). Never grant file capabilities to the
+managed installed executable or run setup as root. Setup never grants privileges.
 
 ## Reconfiguration and cancellation
 
@@ -107,8 +114,8 @@ The existing recording is **Pachelbel's Canon in D**, arranged/performed by
 It is separately licensed under
 [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/), not PiAir's
 Apache-2.0 license. See [the full attribution](../tests/assets/audio/LICENSE.md)
-for source, modifications and licensing. Setup also displays attribution before
-playback. No additional tone, recording or sender is created for setup.
+for source, modifications and licensing. The packaged LICENSE.md retains this attribution alongside the recording;
+the simplified wizard does not display it before playback. No additional tone, recording or sender is created for setup.
 
 Resource resolution requires **both** `Pachelbel_Canon_audio_test.wav` and
 `LICENSE.md` in the same directory, in this order:

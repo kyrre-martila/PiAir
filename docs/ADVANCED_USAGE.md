@@ -38,6 +38,13 @@ linker, target ALSA development library and pkg-config sysroot matching the Pi's
 glibc; installing only the Rust target is insufficient. Native ARM64 builds are
 the recommended path. No Docker, systemd installation or root execution is needed.
 
+A source/development executable can inspect the installed service's status and
+logs, but cannot control that service. Only the trusted installed executable (or
+a symlink to the same file identity) may do so. For isolated foreground tests,
+follow [candidate QA](PRE_RELEASE_QA.md). The simplified receiver picker lists
+friendly names, rescan and cancellation; `piair receivers` and `piair devices`
+provide technical details separately.
+
 ## Manage receiver approval locally
 
 ```sh
@@ -334,7 +341,7 @@ production services, or replace deployed binaries. Rejects playback, persistent
 selection and `--setup-profile` combinations, with no fallback. Read the
 [exact Raspberry Pi build, authorization and single-attempt procedure](OWNTONE_TRANSIENT_SETUP_CHECK.md)
 before running. Operator evidence dated 2026-11-08 confirms authentication and
-encrypted OPTIONS on Even-Olai HomePod (192.168.1.33:7000, AudioAccessory5,1,
+encrypted OPTIONS on Example HomePod (192.0.2.33:7000, AudioAccessory5,1,
 firmware 27.2). Task-supplied PR #34 evidence also confirms encrypted initial
 NTP SETUP, active timing responder and acknowledged TEARDOWN. RECORD and audible
 playback remain unverified.
@@ -544,7 +551,7 @@ no buffered hardware playback is claimed.
 
 For explicitly selected HomePod transient PTP WAV playback, use
 `ptp-wav-playback --experimental-owntone-transient` after
-`select device:0a05559f132f --method transient`. The default still requires stored
+`select device:aabbccddeeff --method transient`. The default still requires stored
 HAP credentials; no fallback occurs. See the [15-second Raspberry Pi test and
 authentication limitations](PTP_IMPLEMENTATION_PLAN.md#explicit-homepod-transient-test-pr-64).
 

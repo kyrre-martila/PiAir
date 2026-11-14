@@ -79,6 +79,10 @@ pub struct Selection {
 impl Selection {
     /// Compare discovery with an approval without changing that approval. Exact
     /// equality remains intentional for persisted-selection/revocation checks.
+    /// All addresses are approved endpoints and participate in cross-identity
+    /// conflict checks. Even an IPv6-only addition requires explicit reselection:
+    /// transient authentication cannot verify a persistent receiver identity.
+    /// See docs/RECEIVER_ADDRESS_BINDING.md before relaxing this boundary.
     fn matches_observation(&self, observed: &Self) -> bool {
         self.id == observed.id
             && self.advertised_pi == observed.advertised_pi

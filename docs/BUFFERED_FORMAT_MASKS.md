@@ -42,7 +42,7 @@ identity, feature, status, access, selection and authorization gates remain.
 
 ## Hardware limitation
 
-The Stua report (AudioAccessory6,1, firmware 27.2) establishes a rejected plist
+The Example report (AudioAccessory6,1, firmware 27.2) establishes a rejected plist
 integer and a valid 34-ID extended array containing 21 and IDs above 63. It does
 not establish the integer's value or the complete ID list. Synthetic tests use
 explicitly invented ID lists and a family of signed masks, never a purported
@@ -80,4 +80,4 @@ changes were needed. An initial sandboxed test run failed at prohibited loopback
 socket creation; the complete suite passed outside that restriction. All
 protocol traffic in tests used local mocks. No receiver commands, hardware,
 audio-device capture, playback or volume operations were run. Release compilation
-was native x86_64; Raspberry Pi/ARM and Stua behavior remain unverified.
+was native x86_64; Raspberry Pi/ARM and Example behavior remain unverified.

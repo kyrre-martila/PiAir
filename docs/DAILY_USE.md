@@ -9,7 +9,8 @@ Use `piair --help` for direct and advanced commands.
   under Settings for later changes. Explicitly named missing config files and
   invalid TOML fail with their path; correct the file or use the normal default.
 - **Service unavailable / not installed:** PiAir can still be configured and run
-  in the foreground. Use the [release installation procedure](INSTALL.md). Daily commands do not install anything.
+  in the foreground with explicit timing-port permission (see
+  [PTP permissions](PTP_PORT_PERMISSIONS.md)). Use the [release installation procedure](INSTALL.md). Daily commands do not install anything.
 - **Authorization denied:** systemctl uses normal system authorization, including
   polkit where configured. Ask the system administrator about service management
   permissions; PiAir does not change sudoers or run playback as root.
@@ -68,3 +69,15 @@ runtimes yourself. Ctrl+C cancels safely without another confirmation. EOF or
 cancelling the restart offer also leaves the service stopped with guidance to run
 `piair start` later. Logs use readable local timestamps, including the timezone,
 when an application timestamp is absent.
+
+## Separate candidate or development executable
+
+Status describes the **installed systemd service**, separately from the invoking
+executable. A separate build may inspect status and logs, but cannot start, stop,
+restart, enable or activate that service (including setup and menu recovery).
+Use the trusted `/usr/local/bin/piair` deliberately to manage its installed unit.
+Symlinks to that same executable are supported; a copied or replaced executable
+has a different file identity and is refused. Candidate foreground playback stays
+available with explicit PTP permission; see [candidate QA](PRE_RELEASE_QA.md).
+The friendly-name receiver picker has no technical details menu; use `piair
+receivers` or `piair devices` for separate diagnostic output.

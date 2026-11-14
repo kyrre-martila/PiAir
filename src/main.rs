@@ -247,7 +247,10 @@ fn main() -> std::process::ExitCode {
         error.exit();
     }
     let detailed = cli.verbose > 0;
-    logging::init(cli.verbose);
+    logging::init(
+        cli.verbose,
+        matches!(cli.command, Some(Command::Run { .. })),
+    );
     match run(cli) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {

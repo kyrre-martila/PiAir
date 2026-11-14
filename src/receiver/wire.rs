@@ -12,13 +12,29 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+/// Typed local failure: presentation must not mistake this for receiver auth.
+#[derive(Debug)]
+pub(super) struct PtpPermissionDenied;
+impl std::fmt::Display for PtpPermissionDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("This foreground process cannot open the local timing ports (UDP 319/320). The installed service supplies this permission; the ordinary installed executable does not. Finish saving setup, then explicitly start the installed service with piair start for automatic playback. For a foreground recording test, see docs/PTP_PORT_PERMISSIONS.md for a separate developer build with an explicit capability grant. Do not run PiAir as root or change pairing to fix this local permission problem.")
+    }
+}
+impl std::error::Error for PtpPermissionDenied {}
+
 pub(super) fn ptp_bind_error(port: u16, error: std::io::Error) -> anyhow::Error {
     let context = if error.kind() == std::io::ErrorKind::PermissionDenied {
-        format!("local PTP UDP {port} bind permission denied; on Linux grant only CAP_NET_BIND_SERVICE to the PiAir executable (see docs/PTP_PORT_PERMISSIONS.md), then run PiAir as your normal user; reapply after rebuilding")
+        format!("local PTP UDP {port} bind permission denied; use the installed systemd service (CAP_NET_BIND_SERVICE), or see docs/PTP_PORT_PERMISSIONS.md for separate developer diagnostics")
     } else {
         format!("local PTP UDP {port} bind failed")
     };
-    anyhow::Error::new(error).context(context)
+    let permission = error.kind() == std::io::ErrorKind::PermissionDenied;
+    let error = anyhow::Error::new(error).context(context);
+    if permission {
+        error.context(PtpPermissionDenied)
+    } else {
+        error
+    }
 }
 
 fn bind_ptp_socket(local: IpAddr, port: u16) -> Result<UdpSocket> {
@@ -33,8 +49,8 @@ mod ptp_bind_tests {
     fn local_permission_diagnostic_preserves_io_cause_and_is_not_rtsp_rejection() {
         for port in [319, 320] {
             let error = ptp_bind_error(port, std::io::Error::from_raw_os_error(libc::EACCES));
-            assert!(error.to_string().contains(&format!("local PTP UDP {port}")));
-            assert!(error.to_string().contains("CAP_NET_BIND_SERVICE"));
+            assert!(format!("{error:#}").contains(&format!("local PTP UDP {port}")));
+            assert!(format!("{error:#}").contains("CAP_NET_BIND_SERVICE"));
             assert_eq!(
                 error.downcast_ref::<std::io::Error>().unwrap().kind(),
                 std::io::ErrorKind::PermissionDenied

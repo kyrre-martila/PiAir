@@ -100,7 +100,7 @@ vendored. Changes are original Rust under PiAir's Apache-2.0 license.
 
 ## Validation and remaining hardware work
 
-PR 62's hardware baseline is established: Apple TV Stua authenticated, accepted
+PR 62's hardware baseline is established: Apple TV Example authenticated, accepted
 all realtime negotiation stages and exchanged healthy PTP traffic, with no audio
 sent. That investigation is not repeated here. Receiver clock adoption remains
 unverified and is not a media gate.
@@ -120,7 +120,7 @@ not verify clock adoption, output routing, receiver buffering or audible sound.
 
 ## Exact Raspberry Pi deployment and listening test
 
-Under the same Pi user/configuration that paired and selected Stua:
+Under the same Pi user/configuration that paired and selected Example:
 
 ```bash
 cd ~/PiAir
@@ -131,7 +131,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release
 sudo setcap cap_net_bind_service=+ep ./target/release/piair
-./target/release/piair -v ptp-wav-playback device:02d899c1833f \
+./target/release/piair -v ptp-wav-playback device:112233445566 \
   --audio-file tests/assets/audio/Pachelbel_Canon_audio_test.wav \
   --seconds 10 --volume-db -20
 ```
@@ -186,9 +186,9 @@ cargo build --release
 sudo python3 scripts/grant-ptp-capability.py "$PWD/target/release/piair"
 getcap "$PWD/target/release/piair"
 
-./target/release/piair select device:0a05559f132f --method transient
+./target/release/piair select device:aabbccddeeff --method transient
 
-./target/release/piair -v ptp-wav-playback device:0a05559f132f \
+./target/release/piair -v ptp-wav-playback device:aabbccddeeff \
   --experimental-owntone-transient \
   --audio-file tests/assets/audio/Pachelbel_Canon_audio_test.wav \
   --seconds 15 \
@@ -199,16 +199,16 @@ Confirm the interactive prompt. The receiver must already be approved. Explicit
 volume changes can persist. This deployment sequence assumes the PR has been
 merged into the Pi's current branch.
 
-HomePod Stua advertised PTP and ALAC; that does not establish realtime type-96
+HomePod Example advertised PTP and ALAC; that does not establish realtime type-96
 compatibility or audibility. Its earlier audible transient NTP stream stopped
 with `receiver NTP timing stalled` after roughly four seconds. The NTP timeout
-logic is unchanged here. Apple TV Stua accepted authenticated PTP type-96 UDP,
+logic is unchanged here. Apple TV Example accepted authenticated PTP type-96 UDP,
 but audible playback remains unconfirmed. Automated tests verify local protocol
 and cleanup behavior; physical HomePod playback must be confirmed separately.
 
 See [PTP port permissions](PTP_PORT_PERMISSIONS.md) for the capability security
 scope, helper validation, and the required repeatable post-build step. Run PiAir
-as kyrre; only the capability installation step uses sudo.
+as USERNAME; only the capability installation step uses sudo.
 
 The optional `piair setup` test uses the same sender and existing recording for
 49 seconds (or earlier EOF), preserving receiver volume. See [SETUP.md](SETUP.md)

@@ -3,8 +3,8 @@
 ## Hardware evidence and diagnosis
 
 A clean Raspberry Pi running Debian 13 Trixie successfully installed official
-v1.0.1. The stock `piair@kyrre.service` was loaded, inactive and disabled, with
-`FragmentPath=/etc/systemd/system/piair@.service`, `User=kyrre`,
+v1.0.1. The stock `piair@USERNAME.service` was loaded, inactive and disabled, with
+`FragmentPath=/etc/systemd/system/piair@.service`, `User=USERNAME`,
 `WorkingDirectory=~` and the expected stock command. `systemctl show` emitted
 `Environment=` and `DropInPaths=` but omitted empty `EnvironmentFiles` entirely.
 The Rust wizard incorrectly required that array property to be printed. Like the
@@ -13,7 +13,7 @@ as empty. Scalar properties still must be present. Nonempty environment files,
 environment variables and drop-ins remain rejected. Exact root-owned stock
 unit content, executable ownership, account and config path checks remain.
 
-HomePod Stua (`device:0a05559f132f`, `192.168.1.119`) was discovered, explicitly
+HomePod Example (`device:aabbccddeeff`, `192.0.2.119`) was discovered, explicitly
 approved and selected for session-only authentication. The bundled playback test
 reported “selected receiver PTP authentication failed; no fallback: receiver not
 discovered”, with zero RTP transmission. A later `piair devices` found it again.
@@ -71,7 +71,7 @@ Run formatting, Clippy with warnings denied, Rust unit/integration tests and the
 Python/systemd suite. Existing PR workflows build/package on native ARM64
 Bookworm, verify ELF dependencies and glibc <= 2.36, and start the package in a
 clean Bookworm runtime. These checks do not establish audible hardware playback.
-Re-test on the Trixie Pi with HomePod Stua: complete both normal/advanced setup,
+Re-test on the Trixie Pi with HomePod Example: complete both normal/advanced setup,
 stock inactive-service acceptance, transient playback with audible confirmation,
 code pairing where supported, cancellation/cleanup, and explicitly authorized
 boot startup. Confirm actual microphone/line-in behavior and silence detection.

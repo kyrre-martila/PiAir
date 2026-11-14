@@ -1,18 +1,18 @@
 # Bounded WAV playback diagnostic
 
-For HomePod Stua (`device:0a05559f132f`), after deploying a release build,
+For HomePod Example (`device:aabbccddeeff`), after deploying a release build,
 with the receiver already approved and explicitly selected for transient authentication:
 
 ```sh
-./target/release/piair -v stream-test device:0a05559f132f --experimental-owntone-transient --audio-file tests/assets/audio/Pachelbel_Canon_audio_test.wav --seconds 30 --volume-db -20
+./target/release/piair -v stream-test device:aabbccddeeff --experimental-owntone-transient --audio-file tests/assets/audio/Pachelbel_Canon_audio_test.wav --seconds 30 --volume-db -20
 ```
 
-For Stua Apple TV (`device:02d899c1833f`, AppleTV6,2), approve and explicitly
+For Example Apple TV (`device:112233445566`, AppleTV6,2), approve and explicitly
 select that receiver using its persistent pairing method, and retain its existing
 local HAP pairing. After deploying a release build:
 
 ```sh
-./target/release/piair -v stream-test device:02d899c1833f \
+./target/release/piair -v stream-test device:112233445566 \
   --audio-file tests/assets/audio/Pachelbel_Canon_audio_test.wav \
   --seconds 30 \
   --volume-db -20
@@ -29,7 +29,7 @@ A transient selection requires the explicit experimental flag and policy approva
 that flag cannot be combined with a persistent selection. Apple TV's receiver
 policy disallows transient authentication.
 
-Hardware evidence before this change: HomePod Stua played 30 seconds of this WAV
+Hardware evidence before this change: HomePod Example played 30 seconds of this WAV
 audibly and continuously at -20 dB using OwnTone transient; subsequent TEARDOWN
 failed. Apple TV's stored-HAP tone diagnostic completed pair-verify, encrypted
 SETUP/RECORD, stream SETUP, volume, 376 RTP packets, TEARDOWN HTTP 200 and cleanup,
@@ -61,7 +61,7 @@ handling and failure cleanup. Other diagnostic modes cannot be combined with WAV
 `--playback-check` retains its fixed one-second tone and -40 dB volume.
 
 Successful RTP transmission, authenticated negotiation and acknowledged TEARDOWN
-alone do **not** prove audible playback. At Stua, physically verify music, channel
+alone do **not** prove audible playback. At Example, physically verify music, channel
 balance, clean start/end and absence of repeated audio. Check the reported packet
 count (for 30 seconds plus drain: ceil(32 * 44100 / 352) = 4010 packets), teardown
 and cleanup. Record the actual listening result separately. CI uses synthetic WAV

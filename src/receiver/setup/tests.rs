@@ -906,3 +906,80 @@ fn playback_feedback_honors_normal_verbose_and_trace_logging_levels() {
         });
     }
 }
+
+#[test]
+fn local_ptp_permission_failure_never_blames_speaker_or_requests_audible_confirmation() {
+    for detailed in [false, true] {
+        for port in [319, 320] {
+            let error = super::super::wire::ptp_bind_error(
+                port,
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            )
+            .context(super::super::playback_error::Stage::Playback);
+            let mut ui = Ui {
+                read: || panic!("permission failure cannot establish audible success"),
+                out: Vec::new(),
+            };
+            playback_feedback_details(Err(error), &mut ui, &AtomicBool::new(false), detailed)
+                .unwrap();
+            let text = String::from_utf8(ui.out).unwrap();
+            assert!(text.contains("foreground process"));
+            assert!(text.contains("piair start"));
+            assert!(text.contains("Do not run PiAir as root"));
+            assert!(text.contains("No successful playback test recorded"));
+            if !detailed {
+                assert!(!text.contains("Check the speaker and network"));
+            }
+            assert_eq!(text.contains(&format!("local PTP UDP {port}")), detailed);
+        }
+    }
+}
+
+#[test]
+fn setup_operation_guidance_hides_protocol_details_but_keeps_cleanup_failures() {
+    let error = anyhow::anyhow!("internal protocol rejection");
+    for detailed in [false, true] {
+        let text = setup_problem(&error, "Check the selected connection method.", detailed);
+        assert!(text.contains("Check the selected connection method."));
+        assert_eq!(text.contains("internal protocol rejection"), detailed);
+    }
+    let cleanup: anyhow::Error =
+        super::super::lifecycle::CleanupFailure(anyhow::anyhow!("cleanup failed")).into();
+    assert!(setup_problem(&cleanup, "Setup failed.", false).contains("cleanup failed"));
+}
+
+#[test]
+fn isolated_candidate_never_offers_optional_service_activation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "").unwrap();
+    let loaded = config::load(Some(path)).unwrap();
+    let mut ui = Ui {
+        read: || panic!("candidate must not offer enable/start confirmation"),
+        out: Vec::new(),
+    };
+    optional_service_with(
+        &loaded,
+        &mut ui,
+        &mut Vec::new(),
+        service::inspect,
+        |_, _| panic!("candidate must not activate installed service"),
+    )
+    .unwrap();
+    let text = String::from_utf8(ui.out).unwrap();
+    assert!(text.contains("Automatic activation unavailable"));
+    assert!(text.contains("Service control is unavailable"));
+    assert!(!text.contains("Start PiAir automatically when"));
+    // Activation itself also guards against calling it without the initial probe.
+    let expected = service::Service {
+        unit: "piair@alice.service".into(),
+        status: "inactive".into(),
+        home: dir.path().into(),
+        user: "alice".into(),
+        active: "inactive".into(),
+        boot: "disabled".into(),
+        pid: 0,
+        result: "success".into(),
+    };
+    assert!(service::activate(&loaded, &expected).is_err());
+}

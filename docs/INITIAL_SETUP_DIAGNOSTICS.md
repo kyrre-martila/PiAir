@@ -11,7 +11,7 @@ Examples use placeholders; verify the canonical ID independently.
 
 Follow-up: [controlled 15-second SETUP timeout experiment (PR #22)](SETUP_TIMEOUT_EXPERIMENT.md).
 
-Target: Stua, 'device:<canonical-id>', 192.168.1.236:7000,
+Target: Example, 'device:<canonical-id>', 192.0.2.236:7000,
 AppleTV6,2 / tvOS 26.6.1. User-supplied hardware evidence: persistent PIN
 pairing, pair-verify and encrypted OPTIONS succeed; `stream-test --seconds 3`
 times out during initial SETUP before audio. HomePod transient SRP and encrypted
@@ -73,10 +73,10 @@ Feature bit 41 means SupportsPTP. OwnTone selects PTP only when advertised,
 not disabled in device configuration, and its PTP daemon is available; otherwise
 it permits NTP. The bit does not prove NTP is unsupported. PiAir logs authenticated
 /info features and that bit, selects its existing NTP implementation, and does
-not infer a PTP-only requirement from model/firmware. The existing Stua regression advertisement in `src/receiver/tests.rs` uses
+not infer a PTP-only requirement from model/firmware. The existing Example regression advertisement in `src/receiver/tests.rs` uses
 `0x80200,0x4000` (= 0x400000080200), which does not set bit 41. It is a
 constructed test fixture, not a fresh tvOS 26.6.1 capture or authenticated /info
-response; current Stua timing capabilities still need hardware confirmation. There is no demonstrated NTP field/type mismatch;
+response; current Example timing capabilities still need hardware confirmation. There is no demonstrated NTP field/type mismatch;
 plist dictionary ordering and integer storage width are not semantic differences.
 PTP's different payload/clock behavior is not implemented. An explicit non-NTP
 SETUP response still fails with an actionable unsupported-profile error, without

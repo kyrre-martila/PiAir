@@ -25,7 +25,7 @@ opt-in is the only lifecycle exception introduced here.
 
 ## Physical observations versus hypotheses
 
-Operator-reported 2026-11-08 Even-Olai HomePod result for PR #33: transient SRP
+Operator-reported 2026-11-08 Example HomePod result for PR #33: transient SRP
 M1–M4 succeeded, encrypted GET /info succeeded, initial NTP SETUP returned RTSP
 200 with validated binary plist, timing profile and ports. Encrypted TEARDOWN
 CSeq 6 timed out after about three seconds with zero response bytes. No RECORD

@@ -1,4 +1,4 @@
-# Used only by `piair devices`; bounded to 1..60 seconds, plus up to 1s shutdown.
+# Receiver discovery timeout; bounded to 1..60 seconds, plus up to 1s shutdown.
 discovery_timeout_secs = 5
 
 # Explicit approval only; copy a canonical device ID from `piair devices`.
@@ -20,7 +20,9 @@ stop_duration_ms = 5000
 pre_roll_ms = 1000
 calibration_duration_secs = 30
 
-# Automatic AirPlay playback ONLY: `piair run --allow-unattended`.
+# Automatic AirPlay playback: the installed service (`piair start`).
+# Foreground `piair run --allow-unattended` needs explicit PTP port permission;
+# see docs/PTP_PORT_PERMISSIONS.md. No privileges are granted by configuration.
 # [audio] above remains independent and controls monitor/calibration only.
 # No receiver, capture device or authentication profile is inferred by run.
 # Set these with `piair config set-playback ...` after approval and selection.
@@ -30,7 +32,7 @@ calibration_duration_secs = 30
 # authentication = "own-tone-transient" # Requires explicit --method transient selection
 # Alternatively "stored-hap" uses existing enrolled HAP credentials.
 # These numeric defaults retain the previous automatic runtime behavior; they
-# are proven for one setup, not universal recommendations for audio hardware.
+# are examples to verify locally, not universal hardware recommendations.
 threshold_dbfs = -45.0
 start_duration_ms = 1000
 stop_duration_ms = 30000

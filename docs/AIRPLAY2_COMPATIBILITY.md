@@ -2,12 +2,12 @@
 
 ## Observed result and scope
 
-Operator-supplied evidence after merged/deployed PR #50: Stua HomePod firmware
+Operator-supplied evidence after merged/deployed PR #50: Example HomePod firmware
 27.2 returns authenticated initial SETUP RTSP 200 with valid PTP configuration
 and **no RTSP Session response header**. PTP reaches PeerObserved and TEARDOWN
 succeeds. `--control-check record` previously stopped locally with
 `initial SETUP session token required for progression`, before sending RECORD.
-This change removes that local incompatibility. RECORD acceptance on Stua with
+This change removes that local incompatibility. RECORD acceptance on Example with
 this revision is **unverified**; no receiver was contacted during this work.
 PeerObserved and accepted controls still do not prove clock adoption or permit
 media. No playback, volume, rate=1 anchor or service change is included.
@@ -34,7 +34,7 @@ was read for protocol facts only; no source was copied or translated:
 | `response_handler_setup_session`, L5354–5420 | Requires successful SETUP, parses plist/eventPort and PTP peer information, then continues; no Session-header gate in this path. |
 | sequence table L6603–6613; `sequence_continue_cb`, L6693–6774; `sequence_continue`, L6789–6845 | Initial SETUP → RECORD → SETPEERS → command tables → stream SETUP → audioMode; request target defaults to sender session URL. No equivalent mandatory receiver token check in the examined sequence. |
 
-This implementation comparison plus Stua's observed tokenless response supports
+This implementation comparison plus Example's observed tokenless response supports
 an optional header for this diagnostic. It is not a normative Apple protocol
 specification or evidence that every receiver accepts tokenless RECORD. PiAir
 keeps its stricter response/CSeq, authorization, event and timing validation;
@@ -110,7 +110,7 @@ and firmware before opting in. Do not pair, alter volume or broaden permissions.
 
 See [the focused investigation](CLOCK_ADOPTION_INVESTIGATION.md) for the pinned
 reference comparison, identity/role uncertainties, diagnostic changes and safe
-Stua-only staged verification. Receiver adoption remains unverified. In the
+Example-only staged verification. Receiver adoption remains unverified. In the
 historical ledger below, “source clock” describes the reference builders; the
 universal semantics of receiver-generated Apple subtype4 remain unknown.
 
@@ -311,5 +311,5 @@ the malformed receive fixture now injects its invalid bytes directly; the final
 full suite above passed. None of these checks contacted physical receivers.
 
 The focused [HomePod Delay_Req compatibility note](PTP_DELAY_REQ_COMPATIBILITY.md)
-records the reported Stua zero-control header, parser regression, pinned
+records the reported Example zero-control header, parser regression, pinned
 reference comparison and setup-only manual verification procedure.

@@ -21,10 +21,10 @@ capture implements useful transport behavior shared by daily playback; its name
 is not evidence that the implementation is disposable. NTP WAV, PTP WAV, live
 capture and buffered diagnostics retain their distinct implementations and gates.
 
-Review scope: `src/cli.rs`, `src/main.rs`, `src/receiver/setup/` (daily menu and
+Historical PR #77 review scope: `src/cli.rs`, `src/main.rs`, `src/receiver/setup/` (daily menu and
 setup), receiver authentication/runtime/selection, integration tests, and PR #74's
 installer, maintenance helper, service contract and release workflows. Only help
-metadata changes executable behavior here. No configuration, authentication,
+metadata changed executable behavior in that historical review. No configuration, authentication,
 authorization, cancellation, service arguments or transport changes are intended.
 
 ## Validation status
@@ -38,7 +38,7 @@ authorization, cancellation, service arguments or transport changes are intended
   interaction and Python/systemd tests exercise local behavior. Native ARM64
   Bookworm packaging and clean-runtime CI verify build/ELF/dependency/startup
   behavior. Green CI does not prove physical audio or universal interoperability.
-- **Historical physical observations:** Apple TV Stua accepted authenticated PTP
+- **Historical physical observations:** Apple TV Example accepted authenticated PTP
   type-96 UDP, with audibility still unconfirmed. An earlier HomePod transient
   NTP stream was audible but stopped after about four seconds with an NTP timing
   stall. These are limited observations, not release-readiness evidence. See
@@ -76,3 +76,14 @@ The existing `.github/workflows/release.yml` runs native ARM64 Bookworm packagin
 and clean runtime checks on PRs without publishing. No release or version tag is
 needed for this cleanup. See [CLI hardware verification](CLI_VERIFICATION.md) and
 individual diagnostic guides before deliberately contacting a receiver.
+
+## Current pre-release QA
+
+Ordinary commands emit readable warnings/errors on stderr, without INFO cleanup
+chatter. `-v` enables DEBUG and `-vv` TRACE in readable form. `run` retains JSON
+INFO lifecycle events for unattended operation and systemd; verbosity adds full
+safe diagnostics. Warnings and cleanup failures remain visible in every mode.
+Verbose diagnostics can interrupt prompts, so use them when investigating a
+problem. See [candidate hardware QA](PRE_RELEASE_QA.md) before publishing 1.0.2.
+Historical diagnostic documents retain earlier observations; example network
+addresses and receiver names/IDs have been anonymized and must be replaced.
