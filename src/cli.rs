@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Send Raspberry Pi audio to your selected AirPlay receiver",
+    about = "Send Raspberry Pi audio to your selected AirPlay speaker",
     after_help = "Run piair without a command in a terminal to open the daily menu.\nStart with piair setup. List audio inputs with piair audio devices.\nAdvanced configuration: piair config --help; audio troubleshooting: piair audio --help.\nDeveloper diagnostics remain available; see docs/DEVELOPMENT.md."
 )]
 pub struct Cli {
@@ -32,16 +32,16 @@ pub enum Command {
     /// Remove the installed application, preserving personal configuration and credentials.
     #[command(display_order = 10)]
     Uninstall,
-    /// Interactive first-time setup or safe reconfiguration (requires a terminal).
+    /// Set up PiAir or change settings (requires a terminal).
     #[command(display_order = 0)]
     Setup,
-    /// Start the installed current-account service.
+    /// Start PiAir playback.
     #[command(display_order = 2)]
     Start,
-    /// Stop the installed current-account service.
+    /// Stop PiAir playback.
     #[command(display_order = 3)]
     Stop,
-    /// Restart the installed current-account service.
+    /// Restart PiAir playback.
     #[command(display_order = 4)]
     Restart,
     /// Show recent service logs.

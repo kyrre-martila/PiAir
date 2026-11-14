@@ -51,7 +51,7 @@ A source checkout is not an installed service.
    approval, credentials, ownership and file permissions. Saving does not prove
    audible playback.
 8. Optionally enable and start the installed stock service for your current
-   account. No is the default. Setup displays the unit and saved path and asks
+   account. No is the default. Setup displays the account and saved path and asks
    for confirmation. Normal systemctl/polkit authorization applies.
 9. Independently play or skip the optional recording (Skip is the default).
    Declining boot startup does not prevent testing. The test uses the just-saved
@@ -62,7 +62,58 @@ A source checkout is not an installed service.
    output, **not ALSA input**. After completed transmission, answer whether you
    heard it; packets alone never establish audibility. A negative answer or test
    failure retains the saved setup and provides troubleshooting.
-10. Setup displays its completion message.
+10. Setup displays the saved speaker, audio input and connection method, plus
+    the observed automatic startup state. Only systemd’s persistent `enabled`
+    state is displayed as Enabled. Declining startup leaves existing enablement
+    unchanged; an unavailable query displays Unavailable rather than guessing.
+    The audio test is Passed only after you confirm hearing the recording,
+    Failed after a transmission failure or a negative listening answer, and
+    Skipped when skipped, unavailable or left unconfirmed. Failure guidance is
+    shown with the test result. Setup completion alone makes no audibility claim.
+
+Example completion (the values come from your saved settings and systemd):
+
+```text
+Setup complete.
+
+Speaker: Living room
+Audio input: plughw:CARD=USB,DEV=0
+Connection: Without pairing
+Automatic startup: Enabled
+Audio test: Skipped
+
+Next: Play audio through your connected input.
+Use piair status to check PiAir, or piair start when ready.
+```
+
+### Confirmations deliberately retained
+
+All Yes/No prompts default to No. Numbered confirmations use **1. Yes** and
+**2. No [default]**; q, EOF and Ctrl+C cancel without approval.
+
+- **Use “NAME” as your speaker?** saves approval of a previously unapproved
+  canonical speaker identity. Discovery is untrusted; the friendly name does not
+  establish identity. The picker never approves anything by itself.
+- The PIN/setup-code prerequisite confirms access to the actual speaker’s PIN
+  or independently obtained HAP setup code. They are not AirPlay passwords.
+- **Connect without pairing for this session?** consents to transient
+  authentication, which does not establish verified persistent identity.
+- **Save this speaker and connection method?** persists the selection, even if
+  later setup is cancelled. It is separate from speaker approval.
+- **Pair with this speaker and save the pairing?** authorizes verified credential
+  persistence. Credentials are still saved only after cryptographic verification.
+- **Save settings** at review authorizes replacing existing playback settings.
+  Explicit volume changes retain their own confirmation because speaker volume
+  may remain changed after playback.
+- Automatic startup remains two choices: whether to configure startup, then
+  whether to **enable automatic startup and start PiAir now**. The latter has
+  the additional immediate-playback consequence and uses normal system authorization.
+- Interrupting running playback and starting it again require separate consent.
+  Playing the recording and confirming that it was heard are different decisions.
+
+Technical identifiers remain in `piair receivers` and `piair devices`. Use
+`piair -v setup` for original error context and `piair -v status` for service
+and configuration diagnostics.
 
 ## Service-backed test and recovery
 

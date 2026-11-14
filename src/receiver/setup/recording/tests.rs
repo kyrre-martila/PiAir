@@ -78,7 +78,7 @@ fn stopped_enabled_or_disabled_never_enable_or_restart() {
         result.unwrap();
         assert_eq!(mock.calls, ["validate", "inspect", "play"]);
         assert!(!mock.running);
-        assert!(text.contains("confirmed audible output"));
+        assert!(text.contains("Audio test: Passed"));
     }
 }
 #[test]
@@ -116,7 +116,10 @@ fn unavailable_custom_permission_conflict_and_playback_failure_retain_setup() {
         let (result, text) = exercise(&mut mock, "1\n1\n1\n1\n", false);
         result.unwrap();
         assert!(
-            text.contains("unavailable") || text.contains("Could not") || text.contains("failed")
+            text.contains("unavailable")
+                || text.contains("Could not")
+                || text.contains("failed")
+                || text.contains("Audio test: Failed")
         );
         if matches!(fail, "validate" | "inspect" | "stop") {
             assert!(!mock.calls.contains(&"play"));
@@ -129,7 +132,7 @@ fn negative_listening_answer_does_not_invalidate_settings() {
     let (result, text) = exercise(&mut mock, "1\n2\n", false);
     result.unwrap();
     assert!(text.contains("Check the speaker volume"));
-    assert!(!text.contains("confirmed audible output"));
+    assert!(!text.contains("Audio test: Passed"));
 }
 #[test]
 fn cancelled_after_interruption_never_restores() {
@@ -251,7 +254,7 @@ fn wizard_order_saves_then_boot_then_recording_then_complete() {
         "save_playback_checked(",
         "optional_service(",
         "recording::offer(",
-        "Setup complete.",
+        "completion_text(",
     ] {
         let position = flow.find(step).unwrap();
         assert!(position > last, "{step}");
@@ -452,5 +455,35 @@ fn recording_q_eof_and_sigint_over_a_real_pty_clean_up_without_restart() {
         let _ = child.kill();
         let _ = child.wait();
         result.unwrap();
+    }
+}
+
+#[test]
+fn workflow_outcome_distinguishes_skip_heard_unheard_and_failure() {
+    for (answers, fail, expected) in [
+        ("2\n", None, TestOutcome::Skipped),
+        ("1\n1\n", None, TestOutcome::Passed),
+        ("1\n2\n", None, TestOutcome::Failed),
+        ("1\n3\n", None, TestOutcome::Skipped),
+        ("1\n", Some("play"), TestOutcome::Failed),
+        ("1\n", Some("validate"), TestOutcome::Skipped),
+    ] {
+        let mut mock = Mock {
+            fail,
+            ..Default::default()
+        };
+        let mut input = answers.as_bytes();
+        let mut ui = Ui {
+            read: || {
+                let mut line = String::new();
+                input.read_line(&mut line)?;
+                Ok(line)
+            },
+            out: Vec::new(),
+        };
+        let report = workflow(&mut mock, &mut ui, &AtomicBool::new(false)).unwrap();
+        assert_eq!(report.outcome, expected);
+        assert!(report.safe_to_restore);
+        assert!(!mock.calls.contains(&"restore"));
     }
 }

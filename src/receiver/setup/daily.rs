@@ -7,55 +7,112 @@ fn complete(loaded: &Loaded) -> Result<()> {
 }
 fn activity(service: &service::Service) -> &'static str {
     match service.active.as_str() {
-        "active" if service.pid != 0 => "Running - activity unknown",
-        "inactive" => "Stopped",
-        "failed" => "Failed",
-        _ => "Unavailable (service transitioning or no live process)",
+        "active" if service.pid != 0 => "Running",
+        "inactive" if service.pid == 0 => "Stopped",
+        "failed" if service.pid == 0 => "Failed",
+        _ => "Unavailable",
     }
 }
-fn boot_label(state: &str) -> String {
+pub(super) fn boot_label(state: &str) -> String {
     match state {
-        "enabled" => "Yes".into(),
-        "disabled" | "masked" | "enabled-runtime" | "masked-runtime" => format!("No ({state})"),
+        "enabled" => "Enabled".into(),
+        "disabled" | "masked" | "enabled-runtime" | "masked-runtime" => "Disabled".into(),
         _ => format!("Unknown ({})", clean(state)),
     }
 }
-fn observed_status(observation: Result<service::Service>) -> String {
-    match observation {
-        Ok(s) => format!(
-            "Service: {} (installed systemd service)\nStarts at boot: {}\nMain PID: {}\nService result: {}",
-            activity(&s),
-            boot_label(&s.boot),
-            s.pid,
-            clean(&s.result)
-        ),
-        Err(e) => format!("Service: Unavailable\n{e:#}"),
+fn playback_label(service: &service::Service, valid_config: bool) -> &'static str {
+    match (activity(service), valid_config) {
+        ("Running", true) => "Ready",
+        ("Running", false) => "Unavailable",
+        ("Stopped" | "Failed", _) => "Not running",
+        _ => "Unavailable",
     }
 }
+fn observed_status(
+    observation: Result<service::Service>,
+    valid_config: bool,
+    detailed: bool,
+) -> String {
+    match observation {
+        Ok(s) => {
+            let mut text = format!(
+                "Service: {}\nPlayback: {}\nAutomatic startup: {}",
+                activity(&s),
+                playback_label(&s, valid_config),
+                boot_label(&s.boot)
+            );
+            if detailed {
+                text.push_str(&format!(
+                    "\nInstalled systemd service: {}\nMain PID: {}\nService result: {}",
+                    clean(&s.unit),
+                    s.pid,
+                    clean(&s.result)
+                ));
+            }
+            text
+        }
+        Err(e) => {
+            tracing::debug!(error = %format!("{e:#}"), "service status unavailable");
+            if detailed {
+                format!("Service: Unavailable\nPlayback: Unavailable\n{e:#}")
+            } else {
+                "Service: Unavailable\nPlayback: Unavailable\nRun piair -v status for details."
+                    .into()
+            }
+        }
+    }
+}
+
 fn status_text(loaded: &Loaded, detailed: bool) -> String {
-    let state = observed_status(service::observe(loaded));
+    let validation = complete(loaded);
+    // Readiness needs the stock service bound to this config, not merely an
+    // active unit that may use custom settings. No audio or journal inference.
+    let verified = service::inspect_current(loaded);
+    let ready_config = validation.is_ok() && verified.is_ok();
+    let observation = verified.or_else(|_| service::observe(loaded));
+    let state = observed_status(observation, ready_config, detailed);
     let selected = Store::new(&loaded.path).and_then(|s| s.selection());
     let receiver = match selected {
-        Ok(Some(s)) => format!(
-            "{} ({})",
-            clean(s.display_name.as_deref().unwrap_or("Saved receiver")),
-            s.id
-        ),
+        Ok(Some(s)) => {
+            let name = clean(s.display_name.as_deref().unwrap_or("Saved speaker"));
+            if detailed {
+                format!("{name} ({})", s.id)
+            } else {
+                name
+            }
+        }
         Ok(None) => "Not selected".into(),
         Err(e) => format!("Unavailable: {e}"),
     };
-    let configuration = match complete(loaded) {
+    let configuration = match validation {
         Ok(()) => "Complete".into(),
         Err(e) if detailed => format!("Incomplete: {e}\nRun piair setup to configure PiAir."),
         Err(_) => "Incomplete. Run piair setup to configure PiAir.".into(),
     };
-    let executable = service::executable_status();
-    format!("PiAir\n\n{state}\n{executable}\nReceiver: {receiver}\nAudio input: {}\nConfiguration: {} ({})\n{configuration}\nPlayback: activity unknown; audible output unverified",
-        clean(loaded.config.playback.capture_device.as_deref().unwrap_or("Not configured")),
-        loaded.path.display(), loaded.source)
+    let input = clean(
+        loaded
+            .config
+            .playback
+            .capture_device
+            .as_deref()
+            .unwrap_or("Not configured"),
+    );
+    let mut text = format!("PiAir\n\n{state}\nSpeaker: {receiver}\nAudio input: {input}\nConfiguration: {configuration}");
+    if detailed {
+        text.push_str(&format!(
+            "\nSettings: {} ({})\n{}",
+            loaded.path.display(),
+            loaded.source,
+            service::executable_status()
+        ));
+    }
+    text
 }
 pub(crate) fn daily_status(loaded: &Loaded) -> Result<()> {
-    println!("{}", status_text(loaded, true));
+    println!(
+        "{}",
+        status_text(loaded, tracing::enabled!(tracing::Level::DEBUG))
+    );
     Ok(())
 }
 pub(crate) fn daily_control(loaded: &Loaded, action: &str) -> Result<()> {
@@ -140,7 +197,7 @@ fn finish_action<R: FnMut() -> Result<String>, W: Write, T>(
     if cancel.load(Ordering::Relaxed) {
         return stopped_guidance(ui);
     }
-    match ui.confirm("Saved settings are consistent. Start PiAir again?") {
+    match ui.confirm("Start PiAir again?") {
         Ok(true) if !cancel.load(Ordering::Relaxed) => {
             if let Err(error) = start(saved) {
                 stopped_guidance(ui)?;
@@ -226,19 +283,19 @@ fn receiver_preflight(
         Authentication::OwnToneTransient => Method::Transient,
     };
     let mut selected = super::super::validate_receiver_observation(loaded, id, method, rows)
-        .context("Receiver is not compatible. Run piair setup; no fallback attempted.")?;
+        .context(
+            "This speaker is not compatible with the saved connection method. Run piair setup.",
+        )?;
     super::super::wav_authentication(
         &Store::new(&loaded.path)?,
         &selected,
         auth == Authentication::OwnToneTransient,
     )
-    .context(
-        "No validated authentication for this receiver. Run piair setup; no fallback attempted.",
-    )?;
+    .context("No valid pairing or connection approval for this speaker. Run piair setup.")?;
     let required = (1u64 << 9) | (1u64 << 19) | (1u64 << 41);
     ensure!(
         selected.capabilities.features & required == required,
-        "receiver cannot provide the required audio playback; no fallback attempted"
+        "This speaker does not support the required audio playback. Choose another speaker."
     );
     if auth == Authentication::StoredHap {
         selected.method = Method::SetupCode;
@@ -250,7 +307,7 @@ fn choose_daily_receiver<R: FnMut() -> Result<String>, W: Write>(
     rows: &[Receiver],
     ui: &mut Ui<R, W>,
 ) -> Result<Option<String>> {
-    ui.say("Select AirPlay receiver:")?;
+    ui.say("Choose a speaker:")?;
     for (i, row) in rows.iter().enumerate() {
         let marker = if loaded.config.playback.receiver_id.as_deref() == Some(&row.id) {
             " (selected)"
@@ -259,7 +316,7 @@ fn choose_daily_receiver<R: FnMut() -> Result<String>, W: Write>(
         };
         ui.say(format!("{}. {}{marker}", i + 1, clean(&row.name)))?;
     }
-    ui.say(format!("{}. Search again\nQ. Back", rows.len() + 1))?;
+    ui.say(format!("{}. Scan again\nQ. Back", rows.len() + 1))?;
     let n = ui.choice("Choose:", rows.len() + 1, None)?;
     if n == rows.len() + 1 {
         return Ok(None);
@@ -268,13 +325,8 @@ fn choose_daily_receiver<R: FnMut() -> Result<String>, W: Write>(
     super::super::exact_id(&row.id)?;
     ensure!(
         rows.iter().filter(|r| r.id == row.id).count() == 1,
-        "receiver identity is ambiguous; search again"
+        "Speaker identity is ambiguous. Scan again."
     );
-    ui.say(format!(
-        "Receiver: {}\nCanonical identity: {}\nAdvertised names do not verify identity.",
-        clean(&row.name),
-        row.id
-    ))?;
     Ok(Some(row.id.clone()))
 }
 fn receiver<R: FnMut() -> Result<String>, W: Write>(
@@ -293,10 +345,19 @@ fn receiver<R: FnMut() -> Result<String>, W: Write>(
             .selection()?
             .context("No saved selection. Run piair setup first.")?;
         if previous.id == id && loaded.config.playback.receiver_id.as_deref() == Some(&id) {
-            ui.say("This receiver is already selected. No changes made.")?;
+            ui.say("This speaker is already selected.")?;
             return Ok(());
         }
-        if !ui.confirm(&format!("Change the saved receiver to exactly {id}?"))? {
+        if !ui.confirm(&format!(
+            "Save \"{}\" as your speaker?",
+            clean(
+                &rows
+                    .iter()
+                    .find(|r| r.id == id)
+                    .context("speaker missing")?
+                    .name
+            )
+        ))? {
             return Ok(());
         }
         ensure!(
@@ -305,7 +366,10 @@ fn receiver<R: FnMut() -> Result<String>, W: Write>(
         );
         receiver_preflight(loaded, &id, &rows)?;
         if loaded.config.playback.authentication == Some(Authentication::OwnToneTransient) {
-            ensure!(ui.confirm("Use the configured transient authentication for this receiver?\nThis does not establish persistent verified identity.")?, Cancelled);
+            ensure!(
+                ui.confirm("Use the saved connection method without pairing for this speaker?")?,
+                Cancelled
+            );
         }
         return stopped_action(loaded, ui, cancel, |loaded, ui| {
             let _instance = runtime::InstanceLock::acquire()?;
@@ -322,9 +386,7 @@ fn receiver<R: FnMut() -> Result<String>, W: Write>(
                 .name;
             approve_named(loaded, &id, name, ui, &mut journal)?;
             for entry in journal {
-                ui.say(format!(
-                    "{entry}. This approval remains saved if later steps are cancelled."
-                ))?;
+                tracing::debug!(%entry, "speaker approval saved");
             }
             let baseline = allowlist::snapshot(&loaded.path)?;
             // Recheck credentials and endpoint authorization after stopping and
@@ -341,7 +403,7 @@ fn receiver<R: FnMut() -> Result<String>, W: Write>(
                 )
             })?;
             ui.say(format!(
-                "Receiver changed to {}.",
+                "Speaker changed to {}.",
                 clean(
                     &rows
                         .iter()
@@ -406,9 +468,9 @@ fn setup_child(loaded: &Loaded, cancel: &AtomicBool) -> Result<()> {
 
 fn menu_text(running: bool, can_control: bool) -> String {
     if !can_control {
-        return "\n1. Status\n2. Service controls unavailable (installed executable required)\n3. Select AirPlay receiver\n4. Test audio (49 seconds)\n5. Settings\n6. Logs\n\nQ. Exit".into();
+        return "\n1. Status\n2. Service controls unavailable (installed executable required)\n3. Choose speaker\n4. Test audio (49 seconds)\n5. Settings\n6. Logs\n\nQ. Exit".into();
     }
-    format!("\n1. Status\n2. {} PiAir\n3. Select AirPlay receiver\n4. Test audio (49 seconds)\n5. Settings\n6. Logs\n\nQ. Exit", if running { "Stop" } else { "Start" })
+    format!("\n1. Status\n2. {} PiAir\n3. Choose speaker\n4. Test audio (49 seconds)\n5. Settings\n6. Logs\n\nQ. Exit", if running { "Stop" } else { "Start" })
 }
 pub(crate) fn daily(mut loaded: Loaded) -> Result<()> {
     ensure!(io::stdin().is_terminal() && io::stdout().is_terminal(),
@@ -506,7 +568,7 @@ mod tests {
             pid: 123,
             result: "success".into(),
         };
-        assert_eq!(activity(&s), "Running - activity unknown");
+        assert_eq!(activity(&s), "Running");
         s.active = "inactive".into();
         s.pid = 0;
         assert_eq!(activity(&s), "Stopped");
@@ -514,9 +576,40 @@ mod tests {
         assert_eq!(activity(&s), "Failed");
         s.active = "active".into();
         assert!(activity(&s).starts_with("Unavailable"));
-        assert_eq!(boot_label("enabled"), "Yes");
-        assert_eq!(boot_label("disabled"), "No (disabled)");
-        assert_eq!(boot_label("enabled-runtime"), "No (enabled-runtime)");
+        assert_eq!(boot_label("enabled"), "Enabled");
+        assert_eq!(boot_label("disabled"), "Disabled");
+        assert_eq!(boot_label("enabled-runtime"), "Disabled");
+    }
+    #[test]
+    fn ready_requires_verified_configuration_and_running_service_without_streaming_claims() {
+        for (active, pid, valid, service_label, playback) in [
+            ("active", 123, true, "Running", "Ready"),
+            ("active", 123, false, "Running", "Unavailable"),
+            ("inactive", 0, true, "Stopped", "Not running"),
+            ("failed", 0, true, "Failed", "Not running"),
+            ("active", 0, true, "Unavailable", "Unavailable"),
+            ("activating", 123, true, "Unavailable", "Unavailable"),
+            ("inactive", 123, true, "Unavailable", "Unavailable"),
+        ] {
+            let s = service::Service {
+                unit: "piair@pi.service".into(),
+                status: active.into(),
+                home: "/home/pi".into(),
+                user: "pi".into(),
+                active: active.into(),
+                boot: "disabled".into(),
+                pid,
+                result: "success".into(),
+            };
+            let text = observed_status(Ok(s), valid, false);
+            assert!(text.contains(&format!("Service: {service_label}\n")));
+            assert!(text.contains(&format!("Playback: {playback}\n")));
+            assert!(!text.contains("Streaming") && !text.contains("Playback: Active"));
+            assert!(!text.contains("PID") && !text.contains("unverified"));
+        }
+        let text = observed_status(Err(anyhow::anyhow!("query failed")), true, false);
+        assert!(text.contains("Playback: Unavailable"));
+        assert!(!text.contains("Ready"));
     }
     fn scripted(input: &str) -> Ui<impl FnMut() -> Result<String> + '_, Vec<u8>> {
         use std::io::BufRead;
@@ -996,7 +1089,7 @@ mod candidate_tests {
         .unwrap();
         let output = String::from_utf8(ui.out.clone()).unwrap();
         assert!(output.contains("Service control is unavailable"));
-        assert!(!output.contains("Saved settings are consistent. Start PiAir again?"));
+        assert!(!output.contains("Start PiAir again?"));
         // A stopped installed service does not prevent candidate foreground QA.
         assert_eq!(
             confirm_stop(
@@ -1027,9 +1120,9 @@ mod candidate_tests {
             pid: 123,
             result: "success".into(),
         };
-        let text = observed_status(Ok(observed));
-        assert!(text.contains("installed systemd service"));
-        assert!(text.contains("Running - activity unknown"));
+        let text = observed_status(Ok(observed), true, true);
+        assert!(text.contains("Installed systemd service"));
+        assert!(text.contains("Running"));
         assert!(text.contains("Main PID: 123"));
         assert!(service::executable_status().contains("not verified as installed PiAir"));
     }

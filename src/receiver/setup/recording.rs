@@ -102,12 +102,26 @@ trait Backend {
     fn restore(&mut self) -> Result<()>;
 }
 
+#[derive(Debug)]
+pub(super) struct Report {
+    pub safe_to_restore: bool,
+    pub outcome: TestOutcome,
+}
+impl Report {
+    fn skipped() -> Self {
+        Self {
+            safe_to_restore: true,
+            outcome: TestOutcome::Skipped,
+        }
+    }
+}
+
 pub(super) fn offer<R: FnMut() -> Result<String>, W: Write>(
     loaded: &Loaded,
     saved: &str,
     ui: &mut Ui<R, W>,
     cancel: &AtomicBool,
-) -> Result<bool> {
+) -> Result<Report> {
     workflow(
         &mut System {
             loaded,
@@ -122,25 +136,29 @@ fn workflow<R: FnMut() -> Result<String>, W: Write>(
     backend: &mut impl Backend,
     ui: &mut Ui<R, W>,
     cancel: &AtomicBool,
-) -> Result<bool> {
+) -> Result<Report> {
     if !test_audio_requested(ui)? {
-        return Ok(true);
+        return Ok(Report::skipped());
     }
     let running = match backend.validate().and_then(|()| backend.inspect()) {
         Ok(running) => running,
         Err(e) => {
             ui.say(format!("Recording test unavailable: {e:#}\nSettings are saved. Continue without testing; see docs/SYSTEMD.md."))?;
-            return Ok(true);
+            return Ok(Report::skipped());
         }
     };
     if running {
-        if !ui.confirm("Testing requires temporarily stopping your automatic playback. Interrupt it now? It will only restart with your approval.")? { return Ok(true); }
+        if !ui
+            .confirm("Stop PiAir to play the test recording? You can start it again afterward.")?
+        {
+            return Ok(Report::skipped());
+        }
         if let Err(e) = backend.stop() {
             ui.say(format!("Could not safely stop automatic playback: {e:#}\nTest skipped. Inspect piair status; nothing will restart automatically."))?;
-            return Ok(true);
+            return Ok(Report::skipped());
         }
     }
-    ui.say("Playing the saved speaker's recording, preserving its current volume. This does not test ALSA capture. Approve normal system authorization if prompted (Ctrl+C cancels authorization). During recording, enter q, Ctrl+C or EOF to cancel.")?;
+    ui.say("Playing the test recording at the speaker’s current volume.\nApprove system authorization if asked. Enter q or press Ctrl+C to cancel.")?;
     let result = backend.play(&mut || {
         if cancel.load(Ordering::Relaxed) {
             return Ok(true);
@@ -166,27 +184,38 @@ fn workflow<R: FnMut() -> Result<String>, W: Write>(
     });
     if result.as_ref().is_err_and(|e| e.is::<Teardown>()) {
         ui.say(format!("{:#}\nAutomatic playback will not be restarted. Saved settings and credentials are retained.", result.unwrap_err()))?;
-        return Ok(false);
+        return Ok(Report {
+            safe_to_restore: false,
+            outcome: TestOutcome::Failed,
+        });
     }
     // Cancellation never triggers a restart or another prompt.
     if cancel.load(Ordering::Relaxed) || result.as_ref().is_err_and(|e| e.is::<Cancelled>()) {
         ui.say("Recording cancelled. Automatic playback has not been restarted. Use piair status, then piair start when ready.")?;
         return Err(Cancelled.into());
     }
-    let feedback = match result {
+    let outcome = match result {
         Ok(()) => playback_feedback(Ok(()), ui, cancel),
-        Err(e) => ui.say(format!("Recording test failed: {e:#}\nSettings and credentials are saved. Check piair logs, speaker availability and system authorization. No audible playback confirmed.")),
+        Err(e) => {
+            ui.say(setup_problem(
+                &e,
+                &format!("Audio test: Failed. {e}\nCheck piair logs, speaker availability and system authorization."),
+                tracing::enabled!(tracing::Level::DEBUG),
+            ))?;
+            Ok(TestOutcome::Failed)
+        }
     };
     // q/EOF during listening confirmation must not cause a restart either.
-    feedback?;
-    if running
-        && ui.confirm("Restore automatic playback now? (Boot enablement has not changed.)")?
-    {
+    let outcome = outcome?;
+    if running && ui.confirm("Start PiAir again?")? {
         if let Err(e) = backend.restore() {
             ui.say(format!("Could not restore playback: {e:#}\nInspect piair status, then explicitly run piair start."))?;
         }
     }
-    Ok(true)
+    Ok(Report {
+        safe_to_restore: true,
+        outcome,
+    })
 }
 
 struct System<'a> {

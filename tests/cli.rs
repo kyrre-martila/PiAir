@@ -24,8 +24,13 @@ fn local_commands_use_defaults_without_writing() {
     let output = run(&["status"]);
     assert!(output.status.success());
     let status = String::from_utf8(output.stdout).unwrap();
-    assert!(status.contains("built-in defaults; file absent"));
-    assert!(status.contains("activity unknown"));
+    assert!(status.contains("Configuration: Incomplete"));
+    let verbose = run(&["-v", "status"]);
+    assert!(String::from_utf8(verbose.stdout)
+        .unwrap()
+        .contains("built-in defaults; file absent"));
+    assert!(status.contains("Playback:"));
+    assert!(!status.contains("activity unknown") && !status.contains("Playback: Active"));
     assert!(run(&["config", "check"]).status.success());
     let output = run(&["config", "show"]);
     assert!(output.status.success());
@@ -908,7 +913,10 @@ fn development_executable_can_observe_but_cannot_control_installed_service() {
         let text = String::from_utf8(output.stderr).unwrap();
         assert!(text.contains("Service control is unavailable"), "{text}");
     }
-    let output = run(&["status"]);
+    let ordinary = run(&["status"]);
+    let ordinary = String::from_utf8(ordinary.stdout).unwrap();
+    assert!(!ordinary.contains("Invoking executable:"));
+    let output = run(&["-v", "status"]);
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("Invoking executable: not verified as installed PiAir"));

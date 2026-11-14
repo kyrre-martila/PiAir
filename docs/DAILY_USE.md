@@ -20,9 +20,15 @@ Use `piair --help` for direct and advanced commands.
 - **Another automatic playback instance:** stop your foreground `piair run` or
   automatic capture manually before setup, receiver changes or standalone tests.
   PiAir never kills it or removes a lock file.
-- **Running - activity unknown:** systemd reports an active service with a main
-  PID. There is no reliable live playback observation. Even a successful local
-  playback transmission cannot establish that sound was audible.
+- **Service: Running / Playback: Ready:** systemd reports an active service with
+  a nonzero main PID, the installed stock service matches this account and config
+  path, and saved settings pass runtime preparation (including speaker approval
+  and authentication). This is a readiness snapshot, not a streaming indicator.
+  PiAir has no reliable live streaming observation. It never infers activity from
+  journal history. Invalid settings or an unverified service show Playback:
+  Unavailable; stopped or failed services show Playback: Not running.
+  `piair -v status` includes the unit, Main PID, service result, config path,
+  invoking executable identity and original error details.
 - **Receiver authentication not configured:** use `piair setup` for explicit
   enrollment or authentication selection. A different authentication method is
   never tried automatically. Discovery names and addresses are untrusted.
@@ -45,7 +51,7 @@ Use `piair --help` for direct and advanced commands.
   access. For full systemd diagnostics use the commands in [SYSTEMD.md](SYSTEMD.md).
   Entries are historical, potentially from earlier service processes; they are
   never used to infer current playback. The service result and MainPID shown by
-  status come from systemd's current properties.
+  verbose status come from systemd's current properties.
 
 Starting or stopping does not enable or disable boot startup. A stopped service
 is not automatically started after changing receivers or settings. If the menu
@@ -93,3 +99,13 @@ has a different file identity and is refused. Candidate foreground playback stay
 available with explicit PTP permission; see [candidate QA](PRE_RELEASE_QA.md).
 The friendly-name receiver picker has no technical details menu; use `piair
 receivers` or `piair devices` for separate diagnostic output.
+
+## Menu labels and confirmations
+
+Use **Choose speaker** for the friendly-name picker. A new speaker requires
+**Use “NAME” as your speaker?** before approval is saved. Changing the saved
+speaker and using its configured connection method are separate confirmations;
+these authorize different saved state. There is no automatic selection or approval.
+Security and persistence checks still use canonical identities, not display names.
+The **Connect without pairing** method is transient authentication; it never
+creates or replaces a saved pairing.
