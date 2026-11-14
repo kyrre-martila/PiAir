@@ -180,7 +180,8 @@ systemctl status piair@USERNAME.service
   executable/helper is unavailable after an interrupted first install/uninstall,
   an administrator can run the root-owned backup helper:
   `sudo python3 -I /usr/local/share/piair/transaction/maintain.py _commit recover`.
-  If no previous helper exists (first install), repeat the official installation command; it performs recovery first, then repeat once to install.
+  If no previous helper exists (first install), repeat the official installation
+  command; it performs recovery first, then repeat once to install.
   The maintenance mask persists across reboot until recovery finishes, preventing
   boot startup from using a partially replaced installation. Never delete the transaction directory
   or manually replace individual files to bypass recovery.

@@ -5,9 +5,10 @@ ALSA input to one explicitly selected AirPlay receiver. It can start and stop
 playback when audio activity changes, with a simple terminal menu for daily use.
 Licensed under Apache-2.0; the bundled test recording has separate attribution.
 
-**Final physical hardware QA is still pending.** Automated tests and earlier
-hardware observations do not establish compatibility with every Apple TV or
-HomePod. See [validation status](docs/DEVELOPMENT.md#validation-status).
+PiAir v1.0.2 has been physically tested on Debian 13 ARM64 with a Behringer
+UCA202 and HomePod Stua, including automatic detection, streaming and installed
+systemd startup. Compatibility with other devices still requires testing.
+See [validation status](docs/DEVELOPMENT.md#validation-status).
 
 ## Install and configure
 

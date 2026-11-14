@@ -1,10 +1,11 @@
-# Unpublished 1.0.2 candidate: Raspberry Pi manual QA
+# 1.0.2 Raspberry Pi manual QA checklist (historical)
 
-Required physical target: Raspberry Pi OS/Debian 13 Trixie **ARM64**, Behringer
-UCA202 and the intended HomePod, with an existing managed PiAir 1.0.1 installation
-and saved selection/configuration. Every listening, USB-input, silence and physical
-cleanup observation below is **manual and pending**. Automated CI does not supply
-these results. Do not publish until they have been recorded for the final commit.
+Version 1.0.2 is published. Physical testing on Debian 13 ARM64 confirmed
+Behringer UCA202 capture, automatic audio detection, OwnToneTransient
+authentication, PTP negotiation, streaming and audible playback on HomePod Stua,
+and installed systemd automatic startup. The checklist below is retained for
+repeat testing; it is not an outstanding release-publication gate or a claim
+that every individual checklist scenario was exercised.
 
 ## Preserve the installation and user data
 

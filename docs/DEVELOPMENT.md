@@ -77,13 +77,14 @@ and clean runtime checks on PRs without publishing. No release or version tag is
 needed for this cleanup. See [CLI hardware verification](CLI_VERIFICATION.md) and
 individual diagnostic guides before deliberately contacting a receiver.
 
-## Current pre-release QA
+## Release QA
 
 Ordinary commands emit readable warnings/errors on stderr, without INFO cleanup
 chatter. `-v` enables DEBUG and `-vv` TRACE in readable form. `run` retains JSON
 INFO lifecycle events for unattended operation and systemd; verbosity adds full
 safe diagnostics. Warnings and cleanup failures remain visible in every mode.
 Verbose diagnostics can interrupt prompts, so use them when investigating a
-problem. See [candidate hardware QA](PRE_RELEASE_QA.md) before publishing 1.0.2.
+problem. Version 1.0.2 is published and physically tested on Debian 13 ARM64
+with UCA202 and HomePod Stua. See the [historical hardware checklist](PRE_RELEASE_QA.md).
 Historical diagnostic documents retain earlier observations; example network
 addresses and receiver names/IDs have been anonymized and must be replaced.

@@ -1,4 +1,4 @@
-# 1.0.2 final pre-release audit
+# 1.0.2 final pre-release audit (historical)
 
 Scope: CLI dispatch/help; setup/menu/service/log presentation; config/allowlist
 writers and protected receiver store; passive discovery and connection binding;
@@ -100,7 +100,7 @@ No AirPlay authentication, packet encoding or transport timing changes are made.
 File identity checks cannot authorize concurrent privileged replacement of the
 installation; maintenance and administrative changes must remain serialized as
 already documented. Final-commit CI results are recorded in the PR description.
-Real Trixie/Pi/UCA202/HomePod listening, automatic playback, silence cycling and
-cleanup/preservation checks remain manual release blockers. The isolated build
-cannot verify successful installed-candidate systemd activation/capability grants;
-recheck those only after supported official installation.
+Version 1.0.2 is now published and physically tested on Debian 13 ARM64 with
+UCA202 and HomePod Stua, including streaming, audible playback and installed
+systemd automatic startup. This historical audit does not establish that every
+checklist scenario or other receiver has been tested.
