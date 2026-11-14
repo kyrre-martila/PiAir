@@ -161,15 +161,27 @@ class BootstrapTests(unittest.TestCase):
             scratch = Path(temporary) / 'scratch'
             scratch.mkdir()
             script = script.replace('responses = iter(', 'tempfile.tempdir = ' + repr(str(scratch)) + '\nresponses = iter(')
-            for answer in (b'\n', b'n\n', b'yes\n', b'interrupt\n'):
+            fixture = Path(temporary) / 'install.sh'
+            fixture.write_text(script)
+            curl = Path(temporary) / 'curl'
+            curl.write_text('#!/bin/sh\ncat "$PIAIR_TEST_SCRIPT"\n')
+            curl.chmod(0o755)
+            env = dict(os.environ, PATH=temporary + os.pathsep + os.environ['PATH'],
+                       PIAIR_TEST_SCRIPT=str(fixture))
+            cases = ((mode, answer) for mode in ('pipe', 'wrapper')
+                     for answer in (b'\n', b'n\n', b'yes\n', b'interrupt\n'))
+            for mode, answer in cases:
                 master, slave = pty.openpty()
                 def controlling_terminal():
                     os.setsid()
                     fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
                 try:
-                    child = subprocess.Popen(['bash'], stdin=subprocess.PIPE, stdout=slave, stderr=slave,
-                                             preexec_fn=controlling_terminal, pass_fds=(slave,))
-                    child.stdin.write(script.encode())
+                    args = ['bash'] if mode == 'pipe' else [
+                        'bash', '-c', FailureReportingTests.documented_command()]
+                    child = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=slave, stderr=slave,
+                                             preexec_fn=controlling_terminal, pass_fds=(slave,), env=env)
+                    if mode == 'pipe':
+                        child.stdin.write(script.encode())
                     child.stdin.close()
                     output = b''
                     while b'Approve fixture?' not in output:
@@ -185,3 +197,85 @@ class BootstrapTests(unittest.TestCase):
                         child.wait()
                     os.close(master)
                     os.close(slave)
+
+
+class FailureReportingTests(unittest.TestCase):
+    @staticmethod
+    def documented_command():
+        readme = (ROOT / 'README.md').read_text().split('```sh\n')[1].split('```')[0].strip()
+        install = (ROOT / 'docs/INSTALL.md').read_text().split('```sh\n')[2].split('```')[0].strip()
+        if readme != install:
+            raise AssertionError('README and INSTALL must document the same tested command')
+        return readme
+
+    def test_documented_command_checks_download_before_execution(self):
+        command = self.documented_command()
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            curl = directory / 'curl'
+            curl.write_text('#!/bin/sh\ncat "$PIAIR_TEST_RESPONSE"\nexit "$PIAIR_TEST_CURL_STATUS"\n')
+            curl.chmod(0o755)
+            response = directory / 'response'
+            marker = directory / 'executed'
+            script = 'printf executed > "$PIAIR_TEST_MARKER"\n'
+            cases = [('success', script, 0, 0, True),
+                     ('installer failure', script + 'exit 7\n', 0, 7, True),
+                     ('failed empty download', '', 22, 22, False),
+                     ('failed partial download', script, 56, 56, False),
+                     ('empty successful response', '', 0, None, False),
+                     ('newline-only response', '\n\n', 0, None, False)]
+            for label, content, curl_status, expected, executed in cases:
+                with self.subTest(case=label):
+                    marker.unlink(missing_ok=True)
+                    response.write_text(content)
+                    env = dict(os.environ, PATH=str(directory) + os.pathsep + os.environ['PATH'],
+                               PIAIR_TEST_RESPONSE=str(response), PIAIR_TEST_MARKER=str(marker),
+                               PIAIR_TEST_CURL_STATUS=str(curl_status))
+                    result = subprocess.run(['bash', '-c', command], env=env, capture_output=True)
+                    if expected is None:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(b'PiAir installer download was empty', result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, expected, result.stderr)
+                    self.assertEqual(marker.exists(), executed)
+            # Verify the review's failure mode rather than claiming pipe safety.
+            response.write_text('')
+            env['PIAIR_TEST_CURL_STATUS'] = '22'
+            bare = subprocess.run(['bash', '-c', 'curl -fsSL https://example.invalid/install.sh | bash'],
+                                  env=env, capture_output=True)
+            self.assertEqual(bare.returncode, 0)
+
+    def test_archive_failures_use_top_level_error_handler_without_traceback(self):
+        import base64
+        from test_installation import FirstInstallExtractionTests
+        package = 'piair-2.3.4-aarch64-unknown-linux-gnu'
+        incomplete = files('2.3.4')
+        del incomplete['audio/LICENSE.md']
+        cases = [(archive(files('2.3.4'), '2.3.4', extra={'../escape': b'bad'}), 'Unsafe PiAir archive'),
+                 (FirstInstallExtractionTests.changed_archive(package + '/piair', v='2.3.4'), 'Unsafe PiAir archive'),
+                 (archive(incomplete, '2.3.4'), 'Incomplete PiAir archive'),
+                 (b'not a gzip archive', 'not a gzip file')]
+        for data, message in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as temporary:
+                name = package + '.tar.gz'
+                values = [b'{"tag_name":"v2.3.4","draft":false,"prerelease":false}',
+                          (m.digest(data) + '  ' + name + '\n').encode(), data]
+                # Exercise real main(), error handling and TemporaryDirectory;
+                # replace only platform, terminal, network and destructive handoff.
+                injected = ('\nimport base64, contextlib, types\n'
+                    'prerequisites = lambda: None\n'
+                    'open = lambda *args, **kwargs: contextlib.nullcontext(types.SimpleNamespace(isatty=lambda: True))\n'
+                    'responses = iter(' + repr([base64.b64encode(v).decode() for v in values]) + ')\n'
+                    'fetch = lambda *args: base64.b64decode(next(responses))\n'
+                    'tempfile.tempdir = ' + repr(temporary) + '\n'
+                    'def unexpected_handoff(*args, **kwargs):\n'
+                    '    raise AssertionError("Unvalidated archive executed")\n'
+                    'subprocess.run = unexpected_handoff\n')
+                source = SOURCE.replace('if __name__ == "__main__":', injected + '\nif __name__ == "__main__":')
+                result = subprocess.run([os.sys.executable, '-I', '-'], input=source, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('PiAir installer: ' + message, result.stderr)
+                self.assertIn('No personal configuration or credentials were changed.', result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+                self.assertNotIn('Unvalidated archive executed', result.stderr)
+                self.assertEqual(list(Path(temporary).iterdir()), [])

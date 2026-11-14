@@ -17,7 +17,7 @@ Raspberry Pis (Pi 3/4/5 and Zero 2 W). Follow the
 [installation guide](docs/INSTALL.md#install). Install as your ordinary user:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyrre-martila/PiAir/main/install.sh | bash
+bash -c 'installer=$(curl -fsSL https://raw.githubusercontent.com/kyrre-martila/PiAir/main/install.sh) && bash -c "${installer:?PiAir installer download was empty}"'
 ```
 
 The installer selects the current stable official release, verifies its checksum

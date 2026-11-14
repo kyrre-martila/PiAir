@@ -18,8 +18,13 @@ sudo apt install curl ca-certificates python3 libasound2
 Install the current published stable official release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyrre-martila/PiAir/main/install.sh | bash
+bash -c 'installer=$(curl -fsSL https://raw.githubusercontent.com/kyrre-martila/PiAir/main/install.sh) && bash -c "${installer:?PiAir installer download was empty}"'
 ```
+
+The wrapper executes the downloaded script only after curl succeeds and returns
+nonempty content. Download failures, including failures after partial delivery,
+and empty responses return a nonzero status. A bare `curl ... | bash` pipeline can
+return success when curl fails before delivering any script; use the command above.
 
 Run this as your ordinary user, **without sudo**. Python 3.9+, glibc 2.36+,
 ALSA, sudo and a running systemd manager are required. The installer checks the
@@ -27,7 +32,7 @@ system, downloads the latest stable release and matching checksum, and validates
 archive members before executing the verified maintenance helper. Read its
 system-wide installation prompt and enter `y` or `yes` to approve. Empty input,
 EOF and declined prompts never approve installation. Prompts use `/dev/tty`,
-including when piped through bash; execution without a controlling terminal fails
+including when invoked through the bootstrap wrapper; execution without a controlling terminal fails
 closed. Sudo is used only by the existing maintenance helper for system changes.
 Nothing automatically starts or enables playback. Then run:
 

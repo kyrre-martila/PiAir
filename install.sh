@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Run as your ordinary user. The subshell also makes partial pipe downloads fail
-# closed: no installation runs until bash has read the complete compound command.
+# Run as your ordinary user. Download successfully before executing this script;
+# see README.md for the checked one-command bootstrap. The compound command also
+# prevents execution of a truncated script.
 (
 set -eu
 command -v python3 >/dev/null || {
@@ -95,10 +96,10 @@ def extract(data, package):
             allowed = (member.name in files and regular and 0 <= member.size <= 48 * 1024 * 1024
                        or member.name in directories and member.isdir())
             if not allowed or member.name in seen:
-                raise SystemExit("Unsafe PiAir archive: " + member.name)
+                raise RuntimeError("Unsafe PiAir archive: " + member.name)
             seen.add(member.name)
         if not files <= seen:
-            raise SystemExit("Incomplete PiAir archive")
+            raise RuntimeError("Incomplete PiAir archive")
         pathlib.Path(package).mkdir(mode=0o700)
         for member in members:
             if member.name in files:
