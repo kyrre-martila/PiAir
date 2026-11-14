@@ -244,3 +244,34 @@ fresh Bookworm container. PRs build/test packages but cannot publish releases.
 Assets are uploaded to a draft and only published after all uploads succeed.
 A failed publication can leave a draft; inspect/remove that draft deliberately
 before retrying. There is no external release service or personal access token.
+
+
+### v1.0.4 release notes
+
+This maintenance release includes the production cleanup from PR #84: fewer
+documentation files, removal of development-only diagnostic commands, and
+removal of unused experimental code. Normal setup, playback, security controls
+and service functionality are preserved. No protocol changes are introduced.
+Automated validation does not establish physical Raspberry Pi or audible
+HomePod playback validation for this version.
+
+Expected public assets (both must upload before the draft becomes public):
+
+- `piair-1.0.4-aarch64-unknown-linux-gnu.tar.gz`
+- `SHA256SUMS`
+
+After explicitly authorized publication, validate on Raspberry Pi OS 64-bit
+Bookworm / Debian 12 or newer, using the prebuilt release:
+
+- From a normal installed v1.0.3 instance, run `piair update`; confirm it offers
+  v1.0.4 and `piair --version` reports `piair 1.0.4` afterward.
+- Verify saved audio/receiver settings, receiver approvals and pairing credentials
+  remain usable, permissions remain private, and boot enablement is unchanged.
+- Confirm audible HomePod playback and automatic audio detection, including
+  transition from silence to active input and back.
+- Exercise stop/start and receiver/network reconnect.
+- Reboot and verify the previously selected boot behavior and playback recovery.
+
+Record the Pi model, OS, HomePod software and results. Hardware QA remains pending
+until these checks are actually performed; no physical HomePod validation is
+claimed for v1.0.4.

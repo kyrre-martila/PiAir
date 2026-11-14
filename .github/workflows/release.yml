@@ -108,6 +108,6 @@ jobs:
             for (const asset of assets) fs.accessSync(`dist/${asset}`);
             // Draft until both assets upload; a failed upload never exposes a partial stable release.
             const {data: release} = await github.rest.repos.createRelease({...context.repo, tag_name: tag, name: `PiAir ${tag}`, draft: true,
-              body: 'Raspberry Pi OS 64-bit Bookworm or newer (ARM64, glibc >= 2.36). See docs/INSTALL.md for installation and checksums. The bundled recording is separately CC BY-SA 3.0; attribution is included.'});
+              body: (tag === 'v1.0.4' ? 'Production cleanup: fewer documentation files; removed development-only diagnostic commands and unused experimental code. Normal setup, playback, security and service functionality are preserved. No physical Raspberry Pi or HomePod validation is claimed for this version.\n\n' : '') + 'Raspberry Pi OS 64-bit Bookworm or newer (ARM64, glibc >= 2.36). See docs/INSTALL.md for installation, checksums and the post-publication hardware QA checklist. The bundled recording is separately CC BY-SA 3.0; attribution is included.'});
             for (const asset of assets) await github.rest.repos.uploadReleaseAsset({...context.repo, release_id: release.id, name: asset, data: fs.readFileSync(`dist/${asset}`)});
             await github.rest.repos.updateRelease({...context.repo, release_id: release.id, draft: false, make_latest: 'true'});

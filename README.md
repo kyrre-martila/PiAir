@@ -7,7 +7,7 @@ recording has [separate attribution](tests/assets/audio/LICENSE.md).
 Supports Raspberry Pi OS 64-bit Bookworm or newer on ARM64. Version 1.0.2 was
 physically tested on Debian 13 ARM64 with a Behringer UCA202 and HomePod Stua,
 including automatic playback and systemd startup. Other combinations need testing.
-Current source version is 1.0.3; the installer selects the latest published stable release.
+Current source version is 1.0.4; the installer selects the latest published stable release.
 
 ## Install
 
