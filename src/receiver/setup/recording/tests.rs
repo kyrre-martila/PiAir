@@ -167,10 +167,18 @@ fn saved_fingerprint_rejects_edit_replacement_and_stale_loaded_settings() {
 }
 #[test]
 fn transient_contract_is_fixed_nonroot_bounded_and_matches_stock_sandbox() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
+    let dir = tempfile::tempdir_in(".").unwrap();
+    let path = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .strip_prefix(std::env::current_dir().unwrap())
+        .unwrap()
+        .join("config.toml");
     std::fs::write(&path, "").unwrap();
     let loaded = config::load(Some(path)).unwrap();
+    assert!(
+        !loaded.path.is_absolute(),
+        "exercise a relative CLI config path"
+    );
     let service = service::Service {
         unit: "piair@pi.service".into(),
         status: "inactive".into(),
@@ -186,7 +194,14 @@ fn transient_contract_is_fixed_nonroot_bounded_and_matches_stock_sandbox() {
         "piair-recording-pi-unique.service",
         &loaded,
         "hash",
+    )
+    .unwrap();
+    let config_flag = args.iter().position(|s| s == "--config").unwrap();
+    assert_eq!(
+        Path::new(&args[config_flag + 1]),
+        std::fs::canonicalize(&loaded.path).unwrap()
     );
+    assert!(Path::new(&args[config_flag + 1]).is_absolute());
     for expected in [
         "--uid=pi",
         "--collect",

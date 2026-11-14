@@ -238,7 +238,7 @@ impl Backend for System<'_> {
             s.user,
             uuid::Uuid::new_v4()
         );
-        let args = arguments(&s, &unit, self.loaded, self.saved);
+        let args = arguments(&s, &unit, self.loaded, self.saved)?;
         ensure!(!cancelled()?, Cancelled);
         let mut child = Command::new("systemd-run")
             .args(&args)
@@ -272,7 +272,15 @@ impl Backend for System<'_> {
         })
     }
 }
-fn arguments(s: &service::Service, unit: &str, loaded: &Loaded, saved: &str) -> Vec<String> {
+fn arguments(
+    s: &service::Service,
+    unit: &str,
+    loaded: &Loaded,
+    saved: &str,
+) -> Result<Vec<String>> {
+    // The transient service runs from the account home, not the wizard's cwd.
+    // Resolve a supported relative --config path before crossing that boundary.
+    let path = std::fs::canonicalize(&loaded.path)?;
     let mut args = vec![
         "--system".into(),
         "--wait".into(),
@@ -319,12 +327,12 @@ fn arguments(s: &service::Service, unit: &str, loaded: &Loaded, saved: &str) -> 
         "--property=StandardError=journal".into(),
         "/usr/local/bin/piair".into(),
         "--config".into(),
-        loaded.path.to_string_lossy().into_owned(),
+        path.to_string_lossy().into_owned(),
         "service-recording".into(),
         "--saved".into(),
         saved.into(),
     ]);
-    args
+    Ok(args)
 }
 fn wait(
     child: &mut Child,
