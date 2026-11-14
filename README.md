@@ -5,6 +5,9 @@ ALSA input to one explicitly selected AirPlay speaker. It can start and stop
 playback when audio activity changes, with a simple terminal menu for daily use.
 Licensed under Apache-2.0; the bundled test recording has separate attribution.
 
+Current source version: **1.0.3** (release preparation). The installer selects
+the latest published stable release; v1.0.3 becomes available after publication.
+
 PiAir v1.0.2 has been physically tested on Debian 13 ARM64 with a Behringer
 UCA202 and HomePod Stua, including automatic detection, streaming and installed
 systemd startup. Compatibility with other devices still requires testing.
