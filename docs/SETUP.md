@@ -163,7 +163,7 @@ sync or enrollment can have an uncertain persistence outcome; inspect the report
 state before retrying. Credentials are never silently removed or replaced.
 
 Setup reserves the existing per-user automatic-runtime lock before changing state
-or testing audio. Stop your own `piair run` or `automatic-ptp-capture` first. Setup
+or testing audio. Stop your own `piair run` process first. Setup
 asks before stopping its verified current-account service and never stops another process or another user's service. The lock stays held until
 capture/playback cleanup completes. It does not coordinate different Linux users
 or network namespaces. Operational settings take effect on explicit restart;
@@ -209,7 +209,7 @@ only the existing partial-packet padding and silent drain follow actual content.
   method after review. Do not invent PINs/codes. Failed HAP authentication never
   triggers transient fallback. Existing credential errors require investigation.
 - **No audible test audio:** check receiver volume/mute and speakers, local
-  networking and PTP port permissions. See [PTP_PORT_PERMISSIONS.md](OPERATIONS.md)
+  networking and PTP port permissions. See [timing permissions](OPERATIONS.md#timing-permissions)
   and [operation troubleshooting](OPERATIONS.md). Do not change receiver
   selection or authentication merely because packet transmission succeeded.
 - **Configuration changed during setup:** rerun and review the newer settings;
