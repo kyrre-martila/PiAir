@@ -17,14 +17,14 @@ use zeroize::{Zeroize, Zeroizing};
 pub(super) struct PtpPermissionDenied;
 impl std::fmt::Display for PtpPermissionDenied {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("This foreground process cannot open the local timing ports (UDP 319/320). The installed service supplies this permission; the ordinary installed executable does not. Use the optional service-backed recording test after saving in piair setup, or explicitly start automatic playback with piair start. For a foreground recording test, see docs/PTP_PORT_PERMISSIONS.md for a separate developer build with an explicit capability grant. Do not run PiAir as root or change pairing to fix this local permission problem.")
+        f.write_str("This foreground process cannot open the local timing ports (UDP 319/320). The installed service supplies this permission; the ordinary installed executable does not. Use the optional service-backed recording test after saving in piair setup, or explicitly start automatic playback with piair start. Do not run PiAir as root or change pairing to fix this local permission problem.")
     }
 }
 impl std::error::Error for PtpPermissionDenied {}
 
 pub(super) fn ptp_bind_error(port: u16, error: std::io::Error) -> anyhow::Error {
     let context = if error.kind() == std::io::ErrorKind::PermissionDenied {
-        format!("local PTP UDP {port} bind permission denied; use the installed systemd service (CAP_NET_BIND_SERVICE), or see docs/PTP_PORT_PERMISSIONS.md for separate developer diagnostics")
+        format!("local PTP UDP {port} bind permission denied; use the installed systemd service (CAP_NET_BIND_SERVICE), see docs/OPERATIONS.md#timing-permissions")
     } else {
         format!("local PTP UDP {port} bind failed")
     };
@@ -75,7 +75,6 @@ const OWNTONE_USER_AGENT: &str = "AirPlay/999.0.0";
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AuthProfile {
     Legacy,
-    PyatvDiagnostic,
     OwnToneTransient,
 }
 
@@ -108,8 +107,6 @@ impl std::error::Error for ResponseFailure {}
 
 pub struct Wire {
     socket: TcpStream,
-    // Scoped by Session to the initial SETUP diagnostic only.
-    pub(super) setup_response_wait: Option<(Duration, Arc<AtomicBool>)>,
     polling_response: bool,
     pub(super) feedback_budget: Option<Duration>,
     pub(super) diagnostic_cancel: Option<Arc<AtomicBool>>,
@@ -136,7 +133,7 @@ pub struct Wire {
     pending_start: usize,
     pending_end: usize,
 }
-/// Persisted operations retain exact global-selection checks. A HAP diagnostic operation
+/// Persisted operations retain exact global-selection checks. A stored-HAP operation
 /// instead owns an immutable endpoint/capability pin and credential fingerprint.
 #[derive(Clone)]
 enum Authorization {
@@ -328,7 +325,6 @@ impl Wire {
     fn new(socket: TcpStream, budget: Duration, receiver_id: String, method: Method) -> Self {
         Self {
             socket,
-            setup_response_wait: None,
             polling_response: false,
             feedback_budget: None,
             diagnostic_cancel: None,
@@ -417,11 +413,6 @@ impl Wire {
                     self.auth_phase == "encrypted TEARDOWN" || !cancel.load(Ordering::Relaxed),
                     "diagnostic interrupted"
                 );
-            }
-            if self.polling_response {
-                if let Some((_, cancel)) = &self.setup_response_wait {
-                    ensure!(!cancel.load(Ordering::Relaxed), "diagnostic interrupted");
-                }
             }
             self.timeout().inspect_err(|_| {
                 tracing::debug!(target: "piair::auth", phase = self.auth_phase, "connection deadline expired");
@@ -582,6 +573,7 @@ impl Wire {
         let _ = self.socket.shutdown(Shutdown::Both);
     }
     // A deliberately narrow authenticated diagnostic; no arbitrary request API.
+    #[cfg(test)]
     pub(super) fn options(&mut self) -> Result<()> {
         let result = (|| {
             ensure!(
@@ -707,24 +699,12 @@ impl Wire {
                 headers = "CSeq,User-Agent,X-Apple-ProtocolVersion,Content-Length,Client-Instance,DACP-ID,Active-Remote,X-Apple-Client-Name",
                 extra_header_names = ?headers.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
                 operation_budget_ms = self.feedback_budget.map_or(self.budget, |budget| self.budget.min(budget)).as_millis() as u64,
-                socket_wait_cap_ms = if self.setup_response_wait.is_some() || self.feedback_budget.is_some() { 100u64 } else { 3000u64 },
-                setup_response_budget_ms = self.setup_response_wait.as_ref().map(|(budget, _)| budget.as_millis() as u64),
+                socket_wait_cap_ms = if self.feedback_budget.is_some() { 100u64 } else { 3000u64 },
                 uri_kind = if uri.starts_with("rtsp://") { "session" } else { "endpoint" },
                 "authenticated request start");
             self.write_message(&request)
                 .context("encrypted request write")?;
-            if let Some((budget, _)) = &self.setup_response_wait {
-                ensure!(
-                    method == "SETUP",
-                    "SETUP response wait used for another method"
-                );
-                self.deadline = Instant::now() + *budget;
-                self.polling_response = true;
-            }
-            if self.diagnostic_cancel.is_some()
-                && self.setup_response_wait.is_none()
-                && self.feedback_budget.is_none()
-            {
+            if self.diagnostic_cancel.is_some() && self.feedback_budget.is_none() {
                 self.deadline = Instant::now() + self.budget.min(Duration::from_secs(3));
                 self.polling_response = true;
             }
@@ -758,55 +738,6 @@ impl Wire {
         }
         result
     }
-    /// Deliberately narrow plaintext diagnostic: no caller-controlled method/path/body.
-    pub(super) fn preverify_info(&mut self) -> Result<Reply> {
-        let started = Instant::now();
-        let result = (|| {
-            ensure!(
-                !self.failed && self.keys.is_none() && self.seq == 0,
-                "pre-verify info requires a fresh authorized connection"
-            );
-            self.reauthorize()?;
-            self.restart_deadline();
-            self.auth_phase = "pre-verify GET /info";
-            let mut header = self.authenticated_header("GET", "/info", 0)?;
-            header.extend_from_slice(b"\r\n");
-            self.write_raw(&header)?;
-            let body = self.response()?;
-            self.reauthorize()?;
-            Ok(Reply {
-                body,
-                headers: self.last_headers.clone(),
-            })
-        })();
-        tracing::debug!(target: "piair::rtsp", phase = "pre-verify GET /info",
-            cseq = self.seq, elapsed_ms = started.elapsed().as_millis() as u64,
-            success = result.is_ok(), "pre-verify info completed");
-        if result.is_err() {
-            self.close();
-        }
-        result
-    }
-    pub(super) fn start_timing(
-        &self,
-        ports: &mut Ports,
-        clock: Arc<super::realtime::Clock>,
-    ) -> Result<()> {
-        self.reauthorize()?;
-        ensure!(
-            self.keys.is_some(),
-            "authenticated control required for timing"
-        );
-        ensure!(ports.timing_worker.is_none(), "NTP service already started");
-        let socket = ports.timing.take().context("timing socket absent")?;
-        ports.timing_worker = Some(Worker::timing_for_peer(
-            socket,
-            self.lease(),
-            clock,
-            self.socket.peer_addr()?.ip(),
-        )?);
-        Ok(())
-    }
     pub(super) fn sender_device_id(&self) -> String {
         // OwnTone serializes its stable u64 sender ID as eight colon-separated
         // octets. Keep all 64 bits of PiAir's persisted identity, without folding
@@ -821,27 +752,6 @@ impl Wire {
     pub(super) fn local_ip(&self) -> Result<IpAddr> {
         Ok(self.socket.local_addr()?.ip())
     }
-    pub(super) fn lease(&self) -> Lease {
-        Lease {
-            authorization: self.authorization.clone(),
-            id: self.receiver_id.clone(),
-        }
-    }
-    pub(super) fn bind_media(&self) -> Result<Ports> {
-        self.reauthorize()?;
-        ensure!(self.keys.is_some(), "authentication required");
-        let local = self.socket.local_addr()?.ip();
-        ensure!(
-            local.is_ipv4(),
-            "realtime diagnostic currently requires IPv4"
-        );
-        Ok(Ports {
-            data: UdpSocket::bind(SocketAddr::new(local, 0))?,
-            control: UdpSocket::bind(SocketAddr::new(local, 0))?,
-            timing: Some(UdpSocket::bind(SocketAddr::new(local, 0))?),
-            timing_worker: None,
-        })
-    }
     /// Allocate only UDP media/control sockets. PTP is owned independently by
     /// TimingSession; no NTP responder or media worker is created here.
     pub(super) fn prepare_ptp_realtime(&self) -> Result<RealtimeTransport> {
@@ -853,35 +763,6 @@ impl Wire {
             control: UdpSocket::bind(SocketAddr::new(local, 0))?,
             lease,
             connected: false,
-        })
-    }
-    pub(super) fn media(
-        &self,
-        pending: &mut Option<Ports>,
-        data: u16,
-        control: u16,
-    ) -> Result<MediaIo> {
-        self.reauthorize()?;
-        ensure!(
-            self.keys.is_some() && data > 0 && control > 0,
-            "invalid authenticated ports"
-        );
-        let ports = pending.as_ref().context("media sockets absent")?;
-        ports.check_timing()?;
-        let peer = self.socket.peer_addr()?.ip();
-        ports.data.connect(SocketAddr::new(peer, data))?;
-        ports.control.connect(SocketAddr::new(peer, control))?;
-
-        ports.control.set_nonblocking(true)?;
-        let lease = self.lease();
-        self.reauthorize()?;
-        let ports = pending.take().context("media sockets absent")?;
-        let timing = ports.timing_worker.context("NTP service not started")?;
-        Ok(MediaIo {
-            data: ports.data,
-            control: ports.control,
-            timing,
-            lease,
         })
     }
     pub(super) fn event(&mut self, port: u16) -> Result<Worker> {
@@ -911,24 +792,20 @@ impl Wire {
             );
             return self.owntone_exchange("POST", path, body);
         }
-        self.auth_post(
-            path,
-            body,
-            self.auth_profile == AuthProfile::PyatvDiagnostic,
-        )
+        self.auth_post(path, body)
     }
-    /// Buffered diagnostics cannot use the legacy optional mock authorization.
-    pub(super) fn buffered_authorization(&self) -> Result<()> {
+    /// PTP sessions require explicit current receiver authorization.
+    pub(super) fn ptp_authorization(&self) -> Result<()> {
         ensure!(
             !self.failed && self.authorization.is_some(),
-            "explicit buffered receiver authorization required"
+            "explicit receiver authorization required"
         );
         self.reauthorize()
     }
-    /// Buffered transient diagnostics use the hardware-validated RTSP profile.
+    /// Transient playback uses the verified RTSP authentication profile.
     /// Policy comes from the pinned authorization, never caller-supplied evidence.
-    pub(super) fn buffered_transient(&mut self) -> Result<()> {
-        self.buffered_authorization()?;
+    pub(super) fn ptp_transient(&mut self) -> Result<()> {
+        self.ptp_authorization()?;
         let selected = match &self
             .authorization
             .as_ref()
@@ -998,7 +875,7 @@ impl Wire {
         self.reauthorize()?;
         Ok(dir)
     }
-    /// Initial diagnostic only: attach after authenticated timingPeerInfo validation.
+    /// Attach only after authenticated timingPeerInfo validation.
     /// Binding standard PTP ports may fail without local bind permission: fail closed.
     pub(super) fn start_ptp(
         &self,
@@ -1026,39 +903,8 @@ impl Wire {
             lease,
         )
     }
-    /// Foundation only: exclusive same-receiver authenticated timing control.
-    #[allow(dead_code)]
-    pub(super) fn buffered_timing(
-        &mut self,
-        uri: String,
-        clock: &super::ptp::Grandmaster,
-    ) -> Result<super::ptp::control::Control<'_>> {
-        self.reauthorize()?;
-        ensure!(
-            !self.failed && self.keys.is_some(),
-            "authenticated control required"
-        );
-        ensure!(
-            uri.starts_with("rtsp://") && uri.len() < 256 && uri.bytes().all(|b| b > 32 && b < 127),
-            "invalid session URI"
-        );
-        super::ptp::control::Control::new(self, uri, clock)
-    }
     pub(super) fn uses_owntone_transient_profile(&self) -> bool {
         self.auth_profile == AuthProfile::OwnToneTransient
-    }
-    pub(super) fn uses_pyatv_transient_profile(&self) -> bool {
-        self.auth_profile == AuthProfile::PyatvDiagnostic
-    }
-    pub(super) fn pyatv_transient_preamble(&mut self) -> Result<()> {
-        ensure!(
-            self.method == Method::Transient,
-            "explicit transient selection required; no fallback"
-        );
-        self.auth_phase("pyatv transient preamble");
-        self.auth_post("/pair-pin-start", &[], true)?;
-        self.auth_profile = AuthProfile::PyatvDiagnostic;
-        Ok(())
     }
     /// Select once, fetch policy on this socket, then allow only transient setup.
     pub(super) fn owntone_transient(
@@ -1125,19 +971,14 @@ impl Wire {
         }
         result
     }
-    fn auth_post(
-        &mut self,
-        path: &str,
-        body: &[u8],
-        pyatv_profile: bool,
-    ) -> Result<Zeroizing<Vec<u8>>> {
+    fn auth_post(&mut self, path: &str, body: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         let started = Instant::now();
         let result = (|| {
             ensure!(
                 !self.failed && self.keys.is_none(),
                 "plaintext authentication transport unavailable"
             );
-            self.post_inner(path, body, pyatv_profile)
+            self.post_inner(path, body)
         })();
         tracing::debug!(target: "piair::auth", phase = self.auth_phase, method = ?self.method,
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -1148,38 +989,18 @@ impl Wire {
         }
         result
     }
-    fn post_inner(
-        &mut self,
-        path: &str,
-        body: &[u8],
-        pyatv_profile: bool,
-    ) -> Result<Zeroizing<Vec<u8>>> {
+    fn post_inner(&mut self, path: &str, body: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         ensure!(body.len() <= super::tlv::LIMIT, "request body too large");
         ensure!(
             ["/pair-pin-start", "/pair-setup", "/pair-verify"].contains(&path),
             "unsupported authentication endpoint"
         );
-        if path != "/pair-pin-start" || !pyatv_profile {
-            self.seq = self
-                .seq
-                .checked_add(1)
-                .context("request sequence exhausted")?;
-        }
+        self.seq = self
+            .seq
+            .checked_add(1)
+            .context("request sequence exhausted")?;
         let header=format!("POST {path} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nCSeq: {}\r\nUser-Agent: PiAir/0.1\r\nContent-Type: application/octet-stream\r\nX-Apple-HKP: {}\r\nContent-Length: {}\r\n\r\n",self.socket.peer_addr()?,self.seq,if self.method == Method::Transient { 4 } else { 3 },body.len());
-        let header = if pyatv_profile {
-            // Pinned pyatv _format_message adds length before supplied headers,
-            // and does not synthesize Host or CSeq. Keep SRP/TLV bytes untouched.
-            self.reauthorize()?;
-            let length = if body.is_empty() {
-                String::new()
-            } else {
-                format!("Content-Length: {}\r\n", body.len())
-            };
-            format!("POST {path} HTTP/1.1\r\n{length}user-agent: AirPlay/320.20\r\nconnection: keep-alive\r\nx-apple-hkp: 4\r\ncontent-type: application/octet-stream\r\n\r\n")
-        } else {
-            tracing::debug!(target: "piair::auth", host = %self.socket.peer_addr()?, "authentication numeric Host");
-            header
-        };
+        tracing::debug!(target: "piair::auth", host = %self.socket.peer_addr()?, "authentication numeric Host");
         super::diagnostics::request(&header, body.len(), self.auth_phase);
         self.write_message(header.as_bytes())?;
         self.write_message(body)?;
@@ -1361,50 +1182,6 @@ impl PtpLease {
         self.peer
     }
 }
-#[derive(Clone)]
-pub(super) struct Lease {
-    authorization: Option<(PathBuf, Authorization)>,
-    id: String,
-}
-impl Lease {
-    pub(super) fn check(&self) -> Result<()> {
-        if let Some((path, authorization)) = &self.authorization {
-            authorization.check(path, &self.id)?;
-        }
-        Ok(())
-    }
-}
-pub(super) struct Ports {
-    data: UdpSocket,
-    control: UdpSocket,
-    timing: Option<UdpSocket>,
-    timing_worker: Option<Worker>,
-}
-impl Ports {
-    pub fn timing_replies(&self) -> u64 {
-        self.timing_worker.as_ref().map_or(0, Worker::count)
-    }
-    pub fn has_timing_worker(&self) -> bool {
-        self.timing_worker.is_some()
-    }
-    pub fn check_timing(&self) -> Result<()> {
-        self.timing_worker
-            .as_ref()
-            .context("NTP service absent")?
-            .check()
-    }
-    pub fn control(&self) -> Result<u16> {
-        Ok(self.control.local_addr()?.port())
-    }
-    pub fn timing(&self) -> Result<u16> {
-        Ok(self
-            .timing
-            .as_ref()
-            .context("timing already started")?
-            .local_addr()?
-            .port())
-    }
-}
 /// Prepared authenticated realtime transport shared with the existing RTP
 /// encoder. Every operation checks its selected-receiver lease. Closing the session
 /// drops sockets and its encoder/key together; there is no detached grant.
@@ -1464,32 +1241,6 @@ impl RealtimeTransport {
     }
 }
 
-pub(super) struct MediaIo {
-    data: UdpSocket,
-    control: UdpSocket,
-    pub timing: Worker,
-    lease: Lease,
-}
-impl MediaIo {
-    pub fn send(&self, packet: &[u8]) -> Result<()> {
-        self.lease.check()?;
-        ensure!(packet.len() <= 2048, "media datagram too large");
-        ensure!(
-            self.data.send(packet)? == packet.len(),
-            "partial media datagram"
-        );
-        Ok(())
-    }
-    pub fn sync(&self, packet: &[u8; 20]) -> Result<()> {
-        self.lease.check()?;
-        ensure!(self.control.send(packet)? == 20, "sync send failed");
-        Ok(())
-    }
-    pub fn retransmit(&self) -> Result<Option<(u16, u16)>> {
-        self.lease.check()?;
-        receive_retransmit(&self.control)
-    }
-}
 fn receive_retransmit(control: &UdpSocket) -> Result<Option<(u16, u16)>> {
     let mut b = [0; 9];
     match control.recv_from(&mut b) {
@@ -1602,65 +1353,6 @@ impl Worker {
     }
     pub fn count(&self) -> u64 {
         self.health.count.load(Ordering::Relaxed)
-    }
-    pub fn age(&self) -> Duration {
-        self.health.last.lock().unwrap().elapsed()
-    }
-    fn timing_for_peer(
-        socket: UdpSocket,
-        lease: Lease,
-        clock: Arc<super::realtime::Clock>,
-        peer_ip: IpAddr,
-    ) -> Result<Self> {
-        socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-        socket.set_write_timeout(Some(Duration::from_millis(100)))?;
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
-        let worker = Self::spawn(None, move |health| {
-            lease.check()?;
-            let mut b = [0; 33];
-            ready_tx
-                .send(())
-                .context("timing readiness receiver closed")?;
-            while !health.stop.load(Ordering::Relaxed) {
-                match socket.recv_from(&mut b) {
-                    Ok((n, peer)) => {
-                        // OwnTone replies to recvfrom's source throughout the session.
-                        // Restrict unauthenticated UDP probes to our verified peer IP.
-                        if peer.ip() != peer_ip {
-                            continue;
-                        }
-                        let recv = clock.now();
-                        let reply = super::realtime::timing_reply(&b[..n], recv, clock.now());
-                        let out = if let Ok(out) = reply {
-                            out
-                        } else {
-                            continue;
-                        };
-                        lease.check()?;
-                        tracing::debug!(target: "piair::rtsp", phase = "NTP", outcome = "request",
-                            "NTP request from approved control peer");
-                        ensure!(
-                            socket.send_to(&out, peer)? == out.len(),
-                            "timing reply send failed"
-                        );
-                        let replies = health.count.fetch_add(1, Ordering::Relaxed) + 1;
-                        tracing::debug!(target: "piair::rtsp", phase = "NTP", outcome = "reply", replies,
-                            "NTP reply sent to approved control peer");
-                        *health.last.lock().unwrap() = Instant::now();
-                    }
-                    Err(e)
-                        if [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::TimedOut]
-                            .contains(&e.kind()) => {}
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            Ok(())
-        });
-        ready_rx
-            .recv_timeout(Duration::from_secs(1))
-            .context("timing readiness timeout")?;
-        worker.check()?;
-        Ok(worker)
     }
     fn events(mut wire: Wire) -> Result<Self> {
         wire.reauthorize()?;
@@ -1791,97 +1483,6 @@ mod worker_tests {
     use super::*;
 
     #[test]
-    fn timing_worker_transfer_rejects_duplicates_and_retains_failed_initialization() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let _peer = listener.accept().unwrap();
-        let mut wire = Wire::mock(client, Duration::from_secs(1), "test");
-        wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
-        let mut ports = wire.bind_media().unwrap();
-        let addr = ports.timing.as_ref().unwrap().local_addr().unwrap();
-        let clock = Arc::new(super::super::realtime::Clock::new().unwrap());
-        wire.start_timing(&mut ports, clock.clone()).unwrap();
-        assert!(wire.start_timing(&mut ports, clock).is_err());
-        ports.check_timing().unwrap();
-        let mut pending = Some(ports);
-        // Invalid media initialization must not consume the live responder.
-        assert!(wire.media(&mut pending, 0, 7001).is_err());
-        pending.as_ref().unwrap().check_timing().unwrap();
-        let media = wire.media(&mut pending, 7000, 7001).unwrap();
-        assert!(pending.is_none());
-        media.timing.check().unwrap();
-        drop(media);
-        drop(UdpSocket::bind(addr).unwrap());
-        // Exercise the same health propagation with a failed socket owner.
-        let mut ports = wire.bind_media().unwrap();
-        let socket = ports.timing.take().unwrap();
-        let addr = socket.local_addr().unwrap();
-        ports.timing_worker = Some(Worker::spawn(None, move |_| {
-            let _socket = socket;
-            bail!("injected timing failure")
-        }));
-        let worker = ports.timing_worker.as_ref().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while !worker.join.as_ref().unwrap().is_finished() {
-            assert!(Instant::now() < deadline);
-            thread::yield_now();
-        }
-        let mut pending = Some(ports);
-        let error = wire.media(&mut pending, 7000, 7001).err().unwrap();
-        assert!(format!("{error:#}").contains("injected timing failure"));
-        assert!(pending.is_some());
-        drop(pending);
-        UdpSocket::bind(addr).unwrap();
-    }
-
-    #[test]
-    fn early_timing_ready_filters_packets_and_joins_exactly_one_worker() {
-        for _ in 0..8 {
-            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-            let addr = socket.local_addr().unwrap();
-            let lease = Lease {
-                authorization: None,
-                id: "test".into(),
-            };
-            let worker = Worker::timing_for_peer(
-                socket,
-                lease,
-                Arc::new(super::super::realtime::Clock::new().unwrap()),
-                "127.0.0.1".parse().unwrap(),
-            )
-            .unwrap();
-            let health = worker.health.clone();
-            assert_eq!(Arc::strong_count(&health), 3);
-            let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
-            peer.set_read_timeout(Some(Duration::from_millis(250)))
-                .unwrap();
-            let mut query = [0; 32];
-            query[..2].copy_from_slice(&[0x80, 0xd2]);
-            peer.send_to(b"malformed", addr).unwrap();
-            let other = UdpSocket::bind("127.0.0.2:0").unwrap();
-            other
-                .set_read_timeout(Some(Duration::from_millis(150)))
-                .unwrap();
-            other.send_to(&query, addr).unwrap();
-            let mut reply = [0; 33];
-            assert!(other.recv_from(&mut reply).is_err());
-            peer.send_to(&query, addr).unwrap();
-            assert_eq!(peer.recv_from(&mut reply).unwrap().0, 32);
-            let started = Instant::now();
-            drop(worker);
-            assert!(started.elapsed() < Duration::from_secs(1));
-            assert_eq!(health.count.load(Ordering::Relaxed), 1);
-            assert_eq!(
-                Arc::strong_count(&health),
-                1,
-                "worker thread must be joined"
-            );
-            let rebound = UdpSocket::bind(addr).unwrap();
-            drop(rebound);
-        }
-    }
-
-    #[test]
     fn independent_get_then_setup_preserves_directional_frame_state() {
         // Python cryptography/plistlib oracle; no mock use of ControlKeys.
         // These are synthetic protocol fixtures, not receiver acceptance evidence.
@@ -1986,47 +1587,6 @@ mod worker_tests {
     }
 
     #[test]
-    fn diagnostic_setup_wait_has_one_deadline_for_silence_and_partial_frames() {
-        for partial in [false, true] {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let mut peer = listener.accept().unwrap().0;
-            let mut wire = Wire::mock(socket, Duration::from_secs(1), "test");
-            wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
-            wire.setup_response_wait =
-                Some((Duration::from_millis(350), Arc::new(AtomicBool::new(false))));
-            let server = thread::spawn(move || {
-                if partial {
-                    let mut keys = super::super::crypto::ControlKeys::new(&[7; 32]);
-                    keys.swap_directions_for_test();
-                    let frame = keys
-                        .encrypt(b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n")
-                        .unwrap();
-                    // Dribble ciphertext across poll timeouts without completing a frame.
-                    for chunk in frame[..6].chunks(2) {
-                        peer.write_all(chunk).unwrap();
-                        thread::sleep(Duration::from_millis(120));
-                    }
-                }
-                let mut bytes = Vec::new();
-                peer.read_to_end(&mut bytes).unwrap();
-            });
-            let start = Instant::now();
-            let error = wire
-                .request("SETUP", "rtsp://127.0.0.1/1", &[], &[])
-                .err()
-                .unwrap();
-            assert!(format!("{error:#}").contains("timed out"));
-            assert!(start.elapsed() >= Duration::from_millis(300));
-            assert!(start.elapsed() < Duration::from_secs(1));
-            assert_eq!(wire.response_frames, 0);
-            assert_eq!(wire.response_bytes > 0, partial);
-            assert!(wire.failed && wire.keys.is_none());
-            server.join().unwrap();
-        }
-    }
-
-    #[test]
     fn feedback_deadline_covers_silence_and_partial_frames_without_reset() {
         for partial in [false, true] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2059,82 +1619,6 @@ mod worker_tests {
             assert!(began.elapsed() < Duration::from_millis(500));
             assert!(wire.failed && wire.keys.is_none());
             server.join().unwrap();
-        }
-    }
-
-    #[test]
-    fn diagnostic_setup_wait_accepts_delayed_fragmented_response_and_preserves_default() {
-        for diagnostic in [false, true] {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let mut peer = listener.accept().unwrap().0;
-            let mut wire = Wire::mock(socket, Duration::from_secs(15), "test");
-            wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
-            if diagnostic {
-                wire.setup_response_wait =
-                    Some((Duration::from_secs(15), Arc::new(AtomicBool::new(false))));
-            }
-            let server = thread::spawn(move || {
-                thread::sleep(Duration::from_millis(3300));
-                if diagnostic {
-                    let mut keys = super::super::crypto::ControlKeys::new(&[7; 32]);
-                    keys.swap_directions_for_test();
-                    let frame = keys
-                        .encrypt(b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n")
-                        .unwrap();
-                    peer.write_all(&frame[..1]).unwrap();
-                    thread::sleep(Duration::from_millis(150));
-                    peer.write_all(&frame[1..]).unwrap();
-                }
-            });
-            let start = Instant::now();
-            let result = wire.request("SETUP", "rtsp://127.0.0.1/1", &[], &[]);
-            assert_eq!(result.is_ok(), diagnostic);
-            if diagnostic {
-                assert_eq!(wire.response_frames, 1);
-                assert!(!wire.polling_response);
-                wire.setup_response_wait = None;
-                wire.restart_deadline();
-                wire.timeout().unwrap();
-                assert_eq!(
-                    wire.socket.read_timeout().unwrap(),
-                    Some(Duration::from_secs(3))
-                );
-            } else {
-                assert!(format!("{:#}", result.err().unwrap()).contains("receiver read timeout"));
-                assert!(start.elapsed() < Duration::from_millis(3300));
-            }
-            server.join().unwrap();
-        }
-    }
-
-    #[test]
-    fn diagnostic_setup_wait_cancels_silence_and_partial_response_promptly() {
-        for partial in [false, true] {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let mut peer = listener.accept().unwrap().0;
-            let mut wire = Wire::mock(socket, Duration::from_secs(15), "test");
-            wire.keys = Some(super::super::crypto::ControlKeys::new(&[7; 32]));
-            let cancel = Arc::new(AtomicBool::new(false));
-            wire.setup_response_wait = Some((Duration::from_secs(15), cancel.clone()));
-            if partial {
-                peer.write_all(&[1]).unwrap();
-            }
-            let trigger = thread::spawn(move || {
-                thread::sleep(Duration::from_millis(150));
-                cancel.store(true, Ordering::Relaxed);
-            });
-            let start = Instant::now();
-            let error = wire
-                .request("SETUP", "rtsp://127.0.0.1/1", &[], &[])
-                .err()
-                .unwrap();
-            assert!(format!("{error:#}").contains("diagnostic interrupted"));
-            assert!(start.elapsed() < Duration::from_secs(1));
-            assert_eq!(wire.response_bytes, usize::from(partial));
-            assert!(wire.failed && wire.keys.is_none());
-            trigger.join().unwrap();
         }
     }
 

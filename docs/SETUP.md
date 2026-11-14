@@ -33,7 +33,7 @@ A source checkout is not an installed service.
    separately with `piair receivers` or `piair devices`, not from the picker. A new speaker needs one explicit approval prompt;
    its advertised name and device ID do not verify its identity. The connection
    choice is saved separately after confirmation. See
-   [receiver address binding](RECEIVER_ADDRESS_BINDING.md) if discovery changes.
+   [receiver identity rules](SECURITY.md) if discovery changes.
 5. Choose an advertised compatible authentication path. Existing validated HAP
    credentials can be reused without enrollment. PIN-display enrollment requires
    actual supported PIN delivery. HAP setup-code enrollment requires a genuine
@@ -43,7 +43,7 @@ A source checkout is not an installed service.
    receiver identity. There is no automatic authentication fallback.
 6. Normal setup keeps automatic detection and the current/default volume.
    Advanced settings are optional. They include input measurement, activity
-   thresholds and explicit volume changes; see [runtime settings](RUNTIME.md).
+   thresholds and explicit volume changes; see [runtime settings](OPERATIONS.md).
    Defaults are -45 dBFS, 1000 ms sustained audio to start and 30000 ms silence
    to stop. Verify them with your source; they are not universal recommendations.
 7. Review the input, speaker, connection, detection and volume summary. Save only
@@ -147,9 +147,7 @@ killed/disconnected wizard; SIGKILL and a failed system manager cannot guarantee
 immediate cleanup. Temporary units are collected after completion.
 
 The ordinary installed executable has no file capabilities and setup must not run
-as root. Separate foreground developer diagnostics still require explicit timing
-port permission; see [PTP permissions](PTP_PORT_PERMISSIONS.md).
-
+as root.
 ## Reconfiguration and cancellation
 
 Re-run `piair setup` later, using the same account and config path. Existing numeric
@@ -165,7 +163,7 @@ sync or enrollment can have an uncertain persistence outcome; inspect the report
 state before retrying. Credentials are never silently removed or replaced.
 
 Setup reserves the existing per-user automatic-runtime lock before changing state
-or testing audio. Stop your own `piair run` or `automatic-ptp-capture` first. Setup
+or testing audio. Stop your own `piair run` process first. Setup
 asks before stopping its verified current-account service and never stops another process or another user's service. The lock stays held until
 capture/playback cleanup completes. It does not coordinate different Linux users
 or network namespaces. Operational settings take effect on explicit restart;
@@ -185,14 +183,13 @@ the simplified wizard does not display it before playback. No additional tone, r
 The installed service-backed test requires both `Pachelbel_Canon_audio_test.wav`
 and `LICENSE.md` in `/usr/local/share/piair/audio`. Reinstall PiAir if either is
 missing. Service execution deliberately ignores foreground environment overrides
-and development-checkout data. Standalone developer diagnostics retain their explicit audio-file options.
+and development-checkout data.
 
 The executable does not embed the roughly 9.6 MB recording. Installed binaries
 work independently of the current working directory. The release installer packages the existing WAV and its unchanged attribution together in one of these
 shared-data locations. A missing recording or license produces guidance and lets
 setup finish without the test. Setup never downloads the recording or remote code.
-WAV parsing/sender/CLI bounds allow 1–49 seconds; the diagnostic CLI retains its
-30-second default. EOF, resampling, fades, packet scheduling, silent drain and
+The recording stops at EOF or 49 seconds. EOF, resampling, fades, packet scheduling, silent drain and
 bounded teardown retain their existing behavior. No content is looped or extended;
 only the existing partial-packet padding and silent drain follow actual content.
 
@@ -212,13 +209,13 @@ only the existing partial-packet padding and silent drain follow actual content.
   method after review. Do not invent PINs/codes. Failed HAP authentication never
   triggers transient fallback. Existing credential errors require investigation.
 - **No audible test audio:** check receiver volume/mute and speakers, local
-  networking and PTP port permissions. See [PTP_PORT_PERMISSIONS.md](PTP_PORT_PERMISSIONS.md)
-  and [WAV_PLAYBACK_DIAGNOSTIC.md](WAV_PLAYBACK_DIAGNOSTIC.md). Do not change receiver
+  networking and PTP port permissions. See [timing permissions](OPERATIONS.md#timing-permissions)
+  and [operation troubleshooting](OPERATIONS.md). Do not change receiver
   selection or authentication merely because packet transmission succeeded.
 - **Configuration changed during setup:** rerun and review the newer settings;
   the wizard refuses a stale save. Keep private config/state permissions intact.
 - **Service unavailable/customized/path mismatch:** finish without activation.
-  Review [SYSTEMD.md](SYSTEMD.md). Setup activates only the installed stock unit
+  Review [service troubleshooting](OPERATIONS.md). Setup activates only the installed stock unit
   without drop-ins/overridden environment, resolving the account home to the same
   saved config. Custom paths and service overrides need deliberate manual review.
   If activation fails, inspect both unit enablement and status: enablement can

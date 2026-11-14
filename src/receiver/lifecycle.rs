@@ -1,12 +1,7 @@
-//! Single authenticated receiver owner for PTP realtime and legacy buffered diagnostics.
-//! No public way to assert receiver clock adoption exists. See the evidence ledger.
+//! Authenticated realtime PTP owner for production live audio and setup recordings.
 use super::playback::Output as _;
 use super::{
-    buffered::{NegotiatedStream, Prepared},
-    pairing,
-    planning::{Claim, Evidence},
-    profile, ptp, realtime,
-    store::Credential,
+    pairing, profile, ptp, realtime,
     wire::{Wire, Worker},
 };
 use anyhow::{bail, ensure, Context, Result};
@@ -30,20 +25,13 @@ impl std::fmt::Display for CleanupFailure {
 }
 impl std::error::Error for CleanupFailure {}
 
-pub const PLAYBACK_BLOCKER: &str = "buffered playback unavailable: receiver clock adoption is unverified; PeerObserved, elapsed time and RTSP 200 never authorize media";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Authorization,
     Authentication,
     Negotiation,
     Timing,
-    // Buffered playback retains its separate adoption gate.
-    #[allow(dead_code)]
-    Prebuffering,
     Playing,
-    #[allow(dead_code)]
-    Paused,
     Stopping,
     Failed,
     Closed,
@@ -67,19 +55,17 @@ impl State {
                     )
                     | (Self::Stopping, Self::Closed | Self::Failed)
             ),
-            "illegal buffered session transition {self:?} -> {next:?}"
+            "illegal session transition {self:?} -> {next:?}"
         );
         *self = next;
         Ok(())
     }
 }
 
-/// Explicit diagnostic progression. An accepted stage is never media readiness.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
-pub enum Stage {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
     Record,
     Stream,
-    Anchor,
 }
 
 type LiveInput<'a> = (
@@ -107,15 +93,13 @@ pub struct Session {
     session_bound: bool,
     attempted_setup: bool,
     setup_rtsp_accepted: bool,
+    #[cfg(test)]
     observed: bool,
     observation_complete: bool,
     // Historical result at observation completion (or before cleanup on failure).
     // Never recomputed from Shutdown and never used to authorize media.
     observed_peer_liveness: Option<bool>,
     stage: Option<Stage>,
-    prepared: Option<Prepared>,
-    stream: Option<NegotiatedStream>,
-    anchor_accepted: bool,
     realtime_profile: bool,
     realtime_transport: Option<super::wire::RealtimeTransport>,
     realtime_encoder: Option<realtime::Encoder>,
@@ -154,13 +138,11 @@ impl Session {
             session_bound: false,
             attempted_setup: false,
             setup_rtsp_accepted: false,
+            #[cfg(test)]
             observed: false,
             observation_complete: false,
             observed_peer_liveness: None,
             stage: None,
-            prepared: None,
-            stream: None,
-            anchor_accepted: false,
             realtime_profile: false,
             realtime_transport: None,
             realtime_encoder: None,
@@ -210,22 +192,17 @@ impl Session {
         } else {
             "pending"
         };
-        let realtime = if self.realtime_profile {
+        let realtime = {
             format!("stream type: 96; negotiated ports: {:?}; realtime media transport negotiated: {}; operational readiness at snapshot: {}; timing healthy at snapshot: {}; clock identity: {:016x}; authenticated peer clock identity: {:?}; peer-role validation: pinned authenticated ClockID, per-source identity sequences, no clock election; playback outcome: {}; audio packets: {}; audio bytes: {}; retransmission requests: {}; retransmission responses: {}; RTP/PTP sync packets: {}; playback elapsed: {:?}; audible playback: unverified; ",
                 self.realtime_ports, self.realtime_ports.is_some(), self.realtime_ready_snapshot,
                 self.timing_health_snapshot, self.clock_id, self.peer_clock_id.map(|id| format!("{id:016x}")),
                 self.playback_outcome, self.playback_stats.packets, self.playback_stats.bytes, self.playback_stats.requests, self.playback_stats.resends, self.playback_stats.syncs, self.playback_stats.elapsed)
-        } else {
-            String::new()
         };
         format!("{realtime}local cleanup: {local_cleanup}; negotiation observation: {observation}; peer liveness at snapshot: {peer_live}; synchronization: unverified; initial SETUP RTSP accepted: {}; RTSP stages: {:?}; packet evidence: {evidence:?}; media readiness: requires active session authorization; session: {:?}; last accepted: {}; attempted: {}; PTP snapshot: {ptp:?}; receiver clock adoption: unverified; TEARDOWN: {}; audio bytes: {}",
             self.setup_rtsp_accepted, self.rtsp_stages, self.state(), self.last_accepted, self.attempted, self.teardown, self.playback_stats.bytes)
     }
     fn check(&self) -> Result<()> {
-        ensure!(
-            !self.cancel.load(Ordering::Relaxed),
-            "buffered diagnostic cancelled"
-        );
+        ensure!(!self.cancel.load(Ordering::Relaxed), "playback cancelled");
         self.control
             .as_ref()
             .context("control absent")?
@@ -236,43 +213,19 @@ impl Session {
         }
         Ok(())
     }
-    /// Explicit initial-SETUP diagnostic, not a playback or full stream check.
-    /// The factory must use Wire::connect with an already selected receiver.
-    pub fn start(
+    #[cfg(test)]
+    pub(super) fn start(
         &mut self,
         connect: impl FnOnce() -> Result<Wire>,
-        credential: Option<&Credential>,
+        credential: Option<&super::store::Credential>,
     ) -> Result<()> {
-        ensure!(
-            self.state == State::Authorization,
-            "buffered session already used"
-        );
+        ensure!(self.state == State::Authorization, "session already used");
+        let mut auth = super::session::Session::new();
+        auth.cancel = self.cancel.clone();
         let result = (|| {
-            ensure!(
-                !self.cancel.load(Ordering::Relaxed),
-                "buffered diagnostic cancelled"
-            );
-            let mut wire = connect()?;
-            wire.buffered_authorization()?;
-            wire.diagnostic_cancel = Some(self.cancel.clone());
-            self.state.advance(State::Authentication)?;
-            self.control = Some(
-                if wire.method() == super::compatibility::Method::Transient {
-                    ensure!(
-                        credential.is_none(),
-                        "transient cannot consume persistent credentials"
-                    );
-                    wire.buffered_transient()?;
-                    pairing::transient(wire)?
-                } else {
-                    pairing::verify(
-                        wire,
-                        credential.context("stored credentials required; no automatic pairing")?,
-                    )?
-                },
-            );
-            self.state.advance(State::Negotiation)?;
-            self.negotiate()
+            auth.authenticate_ptp_selected(connect, credential)?;
+            *self = auth.into_ptp_foundation()?;
+            self.setup_realtime_authenticated()
         })();
         self.finish(result)
     }
@@ -291,14 +244,13 @@ impl Session {
                 .control
                 .as_ref()
                 .context("control absent")?
-                .buffered_authorization()?;
+                .ptp_authorization()?;
             owner.state.advance(State::Negotiation)
         })();
         owner.finish(result)?;
         Ok(owner)
     }
-    /// Initial PTP SETUP only. The transferred owner is deliberately inert until
-    /// this explicit call; normal WAV negotiation never enters it automatically.
+    /// The transferred owner remains inert until explicitly starting SETUP.
     pub fn setup_authenticated(&mut self) -> Result<()> {
         ensure!(
             self.state == State::Negotiation && !self.attempted_setup,
@@ -307,8 +259,7 @@ impl Session {
         let result = self.negotiate();
         self.finish(result)
     }
-    /// Explicit caller authorization for the complete no-audio realtime check.
-    /// Must be selected before /info so buffered capabilities cannot gate type 96.
+    /// Authenticate capabilities and prepare realtime timing before stream negotiation.
     pub fn setup_realtime_authenticated(&mut self) -> Result<()> {
         ensure!(
             self.state == State::Negotiation && !self.attempted_setup,
@@ -321,11 +272,7 @@ impl Session {
     /// No buffered command registration, audioMode POST or anchor is involved.
     pub fn negotiate_realtime(&mut self) -> Result<()> {
         let result = (|| {
-            ensure!(
-                self.realtime_profile,
-                "realtime profile not explicitly authorized"
-            );
-            self.progress_inner(Stage::Record)?;
+            self.record()?;
             self.set_timing_peers()?;
             let transport = self
                 .control
@@ -386,21 +333,6 @@ impl Session {
     /// replacement, NTP fallback or buffered anchor is possible here.
     pub fn play_wav(&mut self, frames: &[[i16; 2]], volume_db: Option<i32>) -> Result<()> {
         self.play_pcm(Some(frames), None, volume_db)
-    }
-    pub fn play_live(
-        &mut self,
-        device: &str,
-        seconds: Option<u32>,
-        volume: Option<i32>,
-    ) -> Result<()> {
-        self.play_pcm(
-            None,
-            Some((
-                Box::new(move || crate::audio::live::Capture::start(device)),
-                seconds,
-            )),
-            volume,
-        )
     }
     pub fn play_automatic(
         &mut self,
@@ -745,12 +677,7 @@ impl Session {
         self.check()?;
         let info = Self::plist(&self.call("GET", Some("/info"), &[])?)?;
         let wire = self.control.as_ref().context("control absent")?;
-        validate_info_profile(
-            &info,
-            wire.receiver_id(),
-            wire.stored_hap_verification(),
-            self.realtime_profile,
-        )?;
+        validate_info_profile(&info, wire.receiver_id(), wire.stored_hap_verification())?;
         self.last_accepted = "info";
         let local = wire.local_ip()?;
         let peer = wire.ptp_lease()?.peer();
@@ -774,23 +701,13 @@ impl Session {
         self.timing = Some(ptp::session::TimingSession::attach(timing));
         self.state.advance(State::Timing)
     }
-    /// All stages require a separately confirmed CLI opt-in. Never opens a media
-    /// socket or exposes a playback grant, even after anchor acknowledgement.
-    pub fn progress(&mut self, target: Stage) -> Result<()> {
-        ensure!(
-            !self.realtime_profile,
-            "buffered stages unavailable for realtime profile"
-        );
-        let result = self.progress_inner(target);
-        self.finish(result)
-    }
     fn ack(&mut self, method: &str, path: Option<&str>, body: &[u8]) -> Result<()> {
         let reply = self.call(method, path, body)?;
         ptp::control::validate_reply(&reply, None)?;
         self.last_accepted = self.attempted;
         Ok(())
     }
-    fn progress_inner(&mut self, target: Stage) -> Result<()> {
+    fn record(&mut self) -> Result<()> {
         ensure!(
             self.state == State::Timing && self.stage.is_none(),
             "control stages already used or unavailable"
@@ -801,47 +718,6 @@ impl Session {
         );
         self.ack("RECORD", None, &[])?;
         self.stage = Some(Stage::Record);
-        if target == Stage::Record {
-            return Ok(());
-        }
-        self.set_timing_peers()?;
-        // This CLI implements no MediaRemote remote-control commands. Register
-        // an honest empty table rather than advertising unsupported operations.
-        let commands = command_registration()?;
-        self.ack("POST", Some("/command"), &commands)?;
-        let mut prepared = Prepared::new()?;
-        let connection_id = rand::random::<i64>();
-        let offer = prepared.setup_offer(connection_id)?;
-        let response = Self::plist(&self.call("SETUP", None, &offer)?)?;
-        let stream = NegotiatedStream::parse(&response, connection_id)?;
-        self.last_accepted = "stream SETUP";
-        self.prepared = Some(prepared);
-        self.stream = Some(stream);
-        let mode = profile::binary(&mut profile::dict([(
-            "audioMode",
-            Value::String("default".into()),
-        )]))?;
-        self.ack("POST", Some("/audioMode"), &mode)?;
-        self.stage = Some(Stage::Stream);
-        if target == Stage::Stream {
-            return Ok(());
-        }
-        let now = Instant::now();
-        let anchor = self
-            .timing
-            .as_mut()
-            .context("timing absent")?
-            .paused_anchor(0, now)?;
-        let body = anchor.encode()?;
-        let reply = self.call("SETRATEANCHORTIME", None, &body)?;
-        ptp::control::validate_reply(&reply, Some(&profile::parse(&body)?))?;
-        self.timing
-            .as_mut()
-            .context("timing absent")?
-            .validate_anchor(&anchor, Instant::now())?;
-        self.last_accepted = "paused anchor";
-        self.anchor_accepted = true;
-        self.stage = Some(Stage::Anchor);
         Ok(())
     }
     /// OwnTone orders initial SETUP, RECORD, then SETPEERS. Stop here for the
@@ -849,7 +725,7 @@ impl Session {
     #[cfg(test)]
     pub fn negotiate_timing_peers(&mut self) -> Result<()> {
         let result = (|| {
-            self.progress_inner(Stage::Record)?;
+            self.record()?;
             self.set_timing_peers()
         })();
         self.finish(result)
@@ -865,6 +741,7 @@ impl Session {
     }
     /// Observe timing on the owning thread between control requests.
     /// Peer traffic is reported only as activity, never synchronization.
+    #[cfg(test)]
     pub fn observe(&mut self, duration: Duration) -> Result<ptp::State> {
         ensure!(
             self.state == State::Timing && !self.observed,
@@ -894,7 +771,7 @@ impl Session {
                     .context("timing absent")?
                     .peer_is_live(Instant::now()),
             );
-            if self.realtime_profile {
+            if self.stage == Some(Stage::Stream) {
                 self.realtime_ready()?;
                 self.realtime_ready_snapshot = true;
             }
@@ -909,14 +786,10 @@ impl Session {
             }
         }
     }
-    #[cfg(test)]
-    fn request_playback(&mut self) -> Result<()> {
-        self.finish(Err(anyhow::anyhow!(PLAYBACK_BLOCKER)))
-    }
     pub fn stop(&mut self) -> Result<()> {
         ensure!(
             !matches!(self.state, State::Closed | State::Failed | State::Stopping),
-            "buffered session already closed"
+            "session already closed"
         );
         let result = self
             .cleanup()
@@ -955,9 +828,6 @@ impl Session {
         }
         self.realtime_transport.take();
         self.realtime_encoder.take();
-        self.prepared.take();
-        self.stream.take();
-        self.anchor_accepted = false;
         let result = (|| {
             if self.attempted_setup {
                 self.teardown = "unacknowledged; remote expiry unconfirmed";
@@ -1054,16 +924,6 @@ impl super::playback::Output for PtpWavOutput<'_> {
     }
 }
 
-fn command_registration() -> Result<zeroize::Zeroizing<Vec<u8>>> {
-    profile::binary(&mut profile::dict([
-        ("type", Value::String("updateMRSupportedCommands".into())),
-        (
-            "params",
-            profile::dict([("mrSupportedCommandsFromSender", Value::Array(vec![]))]),
-        ),
-    ]))
-}
-
 // Only fixed policy field names and numeric/boolean values may reach logs/errors.
 // Never format arbitrary plist values: strings/data/containers can contain secrets.
 fn info_policy_diagnostic(root: &plist::Dictionary) -> String {
@@ -1100,13 +960,12 @@ fn validate_info(
     receiver_id: &str,
     verified_stored_hap: Option<&pairing::VerifiedStoredHap>,
 ) -> Result<()> {
-    validate_info_profile(value, receiver_id, verified_stored_hap, false)
+    validate_info_profile(value, receiver_id, verified_stored_hap)
 }
 fn validate_info_profile(
     value: &Value,
     receiver_id: &str,
     verified_stored_hap: Option<&pairing::VerifiedStoredHap>,
-    realtime_profile: bool,
 ) -> Result<()> {
     let root = profile::dictionary(value)?;
     let id = root
@@ -1115,27 +974,9 @@ fn validate_info_profile(
         .and_then(crate::config::device_id)
         .context("authenticated /info deviceID absent or invalid")?;
     ensure!(id == receiver_id, "authenticated receiver identity changed");
-    let evidence = Evidence::authenticated_info(value);
-    let Claim::Observed(features) = evidence.features else {
-        bail!("authenticated features unavailable");
-    };
-    if realtime_profile {
-        ensure!(features & (1u64 << 41) != 0, "PTP required; no fallback");
-        profile::ptp_capabilities(value)?;
-    } else {
-        ensure!(
-            features & ((1u64 << 40) | (1u64 << 41)) == ((1u64 << 40) | (1u64 << 41)),
-            "buffered audio and PTP required; no fallback"
-        );
-        let format_diagnostic = super::planning::buffered_format_diagnostic(value);
-        tracing::debug!(target: "piair::rtsp", formats = %format_diagnostic,
-        "authenticated buffered format reconciliation");
-        ensure!(
-            matches!(evidence.buffered_formats, Claim::Observed(ref formats) if formats.contains(&21)),
-            "authenticated ALAC24/48000/stereo format unavailable or contradictory: {}",
-            format_diagnostic
-        );
-    }
+    let features =
+        profile::integer(root, "features").context("authenticated features unavailable")?;
+    ensure!(features & (1u64 << 41) != 0, "PTP required; no fallback");
     // Separate authenticated observation, never substituted from mDNS flags/sf.
     // One-time pairing is satisfied only by pinned StoredHap verification on
     // this control wire. Method selection and transient encryption are insufficient.
@@ -1171,6 +1012,7 @@ fn validate_info_profile(
             );
         }
     }
+    profile::ptp_capabilities(value)?;
     Ok(())
 }
 fn initial_offer(

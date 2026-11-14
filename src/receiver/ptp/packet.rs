@@ -219,6 +219,7 @@ impl Packet {
     pub fn port_number(&self) -> u16 {
         u16::from_be_bytes([self.source[8], self.source[9]])
     }
+    #[cfg(test)]
     pub fn timestamp(&self) -> Result<Timestamp> {
         ensure!(self.kind != Kind::Signaling, "signaling has no timestamp");
         ensure!(self.body.len() >= 10, "timestamp body too short");

@@ -1,8 +1,6 @@
-use super::control::{acknowledgement, AnchorRequest, Peers, Rate};
 use super::*;
-use crate::receiver::profile;
 use std::net::{Ipv4Addr, SocketAddr};
-use time::{SampleTimeline, Timestamp};
+use time::Timestamp;
 fn ts(ns: i128) -> Timestamp {
     Timestamp::from_ns(ns).unwrap()
 }
@@ -83,7 +81,7 @@ fn all_message_layouts_and_signed_correction() {
     }
 }
 #[test]
-fn precision_rollover_and_absolute_sample_mapping() {
+fn timestamp_precision_and_rollover() {
     assert_eq!(
         Timestamp::new(7, 500_000_000).unwrap().network(),
         NetworkTime {
@@ -95,112 +93,12 @@ fn precision_rollover_and_absolute_sample_mapping() {
     assert_eq!(Timestamp::decode(&t.encode().unwrap()).unwrap(), t);
     assert!(Timestamp::new(1 << 48, 0).is_err());
     assert!(Timestamp::new(0, 1_000_000_000).is_err());
-    let timeline = SampleTimeline::new(
-        42,
-        0,
-        NetworkTime {
-            seconds: 7,
-            fraction: 1 << 63,
-        },
-        u64::from(u32::MAX) - 100,
-    )
-    .unwrap();
-    let sample = u64::from(u32::MAX) - 100 + 48_000;
-    assert_eq!(
-        timeline.at(sample).unwrap(),
-        NetworkTime {
-            seconds: 8,
-            fraction: 1 << 63
-        }
-    );
-    assert_eq!(sample as u32, 47_899);
-    assert_eq!(
-        timeline.sample_at(timeline.at(sample).unwrap()).unwrap(),
-        sample
-    );
-    // Direct rational conversion retains the fractional low word.
-    let one = timeline.at(u64::from(u32::MAX) - 99).unwrap();
-    assert_eq!(one.fraction - (1 << 63), ((1u128 << 64) / 48_000) as u64);
-    assert_ne!(one.fraction & 0xffff_ffff, 0);
-    assert!(timeline.at(u64::MAX).is_err());
-    assert!(SampleTimeline::new(
-        42,
-        0,
-        NetworkTime {
-            seconds: 0,
-            fraction: 0
-        },
-        100
-    )
-    .unwrap()
-    .at(0)
-    .is_err());
-}
-#[test]
-fn offset_drift_lock_loss_discontinuity_recovery() {
-    // Independent analytical exchange: 1ms path each way, local +2ms.
-    let mut e = Estimator::new();
-    for i in 0..4 {
-        let master = 10_000_000_000 + i * 400_000_000;
-        let drift = i * 40_000; // +100 ppm
-        let m = Measurement::solve(
-            [
-                ts(master),
-                ts(master + 3_000_000 + drift),
-                ts(master + 4_000_000 + drift),
-                ts(master + 3_000_000),
-            ],
-            [0, 0],
-        )
-        .unwrap();
-        assert_eq!(m.delay_scaled, 1_000_000 * 65_536);
-        assert_eq!(m.offset_scaled, (2_000_000 + drift) * 65_536);
-        e.observe(m).unwrap();
-        assert_eq!(
-            e.state,
-            if i == 3 {
-                State::Locked
-            } else {
-                State::Synchronizing
-            }
-        );
-    }
-    assert!((e.drift_ppb - 100_000).abs() < 11);
-    let last = e.last.unwrap();
-    let synchronized = e.network_at(last.local_ns).unwrap();
-    assert_eq!(
-        synchronized.ns(),
-        last.local_ns - last.offset_scaled / 65_536
-    );
-    assert!(e.network_at(last.local_ns + 3_000_000_001).is_err());
-    assert_eq!(e.state, State::Lost);
-    for i in 0..4 {
-        e.observe(Measurement {
-            local_ns: 20_000_000_000 + i * 400_000_000,
-            offset_scaled: 0,
-            delay_scaled: 0,
-        })
-        .unwrap();
-    }
-    assert_eq!(e.state, State::Locked);
-    assert!(e
-        .observe(Measurement {
-            local_ns: 21_600_000_000,
-            offset_scaled: 10_000_000 * 65_536,
-            delay_scaled: 0
-        })
-        .is_err());
-    assert_eq!(e.state, State::Lost);
-    e.shutdown();
-    assert!(e.observe(last).is_err());
-    assert!(Measurement::solve([ts(3), ts(1), ts(0), ts(2)], [0, 0]).is_err());
 }
 #[test]
 fn grandmaster_liveness_is_not_receiver_lock() {
     let now = Instant::now();
     let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
     assert_eq!(c.state(), State::Initializing);
-    assert!(!c.media_permitted());
     let packets = c.due(now).unwrap();
     assert_eq!(packets.len(), 3);
     let sync = &packets[2];
@@ -214,7 +112,6 @@ fn grandmaster_liveness_is_not_receiver_lock() {
     peer(&mut c, now + Duration::from_millis(1), 65535);
     peer(&mut c, now + Duration::from_millis(2), 0); // sequence wrap
     assert_eq!(c.state(), State::PeerObserved);
-    assert!(!c.media_permitted());
     assert!(c
         .receive(
             &request(Kind::DelayReq, 0).encode().unwrap(),
@@ -260,86 +157,6 @@ fn timeout_cancel_clock_reversal_and_pdelay() {
     assert_eq!(response[0].flags, 0x0608);
     assert_eq!(response[0].kind, Kind::PdelayResp);
     assert_eq!(response[0].body[10..], request(Kind::PdelayReq, 12).source);
-}
-#[test]
-fn control_bplist_precision_acknowledgements_and_anchor_generation() {
-    let peers = Peers::new("192.0.2.2".parse().unwrap(), "192.0.2.1".parse().unwrap()).unwrap();
-    assert_eq!(
-        profile::parse(&peers.encode().unwrap()).unwrap(),
-        plist::Value::Array(vec!["192.0.2.2".into(), "192.0.2.1".into()])
-    );
-    assert!(Peers::new("0.0.0.0".parse().unwrap(), "192.0.2.1".parse().unwrap()).is_err());
-    let now = Instant::now();
-    let mut c = Grandmaster::new(
-        0xffff112233445566,
-        0x1122334455667788,
-        now,
-        Duration::from_secs(2),
-    )
-    .unwrap();
-    let mapping = SampleTimeline::new(
-        c.clock_id,
-        c.generation(),
-        NetworkTime {
-            seconds: 1,
-            fraction: (1 << 63) + 123,
-        },
-        0,
-    )
-    .unwrap();
-    assert!(AnchorRequest::generate(&mut c, &mapping, 0, Rate::Play, now).is_err());
-    peer(&mut c, now, 1);
-    let a = AnchorRequest::generate(&mut c, &mapping, 0, Rate::Play, now).unwrap();
-    let bytes = a.encode().unwrap();
-    let v = profile::parse(&bytes).unwrap();
-    let d = v.as_dictionary().unwrap();
-    assert_eq!(
-        d["networkTimeFrac"].as_signed_integer().unwrap() as u64,
-        (1 << 63) + 123
-    );
-    assert_eq!(
-        d["networkTimeTimelineID"].as_signed_integer().unwrap() as u64,
-        c.clock_id
-    );
-    assert_eq!(d["rate"].as_unsigned_integer(), Some(1));
-    // Object marker 0x13 + exact eight bytes, never a 16-byte unsigned integer.
-    assert!(bytes
-        .windows(9)
-        .any(|b| b[0] == 0x13 && b[1..] == c.clock_id.to_be_bytes()));
-    assert!(acknowledgement(&[], None).is_ok());
-    let mut ack = profile::dict([("status", profile::uint(0))]);
-    assert!(acknowledgement(&profile::binary(&mut ack).unwrap(), None).is_ok());
-    let mut ack = profile::dict([("status", profile::uint(1))]);
-    assert_eq!(
-        acknowledgement(&profile::binary(&mut ack).unwrap(), None)
-            .unwrap_err()
-            .to_string(),
-        "timing control rejected in-band: status=1"
-    );
-    let mut malformed = profile::dict([(
-        "status",
-        plist::Value::String("private receiver text".into()),
-    )]);
-    let error = acknowledgement(&profile::binary(&mut malformed).unwrap(), None).unwrap_err();
-    assert_eq!(error.to_string(), "invalid timing control status");
-    assert!(acknowledgement(b"garbage", None).is_err());
-    assert!(acknowledgement(&bytes, Some(&v)).is_ok());
-    let mut bad = v.clone();
-    bad.as_dictionary_mut()
-        .unwrap()
-        .insert("rate".into(), profile::uint(2));
-    assert!(acknowledgement(&profile::binary(&mut bad).unwrap(), Some(&v)).is_err());
-    let stale = SampleTimeline::new(
-        c.clock_id,
-        c.generation() + 1,
-        NetworkTime {
-            seconds: 1,
-            fraction: 0,
-        },
-        0,
-    )
-    .unwrap();
-    assert!(AnchorRequest::generate(&mut c, &stale, 0, Rate::Pause, now).is_err());
 }
 fn udp_pair() -> (UdpSocket, UdpSocket) {
     let a = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -419,262 +236,7 @@ fn socket_peer_mismatch_rejected() {
 }
 
 use crate::receiver::{crypto::ControlKeys, wire::Wire};
-use std::{
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    thread,
-};
-fn read_control(socket: &mut TcpStream, keys: &mut ControlKeys) -> (String, Vec<u8>) {
-    let mut bytes = Vec::new();
-    loop {
-        let mut len = [0; 2];
-        socket.read_exact(&mut len).unwrap();
-        let size = usize::from(u16::from_le_bytes(len));
-        assert!((1..=1024).contains(&size));
-        let mut frame = vec![0; size + 18];
-        frame[..2].copy_from_slice(&len);
-        socket.read_exact(&mut frame[2..]).unwrap();
-        bytes.extend_from_slice(&keys.decrypt(&frame).unwrap());
-        if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-            let header = String::from_utf8(bytes[..i + 4].to_vec()).unwrap();
-            let length = header
-                .lines()
-                .find_map(|l| l.strip_prefix("Content-Length: "))
-                .unwrap()
-                .parse::<usize>()
-                .unwrap();
-            if bytes.len() == i + 4 + length {
-                return (header, bytes[i + 4..].to_vec());
-            }
-        }
-        assert!(bytes.len() < 8192);
-    }
-}
-fn control_reply(
-    socket: &mut TcpStream,
-    keys: &mut ControlKeys,
-    seq: u32,
-    body: &[u8],
-    status: u16,
-) {
-    let mut raw = format!(
-        "RTSP/1.0 {status} response\r\nCSeq: {seq}\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    )
-    .into_bytes();
-    raw.extend_from_slice(body);
-    for chunk in raw.chunks(23) {
-        socket.write_all(&keys.encrypt(chunk).unwrap()).unwrap();
-    }
-}
-fn mock_timing(server: impl FnOnce(TcpStream) + Send + 'static) -> (Wire, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind((Ipv4Addr::new(127, 0, 0, 2), 0)).unwrap();
-    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let t = thread::spawn(move || {
-        let (s, _) = listener.accept().unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        server(s);
-    });
-    let wire = Wire::mock(socket, Duration::from_millis(100), "device:112233445566");
-    (wire, t)
-}
-#[test]
-fn authenticated_timing_control_same_socket_and_failure_semantics() {
-    // 0: accepted; 1: in-band rejection; 2: bad CSeq; 3: RTSP rejection;
-    // 4: contradictory rate; 5: malformed plist; 6: timeout.
-    for fault in 0..7 {
-        let (wire, t) = mock_timing(move |mut socket| {
-            let mut keys = ControlKeys::new(b"timing-test");
-            keys.swap_directions_for_test();
-            let (head, body) = read_control(&mut socket, &mut keys);
-            assert!(head.starts_with("SETPEERS rtsp://127.0.0.2/session RTSP/1.0\r\n"));
-            assert!(head.contains("Content-Type: /peer-list-changed\r\n"));
-            assert_eq!(
-                profile::parse(&body).unwrap(),
-                plist::Value::Array(vec!["127.0.0.2".into(), "127.0.0.1".into()])
-            );
-            control_reply(&mut socket, &mut keys, 1, &[], 200);
-            let (head, body) = read_control(&mut socket, &mut keys);
-            assert!(head.starts_with("SETRATEANCHORTIME rtsp://127.0.0.2/session RTSP/1.0\r\n"));
-            assert!(head.contains("Content-Type: application/x-apple-binary-plist\r\n"));
-            let anchor = profile::parse(&body).unwrap();
-            assert_eq!(
-                anchor.as_dictionary().unwrap()["rate"].as_unsigned_integer(),
-                Some(1)
-            );
-            let response = match fault {
-                1 => profile::binary(&mut profile::dict([("status", profile::uint(1))]))
-                    .unwrap()
-                    .to_vec(),
-                4 => profile::binary(&mut profile::dict([("rate", profile::uint(0))]))
-                    .unwrap()
-                    .to_vec(),
-                5 => b"garbage".to_vec(),
-                _ => Vec::new(),
-            };
-            if fault != 6 {
-                control_reply(
-                    &mut socket,
-                    &mut keys,
-                    if fault == 2 { 3 } else { 2 },
-                    &response,
-                    if fault == 3 { 500 } else { 200 },
-                );
-            }
-            let mut b = [0; 1];
-            assert_eq!(socket.read(&mut b).unwrap(), 0);
-        });
-        let mut wire = wire
-            .secure(
-                ControlKeys::new(b"timing-test"),
-                ControlKeys::events(b"timing-test"),
-            )
-            .unwrap();
-        let _approval = wire.ptp_test_authorization().unwrap();
-        let now = Instant::now();
-        let mut clock =
-            Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
-        peer(&mut clock, now, 1);
-        let timeline = SampleTimeline::new(
-            42,
-            clock.generation(),
-            NetworkTime {
-                seconds: 1,
-                fraction: 1 << 63,
-            },
-            0,
-        )
-        .unwrap();
-        let a = AnchorRequest::generate(&mut clock, &timeline, 0, Rate::Play, now).unwrap();
-        {
-            let mut control = wire
-                .buffered_timing("rtsp://127.0.0.2/session".into(), &clock)
-                .unwrap();
-            control.set_peers().unwrap();
-            let result = control.set_rate_anchor_time(&mut clock, a, Instant::now());
-            assert_eq!(result.is_ok(), fault == 0, "fault {fault}");
-            assert!(control.set_peers().is_err());
-        }
-        if fault != 0 {
-            assert!(wire.is_invalidated());
-        }
-        drop(wire);
-        t.join().unwrap();
-    }
-}
-#[test]
-fn unauthenticated_timing_is_rejected_before_io() {
-    let clock = Grandmaster::new(
-        42,
-        0x1122334455667788,
-        Instant::now(),
-        Duration::from_secs(1),
-    )
-    .unwrap();
-    let (mut wire, t) = mock_timing(|mut socket| {
-        let mut b = [0; 1];
-        assert_eq!(socket.read(&mut b).unwrap(), 0);
-    });
-    assert!(wire
-        .buffered_timing("rtsp://127.0.0.2/session".into(), &clock)
-        .is_err());
-    assert!(wire
-        .start_ptp(
-            42,
-            0x1122334455667788,
-            crate::receiver::lifecycle::TimingPeer::select(
-                &[plist::Value::String("127.0.0.1".into())],
-                "127.0.0.1".parse().unwrap()
-            )
-            .unwrap(),
-            Duration::from_secs(1)
-        )
-        .is_err());
-    drop(wire);
-    t.join().unwrap();
-}
-#[test]
-fn every_timing_state_keeps_buffered_playback_disabled() {
-    let now = Instant::now();
-    let mut clock = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
-    for state in [
-        State::Initializing,
-        State::Synchronizing,
-        State::PeerObserved,
-        State::Locked,
-        State::Lost,
-        State::Shutdown,
-    ] {
-        clock.state = state;
-        assert!(!clock.media_permitted());
-        let mut session = crate::receiver::session::Session::new();
-        assert!(session.start_buffered_audio().is_err());
-    }
-}
-
-fn unhex(s: &str) -> Vec<u8> {
-    s.trim()
-        .as_bytes()
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
-        .collect()
-}
-#[test]
-fn independent_python_plist_fixtures() {
-    let peer_bytes = unhex(include_str!("fixtures/peers.hex"));
-    let peers = Peers::new("192.0.2.2".parse().unwrap(), "192.0.2.1".parse().unwrap()).unwrap();
-    assert_eq!(peers.encode().unwrap().as_slice(), peer_bytes);
-    let anchor_bytes = unhex(include_str!("fixtures/anchor.hex"));
-    let clock_id = (-26263587901610i64) as u64;
-    let now = Instant::now();
-    let mut clock =
-        Grandmaster::new(clock_id, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
-    peer(&mut clock, now, 1);
-    let timeline = SampleTimeline::new(
-        clock_id,
-        clock.generation(),
-        NetworkTime {
-            seconds: 1,
-            fraction: (1 << 63) + 123,
-        },
-        0,
-    )
-    .unwrap();
-    let a = AnchorRequest::generate(&mut clock, &timeline, 0, Rate::Play, now).unwrap();
-    // Same independent encoding byte for byte, including signed 8-byte values.
-    assert_eq!(a.encode().unwrap().as_slice(), anchor_bytes);
-}
-#[test]
-fn timeline_owner_recreation_and_expired_evidence() {
-    let now = Instant::now();
-    let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
-    peer(&mut c, now, 1);
-    let stale = SampleTimeline::new(
-        42,
-        c.generation(),
-        NetworkTime {
-            seconds: 1,
-            fraction: 0,
-        },
-        0,
-    )
-    .unwrap();
-    let mut replacement =
-        Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(1)).unwrap();
-    peer(&mut replacement, now, 1);
-    assert_ne!(c.generation(), replacement.generation());
-    assert!(AnchorRequest::generate(&mut replacement, &stale, 0, Rate::Play, now).is_err());
-    assert!(c.network_time(now + Duration::from_secs(4)).is_err());
-    assert!(c.network_time(now - Duration::from_nanos(1)).is_err());
-    let mut e = Estimator::new();
-    let m = Measurement::solve([ts(1000), ts(1010), ts(1020), ts(1030)], [1, -1]).unwrap();
-    assert_eq!(m.offset_scaled, -1); // correction fractions not truncated to ns
-    e.observe(m).unwrap();
-    assert!(e.observe(m).is_err());
-    assert_eq!(e.state, State::Lost);
-}
+use std::net::{TcpListener, TcpStream};
 
 #[test]
 fn malformed_flood_cannot_create_or_extend_timing_readiness() {
@@ -704,43 +266,6 @@ fn malformed_flood_cannot_create_or_extend_timing_readiness() {
             .is_err());
     }
     assert!(c.check(now + Duration::from_secs(4), false).is_err());
-}
-#[test]
-fn rejected_setpeers_closes_control_without_anchor_or_retry() {
-    let (wire, t) = mock_timing(|mut socket| {
-        let mut keys = ControlKeys::new(b"timing-test");
-        keys.swap_directions_for_test();
-        let (head, _) = read_control(&mut socket, &mut keys);
-        assert!(head.starts_with("SETPEERS "));
-        let body = profile::binary(&mut profile::dict([("status", profile::uint(7))])).unwrap();
-        control_reply(&mut socket, &mut keys, 1, &body, 200);
-        let mut b = [0; 1];
-        assert_eq!(socket.read(&mut b).unwrap(), 0);
-    });
-    let mut wire = wire
-        .secure(
-            ControlKeys::new(b"timing-test"),
-            ControlKeys::events(b"timing-test"),
-        )
-        .unwrap();
-    let _approval = wire.ptp_test_authorization().unwrap();
-    let clock = Grandmaster::new(
-        42,
-        0x1122334455667788,
-        Instant::now(),
-        Duration::from_secs(1),
-    )
-    .unwrap();
-    {
-        let mut control = wire
-            .buffered_timing("rtsp://127.0.0.2/session".into(), &clock)
-            .unwrap();
-        assert!(control.set_peers().is_err());
-        assert!(control.set_peers().is_err());
-    }
-    assert!(wire.is_invalidated());
-    drop(wire);
-    t.join().unwrap();
 }
 
 /// Network fixtures opt in to real allowlist/selection checks. Mock encryption
@@ -799,69 +324,6 @@ fn assert_service_closed(
     assert!(service.event.is_none() && service.general.is_none());
     let _event = UdpSocket::bind(event).unwrap();
     let _general = UdpSocket::bind(general).unwrap();
-}
-#[test]
-fn ptp_requires_both_authentication_and_concrete_authorization() {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (_receiver, _) = listener.accept().unwrap();
-    let mut wire = Wire::mock(socket, Duration::from_secs(1), "device:112233445566");
-    let _approval = wire.ptp_test_authorization().unwrap();
-    assert!(wire.ptp_lease().is_err()); // allowlist alone is not authentication
-    assert!(wire
-        .start_ptp(
-            42,
-            0x1122334455667788,
-            crate::receiver::lifecycle::TimingPeer::select(
-                &[plist::Value::String("127.0.0.1".into())],
-                "127.0.0.1".parse().unwrap()
-            )
-            .unwrap(),
-            Duration::from_secs(1)
-        )
-        .is_err());
-    let mut wire = wire
-        .secure(
-            ControlKeys::new(b"ptp-fixture"),
-            ControlKeys::events(b"ptp-fixture"),
-        )
-        .unwrap();
-    assert!(wire.ptp_lease().is_ok());
-    wire.close();
-    assert!(wire.ptp_lease().is_err());
-
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (_receiver, _) = listener.accept().unwrap();
-    let mut wire = Wire::mock(socket, Duration::from_secs(1), "device:112233445566")
-        .secure(
-            ControlKeys::new(b"ptp-fixture"),
-            ControlKeys::events(b"ptp-fixture"),
-        )
-        .unwrap();
-    assert!(wire.ptp_lease().is_err()); // keys alone cannot use legacy None leases
-    assert!(wire
-        .start_ptp(
-            42,
-            0x1122334455667788,
-            crate::receiver::lifecycle::TimingPeer::select(
-                &[plist::Value::String("127.0.0.1".into())],
-                "127.0.0.1".parse().unwrap()
-            )
-            .unwrap(),
-            Duration::from_secs(1)
-        )
-        .is_err());
-    assert!(wire
-        .buffered_timing("rtsp://127.0.0.1/session".into(), &fixture_clock())
-        .is_err());
-    // Direct control construction cannot bypass the same mandatory boundary.
-    assert!(super::control::Control::new(
-        &mut wire,
-        "rtsp://127.0.0.1/session".into(),
-        &fixture_clock()
-    )
-    .is_err());
 }
 #[test]
 fn revoked_capability_rejects_attachment_and_releases_sockets_without_traffic() {
@@ -985,33 +447,6 @@ fn matching_socket_peers_cannot_target_another_receiver_with_a_valid_capability(
 }
 
 #[test]
-fn timing_control_revocation_closes_without_sending_a_request() {
-    let (wire, receiver) = mock_timing(|mut socket| {
-        let mut byte = [0; 1];
-        assert_eq!(socket.read(&mut byte).unwrap(), 0);
-    });
-    let mut wire = wire
-        .secure(
-            ControlKeys::new(b"timing-test"),
-            ControlKeys::events(b"timing-test"),
-        )
-        .unwrap();
-    let approval = wire.ptp_test_authorization().unwrap();
-    let clock = fixture_clock();
-    {
-        let mut control = wire
-            .buffered_timing("rtsp://127.0.0.2/session".into(), &clock)
-            .unwrap();
-        std::fs::write(approval.path().join("config.toml"), "receiver_allowlist=[]").unwrap();
-        assert!(control.set_peers().is_err());
-        assert!(control.set_peers().is_err());
-    }
-    assert!(wire.is_invalidated());
-    drop(wire);
-    receiver.join().unwrap();
-}
-
-#[test]
 fn apple_follow_up_known_answer_and_conflicting_extensions() {
     // Independent literal: 34-byte header, timestamp 1.5 s, IEEE TLV (28)
     // then Apple OUI/subtype 4 (16): clock identity + two padding bytes.
@@ -1053,7 +488,6 @@ fn apple_follow_up_known_answer_and_conflicting_extensions() {
     c.receive(&sync.encode().unwrap(), now).unwrap();
     c.receive_general(&bytes, now).unwrap();
     assert_eq!(c.state(), State::PeerObserved);
-    assert!(!c.media_permitted());
     peer(&mut c, now, 1);
     let mut wrong_port = p;
     wrong_port.source[9] ^= 1;
@@ -1137,7 +571,6 @@ fn connected_udp_rejects_unsolicited_source_and_authenticated_clock_mismatch() {
     assert!(service.clock.last_peer.is_some());
     assert_eq!(service.evidence().delay_requests, 1);
     assert_eq!(service.evidence().delay_responses_sent, 1);
-    assert!(!service.clock.media_permitted());
 }
 
 // Reconstructed from reported Stua firmware 27.2 header fields, not a capture.
@@ -1259,7 +692,6 @@ fn stua_delay_exchange_preserves_validation_and_timestamp() {
             response
         );
         assert_eq!(clock.state(), State::PeerObserved);
-        assert!(!clock.media_permitted());
         assert!(clock.receive(&bytes, received).is_err());
         let mut standard = bytes;
         standard[32] = 1;
@@ -1309,7 +741,6 @@ fn stua_delay_req_service_routes_response_to_general_channel() {
         assert_eq!(response.body[10..], stua_delay_req(sequence)[20..30]);
         assert!((before.ns()..=after.ns()).contains(&response.timestamp().unwrap().ns()));
         assert_eq!(service.state(), State::PeerObserved);
-        assert!(!service.clock.media_permitted());
         no_datagram(&peer_event);
     }
     assert_eq!(service.diagnostics.exchanges, Diagnostics::LIMIT);
@@ -1358,7 +789,6 @@ fn inbound_sync_observed_but_conflicting_timeline_never_adopted() {
     let now = Instant::now();
     let mut clock = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(5)).unwrap();
     peer(&mut clock, now, 1);
-    let generation = clock.generation();
     let mut sync = request(Kind::Sync, 0x1234);
     sync.flags = 0x0608;
     sync.interval = -3;
@@ -1406,9 +836,7 @@ fn inbound_sync_observed_but_conflicting_timeline_never_adopted() {
     assert!(clock
         .receive(&wrong.encode().unwrap(), now + Duration::from_secs(2))
         .is_err());
-    assert_eq!(clock.generation(), generation);
     assert_eq!(clock.state(), State::PeerObserved);
-    assert!(!clock.media_permitted());
     assert!(clock
         .check(now + Duration::from_millis(4001), false)
         .is_err());
@@ -1488,7 +916,6 @@ fn apple_tv_single_delay_then_ten_seconds_of_validated_observations() {
     let now = Instant::now();
     let mut c = Grandmaster::new(42, 0x1122334455667788, now, Duration::from_secs(2)).unwrap();
     peer(&mut c, now, 1);
-    let generation = c.generation();
     for second in 1..=10 {
         let at = now + Duration::from_secs(second);
         let mut sync = request(Kind::Sync, second as u16);
@@ -1511,8 +938,6 @@ fn apple_tv_single_delay_then_ten_seconds_of_validated_observations() {
         c.check(at, false).unwrap();
         assert_eq!(c.state(), State::PeerObserved);
         assert_eq!(c.clock_id, 42);
-        assert_eq!(c.generation(), generation);
-        assert!(!c.media_permitted());
     }
     // Rejected identities, changed role ports, wrong targets and replay cannot
     // keep a silent receiver alive. Poll continuously to isolate peer expiry.
@@ -1589,7 +1014,6 @@ fn service_reports_each_validated_message_and_rejection_separately() {
     assert_eq!(evidence.general_received, 3);
     assert_eq!(evidence.rejected, 2);
     assert_eq!(service.clock.clock_id, 42);
-    assert!(!service.clock.media_permitted());
 }
 
 #[test]
@@ -1630,7 +1054,6 @@ fn zero_source_port_is_rejected_before_any_observation() {
         };
         assert!(result.is_err());
         assert!(clock.last_peer.is_none());
-        assert!(!clock.media_permitted());
     }
 }
 
@@ -1675,7 +1098,6 @@ fn unsupported_and_malformed_sync_cannot_pin_or_refresh_peer() {
             .values()
             .all(|p| p.sequences[Kind::Sync as usize].is_none() && p.sync.is_none()));
         assert_eq!(clock.clock_id, 42);
-        assert!(!clock.media_permitted());
     }
     // Invalid Sync did not consume this sequence or prevent a supported one.
     assert!(clock

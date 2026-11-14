@@ -123,7 +123,7 @@ a private 0700 directory and 0600 files. It guides your audio input and explicit
 receiver approval/authentication, and can use the installed 49-second recording.
 The service template is installed, but playback and boot startup each require
 explicit approval in setup. See [setup](SETUP.md)
-and [daily use](DAILY_USE.md).
+and [daily use](OPERATIONS.md).
 
 ## Update or uninstall
 
@@ -160,7 +160,7 @@ systemctl status piair@USERNAME.service
 - **Wrong platform:** use Raspberry Pi OS 64-bit Bookworm or newer. Neither Rust,
   Cargo, Git, Docker nor compilation is needed on the Pi.
 - **ALSA missing:** install `libasound2` (or its compatible replacement on newer
-  OS releases). Audio device permissions are separate; see [systemd](SYSTEMD.md).
+  OS releases). Audio device permissions are separate; see [systemd](OPERATIONS.md).
 - **No systemd or sudo authorization:** ask the system administrator. Maintenance
   does not modify sudoers or install authorization helpers.
 - **Existing unmanaged or changed files:** the installer refuses to overwrite
@@ -207,7 +207,7 @@ Root owns `/usr/local/bin/piair` (0755), `/etc/systemd/system/piair@.service`
 (0644), and `/usr/local/share/piair/` resources and maintenance metadata (0644).
 No file capabilities are installed. The unchanged stock service supplies
 CAP_NET_BIND_SERVICE to the normal user with NoNewPrivileges and existing
-restrictions; the standalone development capability helper stays separate.
+restrictions.
 
 The entry point trusts the official repository's `main/install.sh` over HTTPS.
 It uses GitHub's `/releases/latest` endpoint and additionally rejects draft,

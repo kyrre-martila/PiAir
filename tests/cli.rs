@@ -167,7 +167,7 @@ fn alsa_file_fixture_preserves_right_channel_and_sample_time_transitions() {
 
 #[test]
 fn receiver_identity_operations_fail_closed_without_interaction_or_discovery() {
-    for command in ["pair", "authenticate", "select"] {
+    for command in ["pair", "select"] {
         for id in [
             "Living Room",
             "192.0.2.1",
@@ -208,7 +208,8 @@ fn approved_pairing_refuses_piped_input_and_local_commands_do_not_connect() {
         assert!(output.status.success());
         assert!(listener.accept().is_err());
     }
-    for command in ["pair", "authenticate"] {
+    {
+        let command = "pair";
         let output = Command::new(env!("CARGO_BIN_EXE_piair"))
             .arg("--config")
             .arg(&path)
@@ -238,172 +239,12 @@ fn pairing_profile_is_explicit_and_never_auto_negotiated() {
 }
 
 #[test]
-fn control_diagnostic_is_opt_in_and_cannot_bypass_authentication() {
-    assert!(run(&["authenticate", "--help"]).status.success());
-    let output = run(&["authenticate", "device:aabbccddeeff", "--control-check"]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("not approved"));
-    assert_eq!(run(&["status", "--control-check"]).status.code(), Some(2));
-    assert_eq!(
-        run(&["pair", "device:aabbccddeeff", "--control-check"])
-            .status
-            .code(),
-        Some(2)
-    );
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    std::fs::write(&path, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_piair"))
-        .arg("--config")
-        .arg(path)
-        .args(["authenticate", "device:aabbccddeeff", "--control-check"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
-    assert!(!dir.path().join("receiver-state").exists());
-}
-
-#[test]
-fn realtime_diagnostic_requires_approval_interaction_and_bounded_duration() {
-    for duration in ["0", "4"] {
-        assert_eq!(
-            run(&["stream-test", "device:aabbccddeeff", "--seconds", duration])
-                .status
-                .code(),
-            Some(2)
-        );
-    }
-    let unapproved = run(&["stream-test", "device:aabbccddeeff"]);
-    assert!(!unapproved.status.success());
-    assert!(String::from_utf8_lossy(&unapproved.stderr).contains("not approved"));
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    std::fs::write(&path, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_piair"))
-        .arg("--config")
-        .arg(path)
-        .args(["stream-test", "device:aabbccddeeff"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
-    assert!(!dir.path().join("receiver-state").exists());
-}
-
-#[test]
-fn pyatv_preamble_option_is_authenticate_only_and_disabled_by_default() {
-    let help = run(&["authenticate", "--help"]);
-    assert!(help.status.success());
-    assert!(String::from_utf8(help.stdout)
-        .unwrap()
-        .contains("--experimental-pyatv-transient-preamble"));
-    for command in ["pair", "stream-test", "select"] {
-        let output = run(&[
-            command,
-            "device:aabbccddeeff",
-            "--experimental-pyatv-transient-preamble",
-        ]);
-        assert_eq!(output.status.code(), Some(2));
-    }
-}
-
-#[test]
-fn owntone_experiment_is_authentication_or_explicit_setup_only_and_mutually_exclusive() {
-    let flag = "--experimental-owntone-transient";
-    let help = run(&["authenticate", "--help"]);
-    assert!(String::from_utf8(help.stdout).unwrap().contains(flag));
-    let help = run(&["stream-test", "--help"]);
-    assert!(String::from_utf8(help.stdout).unwrap().contains(flag));
-    let allowed = run(&["stream-test", "device:aabbccddeeff", "--setup-check", flag]);
-    assert_eq!(allowed.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&allowed.stderr).contains("not approved"));
-    let picker = run(&["stream-test", "--setup-check", flag]);
-    assert_eq!(picker.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&picker.stderr).contains("interactive terminal"));
-    for extra in [
-        vec!["--setup-profile", "a"],
-        vec!["--setup-profile", "b"],
-        vec!["--setup-profile", "c"],
-    ] {
-        let mut args = vec!["stream-test", "--setup-check", flag];
-        if !extra.is_empty() {
-            args.insert(1, "device:aabbccddeeff");
-        }
-        args.extend(extra);
-        assert_eq!(run(&args).status.code(), Some(2));
-    }
-    for command in ["pair", "stream-test", "select"] {
-        assert_eq!(
-            run(&[command, "device:aabbccddeeff", flag]).status.code(),
-            Some(2)
-        );
-    }
-    assert_eq!(
-        run(&[
-            "authenticate",
-            "device:aabbccddeeff",
-            flag,
-            "--experimental-pyatv-transient-preamble"
-        ])
-        .status
-        .code(),
-        Some(2)
-    );
-    assert!(
-        String::from_utf8_lossy(&run(&["authenticate", "device:aabbccddeeff", flag]).stderr)
-            .contains("not approved")
-    );
-}
-
-#[test]
-fn setup_profiles_are_explicit_setup_only_and_keep_authorization() {
-    for profile in ["a", "b", "c"] {
-        assert_eq!(
-            run(&[
-                "stream-test",
-                "device:aabbccddeeff",
-                "--setup-profile",
-                profile
-            ])
-            .status
-            .code(),
-            Some(2)
-        );
-        let output = run(&[
-            "stream-test",
-            "device:aabbccddeeff",
-            "--setup-check",
-            "--setup-profile",
-            profile,
-        ]);
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("not approved"));
-    }
-    assert_eq!(
-        run(&[
-            "stream-test",
-            "device:aabbccddeeff",
-            "--setup-check",
-            "--setup-profile",
-            "d"
-        ])
-        .status
-        .code(),
-        Some(2)
-    );
-}
-
-#[test]
 fn interactive_commands_fail_before_discovery_or_state_writes_without_terminal() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
     std::fs::write(&config, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
-    for args in [
-        vec!["pairing"],
-        vec!["stream-test"],
-        vec!["stream-test", "--setup-check", "--volume-db", "-15"],
-    ] {
+    {
+        let args = ["pairing"];
         let output = Command::new(env!("CARGO_BIN_EXE_piair"))
             .arg("--config")
             .arg(&config)
@@ -429,99 +270,6 @@ fn pairing_help_identifies_enrollment_prerequisites() {
 }
 
 #[test]
-fn record_diagnostic_accepts_allowlisted_id_but_requires_terminal_before_discovery() {
-    use std::fs;
-    let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("piair.toml");
-    fs::write(&config, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_piair"))
-        .args([
-            "--config",
-            config.to_str().unwrap(),
-            "stream-test",
-            "device:aabbccddeeff",
-            "--record-check",
-            "--experimental-owntone-transient",
-        ])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
-    assert!(!dir.path().join("receiver-state").exists());
-}
-
-#[test]
-fn stream_diagnostics_require_terminal_without_state_or_contact() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("piair.toml");
-    std::fs::write(&config, "receiver_allowlist=['device:aabbccddeeff']").unwrap();
-    for mode in ["--stream-setup-check", "--playback-check"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_piair"))
-            .args([
-                "--config",
-                config.to_str().unwrap(),
-                "stream-test",
-                "device:aabbccddeeff",
-                mode,
-                "--experimental-owntone-transient",
-            ])
-            .output()
-            .unwrap();
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
-        assert!(!dir.path().join("receiver-state").exists());
-    }
-}
-
-#[test]
-fn hap_diagnostics_and_legacy_aliases_require_authorization_without_contact() {
-    for mode in [
-        "hap-stream-setup-check",
-        "hap-playback-check",
-        "stua-stream-setup-check",
-        "stua-playback-check",
-    ] {
-        let picker = run(&[mode]);
-        assert_eq!(picker.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&picker.stderr).contains("interactive terminal"));
-        for id in ["Stua", "device:02D899C1833F", "device:02d899c1833f:7000"] {
-            let output = run(&[mode, id]);
-            assert_eq!(output.status.code(), Some(1));
-            assert!(String::from_utf8(output.stderr)
-                .unwrap()
-                .contains("exact stable device:"));
-        }
-        for flag in [
-            "--seconds=1",
-            "--experimental-owntone-transient",
-            "--setup-profile=a",
-            "--playback-check",
-        ] {
-            assert_eq!(
-                run(&[mode, "device:02d899c1833f", flag]).status.code(),
-                Some(2)
-            );
-        }
-        let output = run(&[mode, "device:02d899c1833f", "--volume-db=-40"]);
-        assert_eq!(
-            output.status.code(),
-            Some(if mode.ends_with("playback-check") {
-                1
-            } else {
-                2
-            })
-        );
-        for id in ["device:112233445566", "device:66778899aabb"] {
-            let output = run(&[mode, id]);
-            assert_eq!(output.status.code(), Some(1));
-            assert!(String::from_utf8(output.stderr)
-                .unwrap()
-                .contains("not approved"));
-        }
-    }
-}
-
-#[test]
 fn stored_hap_operation_method_cannot_be_selected_for_enrollment() {
     assert_eq!(
         run(&["select", "device:02d899c1833f", "--method", "stored-hap"])
@@ -529,199 +277,6 @@ fn stored_hap_operation_method_cannot_be_selected_for_enrollment() {
             .code(),
         Some(2)
     );
-}
-
-#[test]
-fn passive_receiver_plan_help_and_auth_intent_contract_are_device_free() {
-    let help = run(&["receiver-plan", "--help"]);
-    assert!(help.status.success());
-    let help = String::from_utf8(help.stdout).unwrap();
-    assert!(help.contains("no receiver connections or state writes"));
-    assert!(help.contains("--method"));
-    for args in [
-        vec!["receiver-plan", "--method", "auto"],
-        vec!["receiver-plan", "--method", "stored-hap"],
-        vec!["receiver-plan", "device:aabbccddeeff"],
-        vec!["receiver-plan", "--play"],
-    ] {
-        assert_eq!(run(&args).status.code(), Some(2));
-    }
-}
-
-#[test]
-fn buffered_audio_intent_fails_locally_without_selection_discovery_or_confirmation() {
-    for extra in [vec![], vec!["--confirm-audio"]] {
-        let args: Vec<_> = ["buffered-test", "device:112233445566"]
-            .into_iter()
-            .chain(extra)
-            .collect();
-        let output = run(&args);
-        assert!(!output.status.success());
-        assert!(String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("clock adoption is unverified"));
-    }
-    assert!(run(&["buffered-test", "--help"]).status.success());
-    assert_eq!(run(&["buffered-test"]).status.code(), Some(2));
-    assert_eq!(
-        run(&[
-            "buffered-test",
-            "device:112233445566",
-            "--setup-check",
-            "--confirm-audio"
-        ])
-        .status
-        .code(),
-        Some(2)
-    );
-    assert!(
-        !run(&["buffered-test", "device:112233445566", "--setup-check"])
-            .status
-            .success()
-    );
-}
-
-#[test]
-fn buffered_control_checks_are_explicit_and_noninteractive_runs_fail_closed() {
-    for stage in ["record", "stream", "anchor"] {
-        let output = run(&[
-            "buffered-test",
-            "device:112233445566",
-            "--control-check",
-            stage,
-        ]);
-        assert!(!output.status.success());
-        for conflict in ["--confirm-audio", "--setup-check"] {
-            assert_eq!(
-                run(&[
-                    "buffered-test",
-                    "device:112233445566",
-                    "--control-check",
-                    stage,
-                    conflict
-                ])
-                .status
-                .code(),
-                Some(2)
-            );
-        }
-    }
-    assert_eq!(
-        run(&[
-            "buffered-test",
-            "device:112233445566",
-            "--control-check",
-            "play"
-        ])
-        .status
-        .code(),
-        Some(2)
-    );
-}
-
-#[test]
-fn wav_diagnostic_arguments_fail_before_receiver_contact() {
-    let base = [
-        "stream-test",
-        "device:0a05559f132f",
-        "--experimental-owntone-transient",
-        "--audio-file",
-        "tests/assets/audio/Pachelbel_Canon_audio_test.wav",
-    ];
-    for extra in [
-        vec!["--seconds", "50"],
-        vec!["--volume-db", "-9"],
-        vec!["--playback-check"],
-        vec!["--setup-check"],
-        vec!["--record-check"],
-        vec!["--stream-setup-check"],
-    ] {
-        let args: Vec<_> = base.iter().copied().chain(extra).collect();
-        assert_eq!(run(&args).status.code(), Some(2));
-    }
-    let bad = run(&[
-        "stream-test",
-        "--experimental-owntone-transient",
-        "--audio-file",
-        "/no-such-piair-test.wav",
-    ]);
-    assert!(!bad.status.success());
-    assert!(String::from_utf8_lossy(&bad.stderr).contains("open WAV"));
-}
-
-#[test]
-fn stored_hap_wav_accepts_full_command_but_requires_interactive_confirmation() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("config.toml");
-    std::fs::write(&config, "receiver_allowlist=['device:02d899c1833f']").unwrap();
-    let output = run(&[
-        "--config",
-        config.to_str().unwrap(),
-        "stream-test",
-        "device:02d899c1833f",
-        "--audio-file",
-        "tests/assets/audio/Pachelbel_Canon_audio_test.wav",
-        "--seconds",
-        "30",
-        "--volume-db",
-        "-20",
-    ]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("interactive terminal and explicit confirmation"));
-    let invalid = run(&["stream-test", "--audio-file", "/no-such-piair-test.wav"]);
-    assert_eq!(invalid.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&invalid.stderr).contains("open WAV"));
-}
-
-#[test]
-fn automatic_capture_requires_explicit_receiver_device_and_valid_durations() {
-    let help = run(&["automatic-ptp-capture", "--help"]);
-    assert!(help.status.success());
-    let help = String::from_utf8_lossy(&help.stdout);
-    for flag in [
-        "--threshold-dbfs",
-        "--start-duration-ms",
-        "--stop-duration-ms",
-        "--experimental-owntone-transient",
-    ] {
-        assert!(help.contains(flag));
-    }
-    assert_eq!(run(&["automatic-ptp-capture"]).status.code(), Some(2));
-    assert_eq!(
-        run(&["automatic-ptp-capture", "device:112233445566"])
-            .status
-            .code(),
-        Some(2)
-    );
-    for (flag, value) in [
-        ("--start-duration-ms", "0"),
-        ("--start-duration-ms", "9001"),
-        ("--stop-duration-ms", "120001"),
-    ] {
-        assert_eq!(
-            run(&[
-                "automatic-ptp-capture",
-                "device:112233445566",
-                "--capture-device",
-                "never-open",
-                flag,
-                value
-            ])
-            .status
-            .code(),
-            Some(2)
-        );
-    }
-    let output = run(&[
-        "automatic-ptp-capture",
-        "device:112233445566",
-        "--capture-device",
-        "never-open",
-    ]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("receiver is not approved"));
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("ALSA"));
 }
 
 #[test]
@@ -844,40 +399,6 @@ fn ordinary_help_focuses_on_daily_use_and_keeps_manual_tools() {
 }
 
 #[test]
-fn hidden_diagnostics_keep_their_own_help_arguments_and_aliases() {
-    let ordinary = String::from_utf8(run(&["--help"]).stdout).unwrap();
-    for (command, argument) in [
-        ("run", "--allow-unattended"),
-        ("receiver-plan", "--method"),
-        ("authenticate", "--control-check"),
-        ("stream-test", "--audio-file"),
-        ("ptp-negotiation-check", "--observation-seconds"),
-        ("ptp-wav-playback", "--audio-file"),
-        ("experimental-ptp-capture", "--capture-device"),
-        ("automatic-ptp-capture", "--threshold-dbfs"),
-        ("buffered-test", "--confirm-audio"),
-        ("hap-stream-setup-check", "[RECEIVER_ID]"),
-        ("hap-playback-check", "--volume-db"),
-        ("stua-stream-setup-check", "[RECEIVER_ID]"),
-        ("stua-playback-check", "--volume-db"),
-    ] {
-        assert!(!ordinary
-            .lines()
-            .any(|line| line.trim_start().starts_with(&format!("{command} "))));
-        let output = run(&[command, "--help"]);
-        assert!(output.status.success(), "{command}");
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains(argument),
-            "{command}"
-        );
-        assert_eq!(run(&[command, "--unknown-option"]).status.code(), Some(2));
-    }
-    for command in ["update", "uninstall"] {
-        assert!(run(&[command, "--help"]).status.success());
-    }
-}
-
-#[test]
 fn command_errors_are_readable_except_in_unattended_json_mode() {
     for verbosity in [None, Some("-v"), Some("-vv")] {
         for unattended in [false, true] {
@@ -921,4 +442,41 @@ fn development_executable_can_observe_but_cannot_control_installed_service() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("Invoking executable: not verified as installed PiAir"));
     assert!(text.contains("Foreground candidate playback remains available"));
+}
+
+#[test]
+fn retired_hap_wrappers_are_not_commands() {
+    for command in [
+        "hap-stream-setup-check",
+        "hap-playback-check",
+        "stua-stream-setup-check",
+        "stua-playback-check",
+    ] {
+        assert_eq!(run(&[command, "--help"]).status.code(), Some(2));
+    }
+}
+
+#[test]
+fn development_commands_are_removed_even_when_requesting_help() {
+    for command in [
+        "receiver-plan",
+        "authenticate",
+        "stream-test",
+        "ptp-negotiation-check",
+        "ptp-wav-playback",
+        "experimental-ptp-capture",
+        "automatic-ptp-capture",
+        "buffered-test",
+    ] {
+        for args in [
+            vec![command],
+            vec![command, "--help"],
+            vec!["help", command],
+        ] {
+            assert_eq!(run(&args).status.code(), Some(2), "{args:?}");
+        }
+    }
+    for command in ["run", "service-recording"] {
+        assert!(run(&[command, "--help"]).status.success());
+    }
 }

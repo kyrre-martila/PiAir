@@ -378,27 +378,6 @@ fn hap_runtime_network_lease_keeps_persisted_selection_and_credential_checks() {
 }
 
 #[test]
-fn interactive_automatic_entry_still_requires_terminal_authorization() {
-    let (_dir, loaded, _) = fixture(Method::Transient);
-    let state = loaded
-        .path
-        .parent()
-        .unwrap()
-        .join("receiver-state/selected.toml");
-    let before = fs::read(&state).unwrap();
-    let error = crate::receiver::automatic_capture(
-        &loaded,
-        ID,
-        "never-open",
-        None,
-        true,
-        settings(Authentication::OwnToneTransient).detection,
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("interactive confirmation"));
-    assert_eq!(fs::read(state).unwrap(), before);
-}
-#[test]
 fn cancellation_during_backoff_does_not_wait_for_retry_deadline() {
     let cancel = Arc::new(AtomicBool::new(false));
     let mut driver = synthetic(cancel.clone());

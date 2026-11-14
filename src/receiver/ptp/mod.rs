@@ -10,120 +10,24 @@ use std::{
     collections::BTreeMap,
     io,
     net::UdpSocket,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-use time::{Measurement, NetworkTime, Timestamp};
+use time::{NetworkTime, Timestamp};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Initializing,
     Synchronizing,
     PeerObserved,
-    Locked,
     Lost,
     Shutdown,
 }
 
-/// Independent follower estimator; not used to elect a receiver as grandmaster.
-/// The owner must correlate all four timestamps and identities before submission.
-pub struct Estimator {
-    state: State,
-    generation: u64,
-    first: Option<Measurement>,
-    last: Option<Measurement>,
-    count: u8,
-    drift_ppb: i128,
-}
-impl Estimator {
-    pub fn new() -> Self {
-        Self {
-            state: State::Initializing,
-            generation: 0,
-            first: None,
-            last: None,
-            count: 0,
-            drift_ppb: 0,
-        }
-    }
-    pub fn invalidate(&mut self) {
-        self.state = State::Lost;
-        self.first = None;
-        self.last = None;
-        self.count = 0;
-        self.generation = self.generation.saturating_add(1);
-    }
-    pub fn observe(&mut self, m: Measurement) -> Result<()> {
-        ensure!(self.state != State::Shutdown, "estimator shut down");
-        if let Some(last) = self.last {
-            let dt = m.local_ns - last.local_ns;
-            if !(1_000_000..=3_000_000_000).contains(&dt) {
-                self.invalidate();
-                anyhow::bail!("stale or discontinuous exchange");
-            }
-            let change = m.offset_scaled - last.offset_scaled;
-            if change.abs() > 5_000_000 * 65_536 {
-                self.invalidate();
-                anyhow::bail!("clock offset discontinuity");
-            }
-        }
-        let first = *self.first.get_or_insert(m);
-        let span = m.local_ns - first.local_ns;
-        if span > 0 {
-            self.drift_ppb =
-                (m.offset_scaled - first.offset_scaled) * 1_000_000_000 / (span * 65_536);
-            if self.drift_ppb.abs() > 500_000 {
-                self.invalidate();
-                anyhow::bail!("clock drift outside bound");
-            }
-        }
-        self.count = self.count.saturating_add(1);
-        self.last = Some(m);
-        self.state = if self.count >= 4 && span >= 1_000_000_000 {
-            State::Locked
-        } else {
-            State::Synchronizing
-        };
-        Ok(())
-    }
-    pub fn network_at(&mut self, local_ns: i128) -> Result<Timestamp> {
-        let last = self.last.context("no timing evidence")?;
-        let dt = local_ns - last.local_ns;
-        if !(0..=3_000_000_000).contains(&dt) {
-            self.invalidate();
-        }
-        ensure!(self.state == State::Locked, "clock not locked");
-        Timestamp::from_ns(
-            local_ns - last.offset_scaled / 65_536 - dt * self.drift_ppb / 1_000_000_000,
-        )
-    }
-    pub fn shutdown(&mut self) {
-        self.invalidate();
-        self.state = State::Shutdown;
-    }
-}
-
-// Process-local generation IDs prevent stale mappings surviving owner recreation.
-static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
-fn next_generation() -> Result<u64> {
-    let mut n = NEXT_GENERATION.load(Ordering::Relaxed);
-    loop {
-        let next = n.checked_add(1).context("clock generation exhausted")?;
-        match NEXT_GENERATION.compare_exchange_weak(n, next, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => return Ok(n),
-            Err(current) => n = current,
-        }
-    }
-}
-
-/// A fixed single-peer grandmaster, using an explicitly chosen local epoch.
-/// All incoming datagrams must come from an already authorized connected socket.
-/// Fresh validated peer traffic is liveness, never remote offset or lock evidence.
 pub struct Grandmaster {
     clock_id: u64,
     peer_clock_id: u64,
     state: State,
-    generation: u64,
     epoch: Instant,
     deadline: Instant,
     last_tick: Instant,
@@ -166,7 +70,6 @@ impl Grandmaster {
             clock_id,
             peer_clock_id,
             state: State::Initializing,
-            generation: next_generation()?,
             epoch: now,
             deadline: now + setup_timeout,
             last_tick: now,
@@ -183,9 +86,6 @@ impl Grandmaster {
     }
     pub fn state(&self) -> State {
         self.state
-    }
-    pub fn generation(&self) -> u64 {
-        self.generation
     }
     fn lose(&mut self) {
         self.state = State::Lost;
@@ -447,10 +347,7 @@ impl Grandmaster {
         self.ports.clear();
         self.last_peer = None;
     }
-    /// Timing alone never grants media; the active session owns operational readiness.
-    pub fn media_permitted(&self) -> bool {
-        false
-    }
+    // Timing alone never grants media; the active session owns operational readiness.
 }
 impl Drop for Grandmaster {
     fn drop(&mut self) {
@@ -697,6 +594,7 @@ impl Service {
     pub fn clock(&self) -> &Grandmaster {
         &self.clock
     }
+    #[cfg(test)]
     pub fn clock_mut(&mut self) -> &mut Grandmaster {
         &mut self.clock
     }

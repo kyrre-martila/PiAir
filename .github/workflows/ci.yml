@@ -49,7 +49,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - name: Validate service and standalone capability helper
+      - name: Validate service, installation and maintenance
         run: |
           command -v systemd-analyze
           python3 -m unittest discover -s scripts -p 'test_*.py'
