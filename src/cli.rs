@@ -225,18 +225,6 @@ pub enum Command {
         #[arg(long)]
         confirm_audio: bool,
     },
-    /// Stored HAP: validate stream SETUP with zero audio/volume changes; omit ID for picker.
-    #[command(hide = true, visible_alias = "stua-stream-setup-check")]
-    HapStreamSetupCheck { receiver_id: Option<String> },
-    /// Stored HAP: one second faded tone, persistent receiver volume, two seconds silent drain.
-    #[command(hide = true, visible_alias = "stua-playback-check")]
-    HapPlaybackCheck {
-        /// Canonical ID; omit to use the existing interactive receiver picker.
-        receiver_id: Option<String>,
-        /// Receiver volume in dB (-40 through -10); may persist after the test.
-        #[arg(long, default_value_t = -40, allow_negative_numbers = true, value_parser = clap::value_parser!(i32).range(-40..=-10))]
-        volume_db: i32,
-    },
     /// Remove local credentials without contacting the receiver.
     Unpair { receiver_id: String },
     /// Validate or display effective configuration.
@@ -555,53 +543,6 @@ mod playback_diagnostic_tests {
     }
 }
 
-#[cfg(test)]
-mod stua_volume_tests {
-    use super::*;
-
-    #[test]
-    fn stua_playback_volume_defaults_and_valid_values() {
-        for (args, expected) in [
-            (vec![], -40),
-            (vec!["--volume-db", "-20"], -20),
-            (vec!["--volume-db", "-40"], -40),
-            (vec!["--volume-db", "-10"], -10),
-        ] {
-            let cli = Cli::try_parse_from(
-                ["piair", "stua-playback-check", "device:02d899c1833f"]
-                    .into_iter()
-                    .chain(args),
-            )
-            .unwrap();
-            assert!(
-                matches!(cli.command.unwrap(), Command::HapPlaybackCheck { volume_db, .. } if volume_db == expected)
-            );
-        }
-    }
-
-    #[test]
-    fn stua_playback_rejects_invalid_or_missing_volume() {
-        for args in [vec!["-41"], vec!["-9"], vec!["loud"], vec!["-20.5"], vec![]] {
-            let error = Cli::try_parse_from(
-                [
-                    "piair",
-                    "stua-playback-check",
-                    "device:02d899c1833f",
-                    "--volume-db",
-                ]
-                .into_iter()
-                .chain(args),
-            )
-            .err()
-            .expect("invalid volume must fail Clap validation");
-            assert!(matches!(
-                error.kind(),
-                clap::error::ErrorKind::ValueValidation | clap::error::ErrorKind::InvalidValue
-            ));
-        }
-    }
-}
-
 #[derive(Subcommand)]
 #[command(
     after_help = "Examples:\n  piair allowlist list\n  piair allowlist add device:aabbccddeeff\n  piair allowlist remove device:aabbccddeeff\n\nChanges require an interactive terminal and y/yes. Adding asks for one explicit approval of the exact canonical receiver ID. Approval permits later connections; it does not authenticate or cryptographically verify the receiver. Discovered receivers are never automatically approved."
@@ -619,21 +560,7 @@ pub enum AllowlistCommand {
 mod dynamic_diagnostic_tests {
     use super::*;
     #[test]
-    fn diagnostic_commands_accept_ids_or_existing_picker_and_legacy_aliases() {
-        for command in [
-            "hap-stream-setup-check",
-            "hap-playback-check",
-            "stua-stream-setup-check",
-            "stua-playback-check",
-        ] {
-            for id in [
-                None,
-                Some("device:112233445566"),
-                Some("device:66778899aabb"),
-            ] {
-                assert!(Cli::try_parse_from(["piair", command].into_iter().chain(id)).is_ok());
-            }
-        }
+    fn stream_diagnostics_accept_ids_or_existing_picker() {
         for mode in [
             "--setup-check",
             "--record-check",

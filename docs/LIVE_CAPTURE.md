@@ -4,28 +4,6 @@
 No protocol, authentication, receiver approval or selection fallback is added.
 WAV uses the same scheduler and its original timing/retransmission policy.
 
-## OwnTone evidence
-
-Reviewed the public OwnTone source at commit
-[`8ed84f2b3cba25d3de65e05660d59ce034b5adab`](https://github.com/owntone/owntone-server/tree/8ed84f2b3cba25d3de65e05660d59ce034b5adab)
-(2026-11-10). These are source observations, not hardware interoperability results.
-No OwnTone source code was copied into PiAir.
-
-| Area | Verified OwnTone behavior | PiAir decision |
-| --- | --- | --- |
-| Input architecture | [`src/inputs/pipe.c`](https://github.com/owntone/owntone-server/blob/8ed84f2b3cba25d3de65e05660d59ce034b5adab/src/inputs/pipe.c): PCM pipe input, stereo, configurable 16/32-bit and 44100/48000/88200/96000 Hz. Empty reads/EAGAIN wait and retry for a manually selected pipe; fatal reads flag an error. This revision has no dedicated ALSA capture module. | Capture ALSA directly to keep a single lightweight CLI; convert with ALSA plug PCMs to the sender's required client format. Do not infer capture XRUN behavior from OwnTone's ALSA output. |
-| ALSA conversion | [`docs/advanced/outputs-alsa.md`](https://github.com/owntone/owntone-server/blob/8ed84f2b3cba25d3de65e05660d59ce034b5adab/docs/advanced/outputs-alsa.md) recommends `plughw` for transparent rate/format conversion when `hw` fails. This is **output** guidance. | Prefer `plughw`; retry a failed direct `hw:` negotiation through the same card/device's `plughw:` adapter. Other custom aliases can explicitly include a plug layer. Verify actual client PCM; do not mistake nominal hardware rate for the playback rate. |
-| Input buffering | [`src/input.c`](https://github.com/owntone/owntone-server/blob/8ed84f2b3cba25d3de65e05660d59ce034b5adab/src/input.c): a threshold equivalent to two seconds of 48 kHz/16-bit/stereo; `input_write` returns EAGAIN above it, and input waits use 10 ms. | A fixed 192 ms application queue drops oldest frames on overflow. This is a lower latency policy for a live source, not a configuration rejection or a claim that OwnTone drops samples. Total latency also includes ALSA and receiver buffers. |
-| Scheduler/underrun | [`src/player.c`](https://github.com/owntone/owntone-server/blob/8ed84f2b3cba25d3de65e05660d59ce034b5adab/src/player.c): 10 ms ticks, read/write catch-up thresholds of 1500 ms, then suspend/reset output. | Live allows 1500 ms bounded catch-up, below the existing two-second playback lead. Capture starvation fills RTP slots with silence; it does not reset timestamps or PTP. Longer sender stalls fail and teardown rather than sending unbounded catch-up bursts or replacing the session clock. WAV's 100 ms scheduler rule is unchanged. |
-| ALSA XRUN/drift | [`src/outputs/alsa.c`](https://github.com/owntone/owntone-server/blob/8ed84f2b3cba25d3de65e05660d59ce034b5adab/src/outputs/alsa.c): output EPIPE is classified as an underrun/session restart; `sync_correct` changes subscribed sample rate in steps to compensate ALSA **output** latency/drift. | There is no verified direct ALSA capture recovery/drift policy to copy. PiAir re-prepares XRUN/suspended capture and discards stale queued input, while the authenticated AirPlay session keeps its timeline. No adaptive resampler is justified by this output-only evidence. |
-| AirPlay PCM | [`src/outputs/airplay.c`](https://github.com/owntone/owntone-server/blob/8ed84f2b3cba25d3de65e05660d59ce034b5adab/src/outputs/airplay.c): default AirPlay quality is 44100 Hz, 16-bit, two channels, with quality subscription/conversion and packet encoding in the output pipeline. | Retain the working negotiated ALAC16/stereo/44100 profile, packetization, encryption and synchronization. |
-
-The reviewed evidence does **not** establish OwnTone's direct USB capture XRUN,
-capture-to-AirPlay drift behavior, or Raspberry Pi 3B buffer requirements. PiAir's
-96 ms prefill and 192 ms application queue remain experimental hardware-tuning
-choices, not claims of measured equivalence with OwnTone. No blanket OwnTone
-interoperability claim is made.
-
 ## Negotiation and recovery
 
 The encoder requires signed native 16-bit interleaved stereo at nominal 44100 Hz.

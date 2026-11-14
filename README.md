@@ -118,7 +118,5 @@ settings retain their different detector semantics; no migration is required.
 
 `piair audio monitor` and `piair audio calibrate` remain available for input
 troubleshooting. The systemd runtime `piair run --allow-unattended` remains
-supported; see [unattended operation](docs/RUNTIME.md). Specialized diagnostics
-are hidden from ordinary help but retain their arguments, aliases and safety
-checks. Buffered live audio remains explicitly blocked pending clock-adoption
-evidence; see [buffered lifecycle](docs/BUFFERED_LIFECYCLE.md).
+supported; see [unattended operation](docs/RUNTIME.md). Retained protocol diagnostics are documented in the developer guide and individual
+command help. Buffered live audio is unsupported.

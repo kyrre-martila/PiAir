@@ -1,67 +1,8 @@
-> Current guidance and evidence: [receiver authentication audit and safe Pi diagnostic](RECEIVER_AUTHENTICATION.md).
+# Transient authentication
 
-Current receiver discovery, selection and command usage is documented in
-[Receiver diagnostics](RECEIVER_DIAGNOSTICS.md). Receiver-specific observations
-and authorizations below are historical evidence, not current CLI restrictions.
-Examples use placeholders; verify the canonical ID independently.
-> Later operator evidence in [PR #21](INITIAL_SETUP_DIAGNOSTICS.md) reports HomePod
-> transient SRP and encrypted OPTIONS success after #20. Earlier 400/403 results
-> below are historical; no confirmed audible HomePod playback is documented.
-
-> Optional controlled experiment: [pyatv transient HTTP framing](PYATV_TRANSIENT_PREAMBLE.md).
-> The default flow described below remains unchanged.
-
-# Transient AirPlay authentication
-
-PiAir implements an explicitly selected, connection-scoped HomeKit SRP profile.
-This enables encrypted control and the existing realtime audio negotiation path;
-**successful authentication does not prove audio playback compatibility**.
-The original legacy profile has no documented HomePod success; later explicit OwnTone-reference authentication/control success is operator-reported (see the current audit).
-
-## Architecture and missing capability
-
-Before this change, `Method::Transient` was parsed by the CLI but rejected by
-`Capabilities::decide`. `pairing.rs` implemented only persistent M1–M6 enrollment
-and signed X25519 pair-verify; `Session::start` required a stored credential.
-Changing the HKP header alone could not implement transient authentication:
-transient stops at SRP M4 and uses a different shared-secret source.
-
-`compatibility.rs` owns advertised-policy checks; `Selection` pins the exact
-stable ID, optional advertised pairing ID, address set, port, method and security
-capabilities. `Wire::connect` rechecks discovery, allowlist and saved selection
-before opening a numeric endpoint, without endpoint retry. `pairing::transient`
-consumes that authorized Wire and returns it encrypted only after proof validation.
-`Session::start_selected` dispatches only the Wire's explicitly selected method.
-The transient branch takes no persistent credential. Persistent setup/verify
-reject transient Wires. `store.rs` still owns persistent credentials separately;
-transient authentication has no credential creation or save operation.
-
-## Source evidence (immutable revisions)
-
-The following are source implementations, not protocol summaries:
-
-- OwnTone [`airplay.c`](https://github.com/owntone/owntone-server/blob/f7ace58dc2aeb5305360770da37fd62095f5bb21/src/outputs/airplay.c):
-  `AIRPLAY_SEQ_PAIR_TRANSIENT`, `payload_make_pair_generic`,
-  `response_handler_pair_setup2`, `session_cipher_setup`, and status-policy routing.
-- OwnTone [`pair_homekit.c`](https://github.com/owntone/owntone-server/blob/f7ace58dc2aeb5305360770da37fd62095f5bb21/src/pair_ap/pair_homekit.c):
-  `client_setup_new`, `client_setup_request1`, `client_setup_response2`,
-  `cipher_new`, HKDF key map, and `pair_client_homekit_transient`.
-- OwnTone [`pair.c`](https://github.com/owntone/owntone-server/blob/f7ace58dc2aeb5305360770da37fd62095f5bb21/src/pair_ap/pair.c)
-  and [`pair.h`](https://github.com/owntone/owntone-server/blob/f7ace58dc2aeb5305360770da37fd62095f5bb21/src/pair_ap/pair.h):
-  separate method dispatch, setup-result lifetime and 64-byte transient secret.
-- pyatv [`hap_transient.py`](https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/protocols/airplay/auth/hap_transient.py),
-  [`hap_srp.py`](https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/auth/hap_srp.py),
-  [`hap_pairing.py`](https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/auth/hap_pairing.py):
-  transient credential marker, fixed protocol code, SRP parameters and HKDF.
-- pyatv [`server_auth.py`](https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/protocols/airplay/server_auth.py):
-  `_m1_setup`/`_m3_setup` confirm receiver-side M4 completion and cipher upgrade.
-- pyatv [`utils.py`](https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/protocols/airplay/utils.py)
-  and [`airplayv2.py`](https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/protocols/raop/protocols/airplayv2.py):
-  advertised pairing/password policy and AirPlay 2 transport context. See also
-  [AirPlay source tree](https://github.com/postlund/pyatv/tree/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/protocols/airplay)
-  and [authentication tests](https://github.com/postlund/pyatv/tree/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/tests/auth).
-  Inspection of the pinned `tests` tree found no transient-specific test matches;
-  upstream tests are not evidence of PiAir or HomePod compatibility.
+Explicit transient selection uses connection-scoped SRP and encrypted control.
+The OwnTone-reference profile is used by the working HomePod live-audio path.
+No automatic authentication fallback or persistent enrollment occurs.
 
 ## Exact implemented flow
 
@@ -153,19 +94,3 @@ serialized. A consumed Wire owns keys, offers no extraction/reconnect interface,
 and closes on failed authentication. Existing request/handshake deadlines and
 bounded worker/teardown cleanup remain; failed sessions release owned resources.
 Existing persistent credential files are neither overwritten nor removed.
-
-## CLI and safe Raspberry Pi verification
-
-Offline checks use loopback mocks only; no actual receivers are contacted by tests.
-The independent fixture generator uses Python integer arithmetic and cryptography
-only as a developer tool; Rust tests consume checked-in bytes without Python.
-Tests cover proofs/keys, malformed fields, rejected states/flags/methods/status,
-timeout/disconnect, encrypted OPTIONS, terminal failure, cleanup, capability and
-endpoint authorization, no fallback, plus persistent pairing/media regressions.
-
-For the next Raspberry Pi check, follow the [current authentication-only procedure](RECEIVER_AUTHENTICATION.md#next-raspberry-pi-diagnostic-authentication-and-control-only).
-It uses only independently verified `device:<canonical-id>`, explicit owner approval,
-explicit transient selection and the OwnTone-reference authenticate flag. It does
-not enroll or replace credentials and does not attempt audio. Legacy transient
-and pyatv profiles are separate explicit experiments, with no automatic fallback.
-Existing persistent credentials remain available for later explicit persistent use.

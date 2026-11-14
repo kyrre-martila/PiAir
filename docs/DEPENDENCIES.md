@@ -213,9 +213,7 @@ OwnTone GPL-2.0-or-later implementation source was inspected for externally
 observable protocol facts only, as explicitly authorized. No source was copied,
 mechanically translated, vendored, linked or executed. pyatv and RAOP-Player
 (MIT roots with third-party exceptions) supply additional protocol corroboration;
-no implementation code is incorporated. See AIRPLAY_REFERENCE_ANALYSIS.md for
-exact revisions, function traces and the distinction from a personnel-separated
-clean room. The application remains original Apache-2.0 Rust.
+no implementation code is incorporated. This is not a personnel-separated clean room. The application remains original Apache-2.0 Rust.
 
 `plist` is MIT and is used for binary-plist encoding/decoding behind PiAir's own
 bounded preflight and typed protocol schemas. Metadata for new locked packages
@@ -242,4 +240,3 @@ Buffered foundation (PR #40): no new production dependencies. `socket2` 0.5.10
 (MIT OR Apache-2.0), already locked transitively, is now an explicit dev dependency
 for safe loopback fault injection. Existing MPL-2.0 Symphonia packages remain
 test-only ALAC decoders; no native AAC/FFmpeg/FDK or GPL codec is linked.
-See [codec/security licensing decisions](BUFFERED_TRANSPORT.md).

@@ -33,7 +33,7 @@ A source checkout is not an installed service.
    separately with `piair receivers` or `piair devices`, not from the picker. A new speaker needs one explicit approval prompt;
    its advertised name and device ID do not verify its identity. The connection
    choice is saved separately after confirmation. See
-   [receiver address binding](RECEIVER_ADDRESS_BINDING.md) if discovery changes.
+   [receiver identity rules](PAIRING.md) if discovery changes.
 5. Choose an advertised compatible authentication path. Existing validated HAP
    credentials can be reused without enrollment. PIN-display enrollment requires
    actual supported PIN delivery. HAP setup-code enrollment requires a genuine
@@ -213,7 +213,7 @@ only the existing partial-packet padding and silent drain follow actual content.
   triggers transient fallback. Existing credential errors require investigation.
 - **No audible test audio:** check receiver volume/mute and speakers, local
   networking and PTP port permissions. See [PTP_PORT_PERMISSIONS.md](PTP_PORT_PERMISSIONS.md)
-  and [WAV_PLAYBACK_DIAGNOSTIC.md](WAV_PLAYBACK_DIAGNOSTIC.md). Do not change receiver
+  and the developer guide. Do not change receiver
   selection or authentication merely because packet transmission succeeded.
 - **Configuration changed during setup:** rerun and review the newer settings;
   the wizard refuses a stale save. Keep private config/state permissions intact.

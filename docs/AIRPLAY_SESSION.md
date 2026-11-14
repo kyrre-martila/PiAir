@@ -1,25 +1,9 @@
-# AirPlay 2 session and audio transport
+# AirPlay session and transport
 
-## Implemented profile and evidence
-
-PiAir now implements an explicitly invoked **AirPlay 2 realtime UDP / persistent
-HAP / NTP / ALAC 44100 Hz, 16-bit stereo / 352 sample frames per packet** sender.
-The original ALAC encoder, pairing, authorization and encrypted control work is
-preserved. This profile is distinct from buffered TCP type 103 and legacy
-ANNOUNCE/RSA/AES RAOP. The preserved type-103 components remain disconnected.
-
-[AIRPLAY_REFERENCE_ANALYSIS.md](AIRPLAY_REFERENCE_ANALYSIS.md) pins the inspected
-OwnTone and pyatv sender revisions, functions, differences and licenses. OwnTone's
-actual active sender uses type 96/UDP, not buffered type 103. Its NTP configuration
-provides the complete chosen sequence. pyatv independently corroborates HAP,
-encrypted events, NTP, media-key offering, authenticated packets and feedback;
-its PCM codec offer is not used. No sender implementation code is copied or
-mechanically translated. No GPL component is linked into PiAir.
-
-**Hardware compatibility and audible playback remain unverified.** Local mocks
-exercise the production sender, not a separate protocol or a claim that an Apple
-TV will play. A receiver that requires PTP, transient/Home membership, password,
-MFi/FairPlay or another codec fails explicitly. No automatic transport fallback.
+The production live path uses realtime PTP/type-96. The NTP diagnostic path
+retains bounded tone/WAV tests. Both enforce explicit approval, authentication
+and cleanup. Buffered live playback is unsupported. See [architecture](ARCHITECTURE.md)
+and [runtime](RUNTIME.md) for production orchestration.
 
 ## Approval and cryptographic ownership
 
@@ -75,7 +59,7 @@ framing/CSeq/type and known values, and sends an encrypted correlated 200, inclu
 CSeq zero. updateInfo dictionaries remain supported. sendMediaRemoteCommand strings
 and unknown event types are explicitly ignored and acknowledged, without playback
 actions. Malformed requests, invalid tags and unexpected closure fail the worker.
-An established idle event channel is healthy; see [EVENT_LIFECYCLE.md](EVENT_LIFECYCLE.md).
+An established idle event channel is healthy; see the developer guide.
 
 A control request has a 15-second absolute monotonic budget and at most a
 three-second wait per partial I/O; event messages have a three-second budget.
@@ -100,11 +84,11 @@ Startup uses production encoders/decoders and this fixed sequence:
    Session owns pending sockets/worker until transfer into MediaIo; failed
    negotiation retains them until best-effort TEARDOWN and joined cleanup.
    Setup-only A retains deferred timing, B/C retain early timing and C's
-   pre-verify info order. See [playback lifecycle migration](REALTIME_NTP_LIFECYCLE.md).
+   pre-verify info order. See playback lifecycle migration.
 4. Send RECORD; treat Audio-Latency as informational, including zero, absent,
    malformed and out-of-offer values. Debug diagnostics expose only typed numbers
    and fixed parse status. Sender timing is independent of this header.
-   See [latency evidence and sender model](RECORD_LATENCY.md).
+   See latency evidence and sender model.
 5. SETUP one stream: type=96, audioFormat=0x40000, ct=2, spf=352, sr=44100,
    isMedia=true, latencyMin=11025, latencyMax=88200, local controlPort, independent
    shk, session streamConnectionID, supportsDynamicStreamID=false. Validate one
@@ -177,7 +161,7 @@ As in OwnTone's NTP model, a two-second total output lead is represented by a
 fixed sender sync gap of 77175 samples (1750 ms), plus the separately offered
 11025-sample stream component. The offer maximum remains 88200. RECORD headers
 never change this calculation. OwnTone defaults to a different total buffer
-(2250 ms); see [the complete calculation](RECORD_LATENCY.md). The diagnostic sends two seconds of silence
+(2250 ms); see the complete calculation. The diagnostic sends two seconds of silence
 following the signal to drain latency before explicit stop. Exact physical
 render latency remains hardware dependent. PTP d7 and buffered rate anchors are
 not mixed into this NTP profile.
@@ -213,84 +197,3 @@ counts and cleanup attempts. **Audible playback always remains unverified unless
 a person physically confirms it.** No hardware is contacted during development
 or automated tests. No startup, status, config, discovery or audio activity path
 calls the diagnostic.
-
-## Validation boundaries and next integration
-
-Loopback integration executes production verify, encrypted control/event I/O,
-authenticated port binding, SETUP/RECORD/volume, NTP, actual UDP media, feedback,
-loss/retransmit, FLUSH and TEARDOWN. It independently decodes ALAC and checks the
-signal, RTP progression, nonce counter and sync latency fields. Negative paths
-cover partial setup, bad codec/port/event tag, missing timing, live approval
-revocation, disconnect and repeated sessions. Existing tests retain identity
-mismatch, authorization/selection changes, control framing/replay and no-connect
-read-only coverage. Python plistlib/cryptography fixtures validate the stream
-offer and exact RTP/AEAD bytes; these are synthetic fixtures, not Apple TV captures.
-
-Remaining unsupported behavior has concrete source boundaries: OwnTone's separate
-PTP path uses libairptp and d7 sync, not this NTP path; the pinned sender has no
-active buffered103 or rate-anchor implementation to reproduce. Future PTP or
-buffered support requires its own profile and tests, not relabeling these UDP
-messages. Event variants, NTP acceptance and latency on particular Apple TV or
-HomePod firmware require hardware evidence. No manufacturer compatibility claim.
-
-Future capture/activity integration must explicitly validate/resample the actual
-ALSA rate to 44100 for this profile, propagate discontinuities, preserve bounded
-pre-roll/backpressure and retain the same authorization owner. It must not simply
-connect the default 48000 Hz detector stream or wire silence events into startup.
-The planned capture integration remains a separate milestone.
-
-## Realtime negotiation failure diagnostics
-
-The reported Apple TV failure after successful HAP pair-verify and encrypted
-OPTIONS does not establish which subsequent request stalled. No hardware was
-contacted for this investigation. Negotiation failures now include a local stage
-label and RTSP method for GET /info, initial SETUP, RECORD, stream SETUP and
-SET_PARAMETER. Separate labels cover media socket setup, NTP worker startup,
-event connection and the final NTP synchronization wait. Request errors
-identify writes versus response reads/validation; response reads identify headers
-versus body. Socket WouldBlock (including Linux EAGAIN/os error 11 on a blocking
-socket with a read timeout) and TimedOut are reported as read timeouts, separately
-from other read errors. Validated numeric receiver rejection statuses and status
-200 on subsequent response validation failures are retained. Worker errors name
-the event or NTP worker; synchronization timeouts report only readiness booleans.
-The command's existing error log emits this context at default verbosity.
-
-Diagnostics never include request URIs containing session IDs, PINs, credentials,
-keys, tokens, payloads, raw plists, headers or receiver metadata. Binary plist
-library errors are replaced with a fixed message rather than forwarding decoder
-error content. Stage labels and method names come from local constants.
-
-The request sequence remains GET /info, initial SETUP, authenticated event
-connection with NTP service running, RECORD, stream SETUP, volume SET_PARAMETER,
-then NTP readiness and event-worker health. The existing 15-second request budget,
-capped 3-second socket reads/writes, and 3-second synchronization wait remain unchanged. There
-is no evidence here to justify a protocol ordering change or longer timeouts.
-Failure cleanup limits best-effort TEARDOWN to a 250ms request budget, preserves
-the original failure, then closes control/event sockets and joins workers. The
-NTP worker has 100ms read and write timeouts; shutting down the event socket
-interrupts partial frame reads. Cleanup errors do not replace the primary error.
-
-Loopback mock regressions cover timeouts, rejected statuses and malformed
-responses at each RTSP negotiation request; failed event connection; malformed
-stream/session responses; missing NTP; healthy idle event channels; NTP/event
-worker failures;
-a receiver ignoring TEARDOWN; partial encrypted event cleanup; and worker panic.
-They check attribution, sensitive-text exclusion, terminal state, zero audio
-packets, channel closure and idempotent stop. Existing allowlist, authorization,
-explicit confirmation, encryption and response validation remain enforced.
-
-End-to-end playback remains unverified on Apple TV. PR #29 hardware evidence and
-remaining uncertainty are recorded in [EVENT_LIFECYCLE.md](EVENT_LIFECYCLE.md).
-Mock tests validate local behavior, not audible playback. No OwnTone, Autostream or system
-services were changed.
-
-### Initial SETUP sender headers (PR #10)
-
-Authenticated session requests now include matching hex Client-Instance/DACP-ID,
-a decimal u32 Active-Remote and X-Apple-Client-Name: PiAir, following the inspected
-audio senders. IDs are random per control connection and stable across requests.
-The NTP plist, IPv4 session URI, protocol version, encryption and ordering remain
-unchanged. Request errors distinguish construction from encrypted writes.
-[Initial SETUP research](INITIAL_SETUP_RESEARCH.md) contains immutable upstream
-source links, independent fixture details, compatibility limits and safe operator
-verification instructions. AppleTV6,2/tvOS 26.6.1 acceptance remains unverified.

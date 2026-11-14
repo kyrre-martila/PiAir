@@ -96,7 +96,7 @@ restart, enable or activate that service (including setup and menu recovery).
 Use the trusted `/usr/local/bin/piair` deliberately to manage its installed unit.
 Symlinks to that same executable are supported; a copied or replaced executable
 has a different file identity and is refused. Candidate foreground playback stays
-available with explicit PTP permission; see [candidate QA](PRE_RELEASE_QA.md).
+available with explicit PTP permission; see [PTP permissions](PTP_PORT_PERMISSIONS.md).
 The friendly-name receiver picker has no technical details menu; use `piair
 receivers` or `piair devices` for separate diagnostic output.
 

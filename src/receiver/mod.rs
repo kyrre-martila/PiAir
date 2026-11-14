@@ -8,20 +8,17 @@ mod diagnostics;
 mod hex_u64;
 pub(crate) mod interactive;
 pub(crate) mod lifecycle;
-pub(crate) mod planning;
-pub(crate) mod runtime;
-pub(crate) mod setup;
-// Sans-I/O components only; blocked by the documented unresolved transport profile.
-#[allow(dead_code)]
-mod media;
 mod pairing;
+pub(crate) mod planning;
 mod playback;
 mod playback_error;
 mod profile;
 #[allow(dead_code)] // Playback timing primitives remain gated beyond the initial diagnostic.
 mod ptp;
 mod realtime;
+pub(crate) mod runtime;
 mod session;
+pub(crate) mod setup;
 mod srp;
 mod store;
 #[cfg(test)]
@@ -680,73 +677,6 @@ pub fn stream_test(
     );
     session.stop()?;
     println!("Teardown: FLUSH and TEARDOWN acknowledged; resources closed. Audible playback: unverified (requires physical confirmation).");
-    Ok(())
-}
-
-/// Deliberate stored-HAP diagnostics; never invoked by capture or production startup.
-pub fn hap_check(loaded: &Loaded, id: Option<&str>, playback: bool, volume_db: i32) -> Result<()> {
-    let proposed = if id.is_none() {
-        Some(interactive::choose_for_stream(loaded)?)
-    } else {
-        None
-    };
-    let id = id.unwrap_or_else(|| &proposed.as_ref().unwrap().selected.id);
-    exact_id(id)?;
-    ensure!(loaded.config.allows(id), "receiver is not approved");
-    let store = store::Store::new(&loaded.path)?;
-    let credential = store
-        .credential(id)?
-        .context("existing receiver HAP credentials required; no automatic pairing")?;
-    let method = credential.authentication_method(id)?;
-    ensure!(
-        io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "Receiver diagnostic requires an interactive terminal and explicit confirmation"
-    );
-    let snapshot = discovery::discover(loaded.config.discovery_timeout_secs)?;
-    // Validate the exact endpoint before confirmation as well as at Wire::connect.
-    let selected = validate_selection(loaded, id, method, &snapshot)?;
-    if let Some(proposed) = &proposed {
-        ensure!(
-            proposed.selected.method != Method::Transient,
-            "HAP diagnostic requires a persistent selection and existing credentials; no fallback"
-        );
-        // Persisted methods describe enrollment intent; StoredHap is deliberately
-        // operation-only and derived from the existing validated credential.
-        let mut operation = proposed.selected.clone();
-        operation.method = method;
-        ensure!(
-            operation.matches_observation(&selected),
-            "receiver changed; review and select again explicitly"
-        );
-    }
-    hap_credential(&store, &selected)?;
-    interactive::describe(&snapshot, id)?;
-    println!("Persistent HAP pair-verify using existing stored keys; no pairing, credential writes, retries or receiver fallback. Only NTP realtime ALAC is supported; PTP/FairPlay/MFi requirements fail closed. Routing and audible playback remain unverified.");
-    let prompt = if playback {
-        println!("One second original faded tone, receiver volume {volume_db} dB, two seconds silent drain. WARNING: receiver volume may persist after the test, including after failure; it is not restored. Packet transmission does not prove audible playback.");
-        format!("Authorize receiver tone and persistent {volume_db} dB receiver volume? [y/N]: ")
-    } else {
-        println!("Stream SETUP-only: authentication, NTP SETUP, event connection, RECORD, stream SETUP and TEARDOWN. Zero audio, zero sync packets, no volume changes. Negotiation does not prove audible playback.");
-        "Start receiver zero-audio stream SETUP-only check? [y/N]: ".to_owned()
-    };
-    interactive::confirm_operation(loaded, proposed.as_ref(), &snapshot, &prompt)?;
-    let mut session = session::Session::new();
-    let cancel = session.cancel.clone();
-    ctrlc::set_handler(move || cancel.store(true, std::sync::atomic::Ordering::Relaxed))?;
-    session.start_hap_stream_selected(
-        || wire::Wire::connect_hap_operation(&loaded.path, &selected, &snapshot, &credential),
-        &credential,
-        playback,
-    )?;
-    if playback {
-        session.prepare_playback_check_at_volume(volume_db)?;
-        session.transmit_test(1)?;
-        session.stop()?;
-        println!("Receiver: {} RTP packets transmitted; TEARDOWN acknowledged; local cleanup complete. Volume {volume_db} dB may persist. Audible playback unverified.", session.packets_sent);
-    } else {
-        session.check_stream()?;
-        println!("Receiver stream SETUP validated; TEARDOWN acknowledged; local cleanup complete. Audio packets: 0; volume unchanged. Audible playback unverified.");
-    }
     Ok(())
 }
 

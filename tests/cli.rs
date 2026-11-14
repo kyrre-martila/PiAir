@@ -474,54 +474,6 @@ fn stream_diagnostics_require_terminal_without_state_or_contact() {
 }
 
 #[test]
-fn hap_diagnostics_and_legacy_aliases_require_authorization_without_contact() {
-    for mode in [
-        "hap-stream-setup-check",
-        "hap-playback-check",
-        "stua-stream-setup-check",
-        "stua-playback-check",
-    ] {
-        let picker = run(&[mode]);
-        assert_eq!(picker.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&picker.stderr).contains("interactive terminal"));
-        for id in ["Stua", "device:02D899C1833F", "device:02d899c1833f:7000"] {
-            let output = run(&[mode, id]);
-            assert_eq!(output.status.code(), Some(1));
-            assert!(String::from_utf8(output.stderr)
-                .unwrap()
-                .contains("exact stable device:"));
-        }
-        for flag in [
-            "--seconds=1",
-            "--experimental-owntone-transient",
-            "--setup-profile=a",
-            "--playback-check",
-        ] {
-            assert_eq!(
-                run(&[mode, "device:02d899c1833f", flag]).status.code(),
-                Some(2)
-            );
-        }
-        let output = run(&[mode, "device:02d899c1833f", "--volume-db=-40"]);
-        assert_eq!(
-            output.status.code(),
-            Some(if mode.ends_with("playback-check") {
-                1
-            } else {
-                2
-            })
-        );
-        for id in ["device:112233445566", "device:66778899aabb"] {
-            let output = run(&[mode, id]);
-            assert_eq!(output.status.code(), Some(1));
-            assert!(String::from_utf8(output.stderr)
-                .unwrap()
-                .contains("not approved"));
-        }
-    }
-}
-
-#[test]
 fn stored_hap_operation_method_cannot_be_selected_for_enrollment() {
     assert_eq!(
         run(&["select", "device:02d899c1833f", "--method", "stored-hap"])
@@ -844,7 +796,7 @@ fn ordinary_help_focuses_on_daily_use_and_keeps_manual_tools() {
 }
 
 #[test]
-fn hidden_diagnostics_keep_their_own_help_arguments_and_aliases() {
+fn hidden_diagnostics_keep_their_own_help_arguments() {
     let ordinary = String::from_utf8(run(&["--help"]).stdout).unwrap();
     for (command, argument) in [
         ("run", "--allow-unattended"),
@@ -856,10 +808,6 @@ fn hidden_diagnostics_keep_their_own_help_arguments_and_aliases() {
         ("experimental-ptp-capture", "--capture-device"),
         ("automatic-ptp-capture", "--threshold-dbfs"),
         ("buffered-test", "--confirm-audio"),
-        ("hap-stream-setup-check", "[RECEIVER_ID]"),
-        ("hap-playback-check", "--volume-db"),
-        ("stua-stream-setup-check", "[RECEIVER_ID]"),
-        ("stua-playback-check", "--volume-db"),
     ] {
         assert!(!ordinary
             .lines()
@@ -921,4 +869,16 @@ fn development_executable_can_observe_but_cannot_control_installed_service() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("Invoking executable: not verified as installed PiAir"));
     assert!(text.contains("Foreground candidate playback remains available"));
+}
+
+#[test]
+fn retired_hap_wrappers_are_not_commands() {
+    for command in [
+        "hap-stream-setup-check",
+        "hap-playback-check",
+        "stua-stream-setup-check",
+        "stua-playback-check",
+    ] {
+        assert_eq!(run(&[command, "--help"]).status.code(), Some(2));
+    }
 }
