@@ -72,13 +72,15 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
     };
     let mut journal = Vec::new();
     let result = (|| {
-        ui.say("Welcome to PiAir setup.\nChoose an input and speaker, save settings, then optionally test the sound.\nEnter numbered choices. q or Ctrl+C cancels.\nSpeaker approval and connection selection save when confirmed; playback settings save at the end.")?;
+        ui.say("Welcome to PiAir setup.\nChoose your audio input and speaker.\nEnter a number to choose, or q to cancel.")?;
         ensure!(cfg!(target_os = "linux"), "PiAir requires Linux and ALSA");
         // Guard setup mutations and tests with the runtime's existing exclusion.
         let interrupted_for_setup = if let Ok(current) = service::inspect_current(&loaded) {
             if current.active == "active" && current.pid != 0 {
                 let _installed = service::require_installed_executable()?;
-                if !ui.confirm("Reconfiguration requires temporarily stopping your automatic playback. Interrupt it now? Playback will only restart with explicit approval.")? {
+                if !ui
+                    .confirm("Stop PiAir to change settings? You can start it again afterward.")?
+                {
                     ui.say("Setup cancelled; automatic playback is unchanged.")?;
                     return Ok(());
                 }
@@ -104,7 +106,7 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
                 Ok(id) => id,
                 Err(e) if e.is::<Cancelled>() => return Err(e),
                 Err(e) => {
-                    ui.say(setup_problem(&e, "The speaker advertisement could not be validated. Check the intended speaker, then rescan or cancel.\n1. Rescan\n2. Cancel", tracing::enabled!(tracing::Level::DEBUG)))?;
+                    ui.say(setup_problem(&e, "Could not validate the speaker. Check that it is available and scan again.\n1. Rescan\n2. Cancel", tracing::enabled!(tracing::Level::DEBUG)))?;
                     if ui.choice("Choose:", 2, None)? == 2 {
                         return Err(Cancelled.into());
                     }
@@ -136,7 +138,7 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
                 }
                 Err(e) if e.is::<Cancelled>() => return Err(e),
                 Err(e) => {
-                    ui.say(setup_problem(&e, "The speaker connection could not be configured. Check the selected connection method and saved pairing. No fallback was attempted.\n1. Retry receiver/authentication selection\n2. Cancel", tracing::enabled!(tracing::Level::DEBUG)))?;
+                    ui.say(setup_problem(&e, "Could not configure the speaker connection. Check the connection method and saved pairing.\n1. Choose speaker and connection again\n2. Cancel", tracing::enabled!(tracing::Level::DEBUG)))?;
                     if ui.choice("Choose:", 2, None)? == 2 {
                         return Err(Cancelled.into());
                     }
@@ -148,8 +150,8 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
         advanced_settings(&mut draft, &mut ui, &cancel)?;
 
         loop {
-            ui.say(format!("\n5. Review and finish\nInput: {}\nSpeaker: {receiver_name}\nConnection: {}\nAudio detection: automatic\nVolume: {}", clean(draft.capture_device.as_deref().unwrap_or("Not configured")), authentication_label(draft.authentication), volume_label(draft.volume_db)))?;
-            ui.say("1. Save reviewed playback settings\n2. Advanced settings\n3. Cancel")?;
+            ui.say(format!("\n5. Review settings\nAudio input: {}\nSpeaker: {receiver_name}\nConnection: {}\nAudio detection: automatic\nVolume: {}", clean(draft.capture_device.as_deref().unwrap_or("Not configured")), authentication_label(draft.authentication), volume_label(draft.volume_db)))?;
+            ui.say("1. Save settings\n2. Advanced settings\n3. Cancel")?;
             match ui.choice("Choose:", 3, None)? {
                 1 => break,
                 2 => {
@@ -187,30 +189,34 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
         let restore_after_setup = interrupted_for_setup
             && service::inspect_current(&loaded)
                 .is_ok_and(|s| matches!(s.active.as_str(), "inactive" | "failed") && s.pid == 0);
-        let safe_to_restore = recording::offer(&loaded, &saved, &mut ui, &cancel)?;
+        let test = recording::offer(&loaded, &saved, &mut ui, &cancel)?;
         if restore_after_setup
-            && safe_to_restore
+            && test.safe_to_restore
             && !cancel.load(Ordering::Relaxed)
             && service::inspect_current(&loaded)
                 .is_ok_and(|s| matches!(s.active.as_str(), "inactive" | "failed") && s.pid == 0)
-            && ui.confirm("Restore the automatic playback you stopped for setup now?")?
+            && ui.confirm("Start PiAir again?")?
         {
             if let Err(e) = service::control(&loaded, "start") {
                 ui.say(format!("Could not restore playback: {e:#}. Inspect piair status, then explicitly run piair start."))?;
             }
         }
-        ui.say("Setup complete.\nCheck service availability with piair status. Start automatic playback explicitly with piair start when ready.\nSaving settings does not verify audible playback.\nRe-run piair setup whenever you want to reconfigure.")?;
+        ui.say(completion_text(
+            &loaded,
+            service::observe(&loaded),
+            test.outcome,
+        )?)?;
         Ok(())
     })();
     if result.is_err() {
-        ui.say("Setup stopped. Completed explicit operations remain saved:")?;
+        ui.say("Setup stopped. Saved changes:")?;
         if journal.is_empty() {
-            ui.say("None recorded by this setup invocation.")?;
+            ui.say("None.")?;
         }
         for entry in journal {
             ui.say(entry)?;
         }
-        ui.say("Any operation that reported an uncertain save/cleanup must be inspected.\nUnconfirmed playback settings were not saved.\nRe-run setup to resume; existing credentials are retained.")?;
+        ui.say("If a save or cleanup failed, check the reported error before continuing.\nRun piair setup to resume. Existing pairing is kept.")?;
     }
     match result {
         Err(e) if e.is::<Cancelled>() => Ok(()),
@@ -218,16 +224,55 @@ pub(crate) fn run(loaded: Loaded) -> Result<()> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestOutcome {
+    Skipped,
+    Passed,
+    Failed,
+}
+impl TestOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Skipped => "Skipped",
+            Self::Passed => "Passed",
+            Self::Failed => "Failed",
+        }
+    }
+}
+fn completion_text(
+    loaded: &Loaded,
+    observed: Result<service::Service>,
+    test: TestOutcome,
+) -> Result<String> {
+    let selected = Store::new(&loaded.path)?.selection()?;
+    let speaker = selected
+        .as_ref()
+        .filter(|s| Some(&s.id) == loaded.config.playback.receiver_id.as_ref())
+        .map(|s| clean(s.display_name.as_deref().unwrap_or(&s.id)))
+        .unwrap_or_else(|| "Not selected".into());
+    let startup = observed
+        .map(|s| daily::boot_label(&s.boot))
+        .unwrap_or_else(|_| "Unavailable".into());
+    let troubleshooting = if test == TestOutcome::Failed {
+        "\nCheck the speaker volume and connection. Run piair logs for details."
+    } else {
+        ""
+    };
+    Ok(format!("Setup complete.\n\nSpeaker: {speaker}\nAudio input: {}\nConnection: {}\nAutomatic startup: {startup}\nAudio test: {}{troubleshooting}\n\nNext: Play audio through your connected input.\nUse piair status to check PiAir, or piair start when ready.",
+        clean(loaded.config.playback.capture_device.as_deref().unwrap_or("Not configured")),
+        authentication_label(loaded.config.playback.authentication), test.label()))
+}
+
 fn requirements<R: FnMut() -> Result<String>, W: Write>(ui: &mut Ui<R, W>) -> Result<()> {
     ui.say("Connect your audio input and put your speaker on the same network as this Pi.")?;
     if !std::path::Path::new("/dev/snd").is_dir() {
-        ui.say("Warning: /dev/snd is missing. Connect your audio input, or check device access in your OS/container.")?;
+        ui.say("Audio input unavailable. Connect your input and check sound-device access.")?;
     }
     let network = std::fs::read_dir("/sys/class/net")
         .map(|entries| entries.flatten().any(|e| e.file_name() != "lo"))
         .unwrap_or(false);
     if !network {
-        ui.say("Warning: no non-loopback network interface found.")?;
+        ui.say("No network connection found. Connect this Pi to your speaker’s network.")?;
     }
     Ok(())
 }
@@ -262,13 +307,17 @@ fn select_input_with<R: FnMut() -> Result<String>, W: Write>(
         let devices = match discover() {
             Ok(d) => d,
             Err(e) => {
-                ui.say(format!("ALSA discovery failed: {e:#}"))?;
+                ui.say(setup_problem(
+                    &e,
+                    "Could not find audio inputs. Check the USB connection and try again.",
+                    tracing::enabled!(tracing::Level::DEBUG),
+                ))?;
                 Vec::new()
             }
         };
         let primary = normal_inputs(devices.clone());
         if primary.is_empty() {
-            ui.say("No capture devices found. Connect an input and retry,\nor enter a known ALSA identifier manually.")?;
+            ui.say("No audio inputs found. Connect your input and scan again,\nor use Advanced options to enter an ALSA identifier.")?;
         }
         for (i, (id, name)) in primary.iter().enumerate() {
             ui.say(format!(
@@ -279,7 +328,7 @@ fn select_input_with<R: FnMut() -> Result<String>, W: Write>(
         }
         let advanced = primary.len() + 1;
         ui.say(format!(
-            "{advanced}. Other audio devices / Advanced options\n{}. Rescan",
+            "{advanced}. Other inputs / Advanced options\n{}. Rescan",
             advanced + 1
         ))?;
         let n = ui.choice("Choose input (q cancels):", advanced + 1, None)?;
@@ -296,7 +345,7 @@ fn select_input_with<R: FnMut() -> Result<String>, W: Write>(
         ensure!(!cancel.load(Ordering::Relaxed), Cancelled);
         match validate(&device) {
             Ok(())=> {ui.say("Audio input is ready.")?;return Ok(device);},
-            Err(e)=>ui.say(format!("Cannot record from {}: {e:#}\nUnavailable: reconnect/check identifier.\nPermission denied: check your account's /dev/snd access.\nBusy: stop the other capture application yourself.\nUnsupported format: explicitly choose a plughw PCM for conversion.\nNo alternate input was substituted. Try again.",clean(&device)))?,
+            Err(e)=>ui.say(setup_problem(&e, "Audio input unavailable. Check the USB connection, input permissions and other audio applications.\nFor format errors, choose the input’s plughw option under Advanced options.", tracing::enabled!(tracing::Level::DEBUG)))?,
         }
     }
 }
@@ -366,7 +415,7 @@ fn discover_receivers_with<R: FnMut() -> Result<String>, W: Write>(
             Err(e) => {
                 ensure!(!cancel.load(Ordering::Relaxed), Cancelled);
                 ui.say(format!(
-                    "Discovery failed: {e:#}\nCheck networking/multicast.\n1. Retry\n2. Cancel"
+                    "Could not find speakers: {e}\nCheck the network connection and try again.\n1. Retry\n2. Cancel"
                 ))?;
                 if ui.choice("Choose:", 2, None)? == 2 {
                     return Err(Cancelled.into());
@@ -381,17 +430,19 @@ fn choose_receiver<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
 ) -> Result<Option<String>> {
     if rows.is_empty() {
-        ui.say("No receivers discovered. Check power and the local network.")?;
+        ui.say(
+            "No speakers found. Check that your speaker is on and connected to the same network.",
+        )?;
     }
     for (i, r) in rows.iter().enumerate() {
         ui.say(format!("{}. {}", i + 1, clean(&r.name)))?;
     }
     ui.say(format!(
-        "{}. Rescan\n{}. Cancel",
+        "{}. Scan again\n{}. Cancel",
         rows.len() + 1,
         rows.len() + 2
     ))?;
-    let n = ui.choice("Choose receiver:", rows.len() + 2, None)?;
+    let n = ui.choice("Choose a speaker:", rows.len() + 2, None)?;
     if n == rows.len() + 1 {
         return Ok(None);
     }
@@ -402,7 +453,7 @@ fn choose_receiver<R: FnMut() -> Result<String>, W: Write>(
     super::exact_id(&r.id)?;
     ensure!(
         rows.iter().filter(|v| v.id == r.id).count() == 1,
-        "receiver identity is ambiguous; rescan"
+        "Speaker identity is ambiguous. Scan again."
     );
     Ok(Some(r.id.clone()))
 }
@@ -424,11 +475,10 @@ fn approve_named<R: FnMut() -> Result<String>, W: Write>(
 ) -> Result<()> {
     super::exact_id(id)?;
     if loaded.config.allows(id) {
-        ui.say("Receiver already approved; approval unchanged.")?;
         return Ok(());
     }
     let original = allowlist::snapshot(&loaded.path)?;
-    if !ui.confirm(&format!("Approve speaker \"{}\"?\nApproval allows PiAir to connect. The advertised name does not verify its identity.", clean(name)))? {
+    if !ui.confirm(&format!("Use \"{}\" as your speaker?", clean(name)))? {
         return Err(Cancelled.into());
     }
     let text = allowlist::render(original.as_ref().map_or("", |s| s.text.as_str()), id, true)?;
@@ -479,8 +529,8 @@ fn authentication<R: FnMut() -> Result<String>, W: Write>(
         }
     } else {
         for (method, label) in [
-            (Method::PinDisplay, "Pair using a code shown by the speaker"),
-            (Method::SetupCode, "Pair using a setup code"),
+            (Method::PinDisplay, "Pair using a PIN from the speaker"),
+            (Method::SetupCode, "Pair using a HAP setup code"),
         ] {
             match super::Selection::from_receiver(receiver, method) {
                 Ok(_) => options.push((
@@ -495,7 +545,7 @@ fn authentication<R: FnMut() -> Result<String>, W: Write>(
     }
     match super::Selection::from_receiver(receiver, Method::Transient) {
         Ok(_) => options.push((
-            "Connect without saving pairing",
+            "Connect without pairing",
             super::validate_selection(loaded, id, Method::Transient, rows)?,
             Authentication::OwnToneTransient,
             false,
@@ -504,7 +554,7 @@ fn authentication<R: FnMut() -> Result<String>, W: Write>(
     }
     ensure!(
         !options.is_empty(),
-        "no supported authentication paths with current prerequisites; no fallback"
+        "No supported connection method is available for this speaker. Run piair -v setup for details."
     );
     for (i, (label, _, _, _)) in options.iter().enumerate() {
         ui.say(format!("{}. {label}", i + 1))?;
@@ -513,28 +563,34 @@ fn authentication<R: FnMut() -> Result<String>, W: Write>(
     let (_, selected, auth, enroll) = &options[n - 1];
     if *enroll {
         let prompt = if selected.method == Method::PinDisplay {
-            "Is an actual receiver-supported PIN display or independently verified PIN delivery available?"
+            "Can you get the PIN from your speaker?"
         } else {
-            "Do you have a genuine independently obtained HAP setup code?\nAn AirPlay password is not a HAP setup code."
+            "Do you have the speaker’s HAP setup code?\nUse its setup code, not an AirPlay password."
         };
         ensure!(ui.confirm(prompt)?, Cancelled);
     }
     if *auth == Authentication::OwnToneTransient {
-        ensure!(ui.confirm("This connection does not save a pairing or verify a persistent speaker identity.\nConnect for this session?")?,Cancelled);
+        ensure!(
+            ui.confirm("Connect without pairing for this session?")?,
+            Cancelled
+        );
     }
-    ensure!(ui.confirm("Save this speaker and connection choice?\nThis choice remains saved if setup is cancelled.")?,Cancelled);
+    ensure!(ui.confirm("Save this speaker and connection method?\nThis is saved even if you cancel setup later.")?,Cancelled);
     let current = config::load(Some(loaded.path.clone()))?;
     let observed = super::validate_selection(&current, id, selected.method, rows)?;
     ensure!(
         selected.matches_observation(&observed),
-        "receiver changed; retry explicitly"
+        "The speaker changed during setup. Select it again."
     );
     store.select_if_unchanged(selected, previous.as_ref())?;
     journal.push(format!("Selected {id} ({:?})", selected.method));
     if *enroll {
         // Existing enrollment handles PIN prompting, cryptographic verification,
         // current selection/approval checks, no-clobber credential save and cleanup.
-        ensure!(ui.confirm(&format!("Enroll and save verified credentials for exactly {id}?\nSelection is already saved; credentials save only after verification."))?, Cancelled);
+        ensure!(
+            ui.confirm("Pair with this speaker and save the pairing?")?,
+            Cancelled
+        );
         let snapshot =
             discovery::discover_cancellable(loaded.config.discovery_timeout_secs, cancel)?;
         ensure!(!cancel.load(Ordering::Relaxed), Cancelled);
@@ -543,9 +599,9 @@ fn authentication<R: FnMut() -> Result<String>, W: Write>(
         let credential =
             super::pairing::setup(wire, id, selected.advertised_pi.as_deref(), || {
                 ui.secret(if selected.method.pin_start() {
-                    "Enter the actual PIN displayed/delivered by this receiver:"
+                    "Enter the PIN from your speaker:"
                 } else {
-                    "Enter the genuine independently obtained HAP setup code:"
+                    "Enter the speaker’s HAP setup code:"
                 })
             })?;
         ensure!(!cancel.load(Ordering::Relaxed), Cancelled);
@@ -619,7 +675,7 @@ fn advanced_settings<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
     cancel: &AtomicBool,
 ) -> Result<()> {
-    ui.say("\n4. Audio detection and optional advanced settings\nAudio detection is automatic. Speaker volume will follow your saved setting (or stay unchanged).\n1. Continue [default]\n2. Advanced audio and volume settings")?;
+    ui.say("\n4. Audio settings\nPiAir detects audio automatically.\n1. Continue [default]\n2. Advanced audio and volume settings")?;
     if ui.choice("Choose:", 2, Some(1))? == 2 {
         configure_activity(draft, ui, cancel)?;
         configure_volume(draft, ui)?;
@@ -677,7 +733,7 @@ fn configure_volume<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
 ) -> Result<()> {
     loop {
-        ui.say(format!("Receiver volume: {:?} dB (None preserves current volume)\n1. Keep current configuration\n2. Preserve receiver volume\n3. Set an explicit volume",draft.volume_db))?;
+        ui.say(format!("Speaker volume: {}\n1. Keep current configuration\n2. Keep speaker volume unchanged\n3. Set an explicit volume",volume_label(draft.volume_db)))?;
         match ui.choice("Choose volume:", 3, Some(1))? {
             1 => return Ok(()),
             2 => {
@@ -685,32 +741,31 @@ fn configure_volume<R: FnMut() -> Result<String>, W: Write>(
                 return Ok(());
             }
             _ => {
-                let value: i32 =
-                    ui.number("Volume dB (-60 to -10). Changes may persist on receiver:")?;
+                let value: i32 = ui.number("Speaker volume in dB (-60 to -10):")?;
                 if !(-60..=-10).contains(&value) {
                     ui.say("Volume out of range.")?;
                     continue;
                 }
-                if ui.confirm(&format!("Save an explicit {value} dB receiver volume?\nThe change may persist on the receiver after playback or failure."))?{draft.volume_db=Some(value);return Ok(())}
+                if ui.confirm(&format!("Set speaker volume to {value} dB?\nThe speaker may keep this volume after playback."))?{draft.volume_db=Some(value);return Ok(())}
             }
         }
     }
 }
 fn test_audio_requested<R: FnMut() -> Result<String>, W: Write>(ui: &mut Ui<R, W>) -> Result<bool> {
-    ui.say("\n7. Optional audio test\nPlay the bundled recording through your saved AirPlay speaker, using systemd permissions. This does not test the ALSA input.\n1. Play test recording (49 seconds)\n2. Skip test [default]")?;
+    ui.say("\n7. Optional audio test\nPlay a recording on your speaker. This tests the speaker connection, not your audio input.\n1. Play test recording (49 seconds)\n2. Skip test [default]")?;
     Ok(ui.choice("Choose:", 2, Some(2))? == 1)
 }
 fn playback_troubleshooting<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
 ) -> Result<()> {
-    ui.say("PiAir couldn't confirm that sound was heard.\nCheck the speaker volume and try the test again.")
+    ui.say("Audio test: Failed.\nCheck the speaker volume and try the test again.")
 }
 
 fn playback_feedback<R: FnMut() -> Result<String>, W: Write>(
     result: Result<()>,
     ui: &mut Ui<R, W>,
     cancel: &AtomicBool,
-) -> Result<()> {
+) -> Result<TestOutcome> {
     playback_feedback_details(result, ui, cancel, tracing::enabled!(tracing::Level::DEBUG))
 }
 fn playback_feedback_details<R: FnMut() -> Result<String>, W: Write>(
@@ -718,12 +773,12 @@ fn playback_feedback_details<R: FnMut() -> Result<String>, W: Write>(
     ui: &mut Ui<R, W>,
     cancel: &AtomicBool,
     detailed: bool,
-) -> Result<()> {
+) -> Result<TestOutcome> {
     if result
         .as_ref()
         .is_err_and(|e| e.is::<super::lifecycle::CleanupFailure>())
     {
-        return result.context(FatalPlayback);
+        return Err(result.unwrap_err()).context(FatalPlayback);
     }
     if cancel.load(Ordering::Relaxed) {
         return Err(Cancelled.into());
@@ -744,16 +799,20 @@ fn playback_feedback_details<R: FnMut() -> Result<String>, W: Write>(
         } else {
             ui.say("For details, run piair -v setup (or -vv for more diagnostics).")?;
         }
-        ui.say("No successful playback test recorded.")?;
-        return Ok(());
+        ui.say("Audio test: Failed.")?;
+        return Ok(TestOutcome::Failed);
     }
     ui.say("Did you hear the audio?\n1. Yes, audio works\n2. No, show troubleshooting guidance\n3. Skip confirmation")?;
-    match ui.choice("Choose:", 3, None)? {
-        1 => ui.say("You confirmed audible output from this test.")?,
-        2 => playback_troubleshooting(ui)?,
-        _ => ui.say("Audible playback remains unverified.")?,
-    }
-    Ok(())
+    let outcome = match ui.choice("Choose:", 3, None)? {
+        1 => TestOutcome::Passed,
+        2 => {
+            playback_troubleshooting(ui)?;
+            return Ok(TestOutcome::Failed);
+        }
+        _ => TestOutcome::Skipped,
+    };
+    ui.say(format!("Audio test: {}.", outcome.label()))?;
+    Ok(outcome)
 }
 fn playback_args(p: &Playback) -> PlaybackArgs {
     PlaybackArgs {
@@ -769,13 +828,13 @@ fn playback_args(p: &Playback) -> PlaybackArgs {
 fn authentication_label(authentication: Option<Authentication>) -> &'static str {
     match authentication {
         Some(Authentication::StoredHap) => "Saved pairing",
-        Some(Authentication::OwnToneTransient) => "Connect without saving pairing",
+        Some(Authentication::OwnToneTransient) => "Without pairing",
         None => "Not configured",
     }
 }
 fn volume_label(volume: Option<i32>) -> String {
     volume.map_or_else(
-        || "Preserve current receiver volume".to_owned(),
+        || "Keep speaker volume unchanged".to_owned(),
         |v| format!("{v} dB (may persist)"),
     )
 }
@@ -798,7 +857,7 @@ fn summary<R: FnMut() -> Result<String>, W: Write>(
                 .to_owned(),
         ),
         (
-            "AirPlay receiver",
+            "Speaker",
             old.receiver_id
                 .as_deref()
                 .unwrap_or("Not configured")
@@ -809,7 +868,7 @@ fn summary<R: FnMut() -> Result<String>, W: Write>(
                 .to_owned(),
         ),
         (
-            "Authentication profile",
+            "Connection",
             authentication_label(old.authentication).to_owned(),
             authentication_label(new.authentication).to_owned(),
         ),
@@ -829,7 +888,7 @@ fn summary<R: FnMut() -> Result<String>, W: Write>(
             new.stop_duration_ms.to_string(),
         ),
         (
-            "Receiver volume",
+            "Speaker volume",
             volume_label(old.volume_db),
             volume_label(new.volume_db),
         ),
@@ -874,11 +933,17 @@ fn optional_service_with<R: FnMut() -> Result<String>, W: Write>(
     if ui.choice("Choose:", 2, Some(2))? == 2 {
         return Ok(());
     }
-    if !ui.confirm(&format!("Enable and start {} now?\nAccount: {} (non-root)\nConfiguration: {}\nThis uses systemctl enable --now with normal system authorization.\nPlayback starts when sustained audio is detected.\nNo other user's service will be stopped.",service.unit,service.user,loaded.path.display()))?{return Ok(())}
+    if !ui.confirm(&format!(
+        "Enable automatic startup and start PiAir now?\nAccount: {}\nSettings: {}",
+        service.user,
+        loaded.path.display()
+    ))? {
+        return Ok(());
+    }
     match activate(loaded, &service) {
         Ok(()) => {
             journal.push(format!("Enabled and started {}", service.unit));
-            ui.say("Service enabled and started.")?;
+            ui.say("Automatic startup enabled. PiAir started.")?;
         }
         Err(error) => {
             ui.say(format!("Service activation failed: {error:#}"))?;

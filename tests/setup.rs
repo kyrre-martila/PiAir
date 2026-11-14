@@ -192,7 +192,7 @@ fn daily_existing_configuration_shows_saved_values_and_returns_from_settings() {
     for choice in [
         "1. Status",
         "2. Service controls unavailable",
-        "3. Select AirPlay receiver",
+        "3. Choose speaker",
         "4. Test audio (49 seconds)",
         "5. Settings",
         "6. Logs",

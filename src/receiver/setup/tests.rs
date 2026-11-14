@@ -206,7 +206,7 @@ fn failed_playback_reports_guidance_without_reading_success_confirmation() {
     assert!(text.contains("couldn't prepare the audio test"));
     assert!(!text.contains("mock authentication or transmission failure"));
     assert!(text.contains("piair -v setup"));
-    assert!(text.contains("No successful playback test recorded"));
+    assert!(text.contains("Audio test: Failed"));
     assert!(!text.contains("Did you hear the audio?"));
     assert!(!text.contains("Yes, audio works"));
 }
@@ -214,9 +214,9 @@ fn failed_playback_reports_guidance_without_reading_success_confirmation() {
 #[test]
 fn successful_playback_still_requires_user_confirmation_of_audibility() {
     for (input, expected) in [
-        ("1\n", "You confirmed audible output"),
-        ("2\n", "couldn't confirm that sound was heard"),
-        ("3\n", "Audible playback remains unverified"),
+        ("1\n", "Audio test: Passed"),
+        ("2\n", "Audio test: Failed"),
+        ("3\n", "Audio test: Skipped"),
     ] {
         let mut ui = scripted(input);
         playback_feedback(Ok(()), &mut ui, &AtomicBool::new(false)).unwrap();
@@ -449,7 +449,9 @@ fn mock_alsa_missing_devices_rescan_validation_failure_and_explicit_choice() {
             }
         )
         .is_err());
-        assert!(String::from_utf8(ui.out).unwrap().contains(failure));
+        let text = String::from_utf8(ui.out).unwrap();
+        assert!(text.contains("Audio input unavailable"));
+        assert!(text.contains("piair -v setup"));
     }
 }
 #[test]
@@ -702,7 +704,7 @@ fn friendly_approval_is_explicit_and_invalid_canonical_id_never_prompts() {
     let mut ui = scripted("1\n");
     approve_named(&mut loaded, ID, "Living room", &mut ui, &mut Vec::new()).unwrap();
     let text = String::from_utf8(ui.out).unwrap();
-    assert!(text.contains("Approve speaker \"Living room\"?"));
+    assert!(text.contains("Use \"Living room\" as your speaker?"));
     assert!(!text.contains(ID));
     let before = std::fs::read(&loaded.path).unwrap();
     let mut ui = Ui {
@@ -726,7 +728,7 @@ fn normal_wizard_steps_use_plain_labels_and_default_settings() {
     let mut draft = Playback::default();
     let cancel = Arc::new(AtomicBool::new(false));
     // One affirmative input choice, speaker choice, approval, method choice,
-    // session-only warning and selection save, followed by default settings/test.
+    // transient connection consent and selection save, followed by default settings/test.
     let mut ui = scripted("1\n1\n1\n1\n1\n1\n\n\n");
     draft.capture_device = Some(
         select_input_with(
@@ -749,8 +751,24 @@ fn normal_wizard_steps_use_plain_labels_and_default_settings() {
     assert_eq!(draft.threshold_dbfs, -45.0);
     assert_eq!(journal.len(), 2);
     let text = String::from_utf8(ui.out).unwrap();
-    assert!(text.contains("Connect without saving pairing"));
-    assert!(text.contains("does not save a pairing or verify a persistent speaker identity"));
+    assert!(text.contains("Connect without pairing"));
+    assert!(text.contains("Connect without pairing for this session?"));
+    let mut previous = 0;
+    for prompt in [
+        "Choose input",
+        "Choose a speaker:",
+        "Use \"Room\" as your speaker?",
+        "3. Choose connection method",
+        "Connect without pairing for this session?",
+        "Save this speaker and connection method?",
+        "4. Audio settings",
+        "7. Optional audio test",
+    ] {
+        let position = text.find(prompt).unwrap();
+        assert!(position > previous, "{prompt}");
+        previous = position;
+    }
+    assert!(!text.contains("does not verify") && !text.contains("persistent speaker identity"));
     for technical in [
         "OwnTone",
         "SRP",
@@ -788,7 +806,7 @@ fn playback_failure_stages_keep_details_only_in_verbose_output() {
                 .unwrap();
             let text = String::from_utf8(ui.out).unwrap();
             assert!(text.contains(message));
-            assert!(!text.contains("You confirmed audible output"));
+            assert!(!text.contains("Audio test: Passed"));
             for detail in [
                 "SRP",
                 "HAP",
@@ -926,7 +944,7 @@ fn local_ptp_permission_failure_never_blames_speaker_or_requests_audible_confirm
             assert!(text.contains("foreground process"));
             assert!(text.contains("piair start"));
             assert!(text.contains("Do not run PiAir as root"));
-            assert!(text.contains("No successful playback test recorded"));
+            assert!(text.contains("Audio test: Failed"));
             if !detailed {
                 assert!(!text.contains("Check the speaker and network"));
             }
@@ -982,4 +1000,137 @@ fn isolated_candidate_never_offers_optional_service_activation() {
         result: "success".into(),
     };
     assert!(service::activate(&loaded, &expected).is_err());
+}
+
+#[test]
+fn completion_reports_saved_values_observed_startup_and_test_outcome() {
+    let (_dir, mut loaded, rows) = fixture();
+    let mut journal = Vec::new();
+    approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
+    authentication(
+        &loaded,
+        &rows,
+        ID,
+        &mut scripted("1\n1\n1\n"),
+        &mut journal,
+        &Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+    let draft = Playback {
+        capture_device: Some("Saved USB input".into()),
+        receiver_id: Some(ID.into()),
+        authentication: Some(Authentication::OwnToneTransient),
+        ..Default::default()
+    };
+    config::save_playback_checked(
+        &loaded,
+        Some(ID.into()),
+        playback_args(&draft),
+        Some(&allowlist::snapshot(&loaded.path).unwrap()),
+    )
+    .unwrap();
+    let saved = config::load(Some(loaded.path.clone())).unwrap();
+    // The original loaded configuration predates this save.
+    assert_ne!(
+        loaded.config.playback.capture_device,
+        saved.config.playback.capture_device
+    );
+    for (boot, label) in [
+        ("enabled", "Enabled"),
+        ("disabled", "Disabled"),
+        ("enabled-runtime", "Disabled"),
+        ("masked", "Disabled"),
+        ("static", "Unknown (static)"),
+    ] {
+        for outcome in [
+            TestOutcome::Skipped,
+            TestOutcome::Passed,
+            TestOutcome::Failed,
+        ] {
+            let observed = service::Service {
+                unit: "piair@pi.service".into(),
+                status: "inactive".into(),
+                home: "/home/pi".into(),
+                user: "pi".into(),
+                active: "inactive".into(),
+                boot: boot.into(),
+                pid: 0,
+                result: "success".into(),
+            };
+            let text = completion_text(&saved, Ok(observed), outcome).unwrap();
+            assert!(text.contains("Speaker: Room"));
+            assert!(text.contains("Audio input: Saved USB input"));
+            assert!(text.contains("Connection: Without pairing"));
+            assert!(text.contains(&format!("Automatic startup: {label}")));
+            assert!(text.contains(&format!("Audio test: {}", outcome.label())));
+            assert!(!text.contains("unverified") && !text.contains("does not verify"));
+        }
+    }
+    let text = completion_text(
+        &saved,
+        Err(anyhow::anyhow!("no systemd")),
+        TestOutcome::Skipped,
+    )
+    .unwrap();
+    assert!(text.contains("Automatic startup: Unavailable"));
+    assert!(!text.contains("Automatic startup: Enabled"));
+}
+
+#[test]
+fn listening_feedback_reports_only_user_confirmed_success() {
+    for (answer, expected) in [
+        ("1\n", TestOutcome::Passed),
+        ("2\n", TestOutcome::Failed),
+        ("3\n", TestOutcome::Skipped),
+    ] {
+        assert_eq!(
+            playback_feedback(Ok(()), &mut scripted(answer), &AtomicBool::new(false)).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        playback_feedback(
+            Err(anyhow::anyhow!("failed")),
+            &mut scripted(""),
+            &AtomicBool::new(false)
+        )
+        .unwrap(),
+        TestOutcome::Failed
+    );
+    for answer in ["q\n", "", "1"] {
+        assert!(playback_feedback(Ok(()), &mut scripted(answer), &AtomicBool::new(false)).is_err());
+    }
+}
+
+#[test]
+fn enrollment_credential_persistence_requires_its_own_explicit_consent() {
+    for method in [1, 2] {
+        for answer in ["2\n", "\n", "q\n", "", "1"] {
+            let (_dir, mut loaded, mut rows) = fixture();
+            let mut journal = Vec::new();
+            approve(&mut loaded, ID, &mut scripted("1\n"), &mut journal).unwrap();
+            rows[0].services[0]
+                .capabilities
+                .insert("features".into(), "0x80200,0x14200".into());
+            let answers = format!("{method}\n1\n1\n{answer}");
+            let mut ui = scripted(&answers);
+            // Selection persistence is approved, but credential persistence is
+            // declined/cancelled. This must finish before enrollment networking.
+            let result = authentication(
+                &loaded,
+                &rows,
+                ID,
+                &mut ui,
+                &mut journal,
+                &Arc::new(AtomicBool::new(false)),
+            );
+            assert!(result.unwrap_err().is::<Cancelled>());
+            let store = Store::new(&loaded.path).unwrap();
+            assert!(store.selection().unwrap().is_some());
+            assert!(store.credential(ID).unwrap().is_none());
+            assert!(String::from_utf8(ui.out)
+                .unwrap()
+                .contains("Pair with this speaker and save the pairing?"));
+        }
+    }
 }

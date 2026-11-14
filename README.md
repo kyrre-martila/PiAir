@@ -1,7 +1,7 @@
 # PiAir
 
 PiAir is a lightweight Rust CLI application that sends audio from a Raspberry Pi
-ALSA input to one explicitly selected AirPlay receiver. It can start and stop
+ALSA input to one explicitly selected AirPlay speaker. It can start and stop
 playback when audio activity changes, with a simple terminal menu for daily use.
 Licensed under Apache-2.0; the bundled test recording has separate attribution.
 
@@ -29,9 +29,8 @@ piair setup       # Save settings, choose boot startup, optionally test speaker 
 piair             # Open the daily menu (also works over SSH with a TTY)
 ```
 
-Setup guides speaker selection and approval, explicit authentication,
-audio detection settings, an optional 49-second recording test, and optional
-activation of the installed service. See [setup and troubleshooting](docs/SETUP.md).
+Setup guides you through audio input and speaker selection, the connection
+method, audio settings, saving, automatic startup and an optional recording test. See [setup and troubleshooting](docs/SETUP.md).
 Existing configurations and stored credentials remain usable without pairing again.
 
 Setup saves settings before independently offering boot startup and a 49-second
@@ -45,7 +44,7 @@ Running `piair` in a terminal opens the existing menu:
 ```text
 1. Status
 2. Start/Stop PiAir
-3. Select AirPlay receiver
+3. Choose speaker
 4. Test audio (49 seconds)
 5. Settings
 6. Logs
@@ -54,10 +53,10 @@ Q. Exit
 ```
 
 Choice 2 shows **Start PiAir** or **Stop PiAir**, depending on service state.
-Choose **Select AirPlay receiver** to change the single saved receiver. The picker
+Choose **Choose speaker** to change the saved speaker. The picker
 preserves the configured authentication method and reuses compatible credentials;
-a new receiver still needs explicit approval and authentication. If playback is
-running, the menu asks to stop it before changing receivers or testing audio.
+a new speaker still needs explicit approval and authentication. If playback is
+running, the menu asks to stop it before changing speakers or testing audio.
 Incomplete configuration offers the existing setup workflow.
 
 Direct commands are also available:
@@ -79,7 +78,11 @@ user through normal system authorization. Start/stop do not change boot settings
 Separate development builds can inspect the installed service but cannot control
 it; use the installed executable deliberately. Receiver technical details are
 available through `piair receivers` or `piair devices`, outside the friendly-name
-picker. Service state and packet transmission do not prove audible playback.
+picker. Status shows **Service: Running / Playback: Ready** only for a verified
+installed service with a live main process and valid saved settings. Ready means
+PiAir is prepared to handle input; it does not mean audio is streaming. A stopped
+service shows **Playback: Not running**. Use `piair -v status` for service details.
+The audio test passes only when you confirm hearing the recording.
 See [daily use and troubleshooting](docs/DAILY_USE.md) and [systemd](docs/SYSTEMD.md).
 
 ## Update or uninstall
